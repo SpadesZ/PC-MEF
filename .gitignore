@@ -1,0 +1,29 @@
+# secrets — NFR-08：API key 絕不進 repo
+.env
+.env.*
+secrets/
+*.secret.json
+**/opaque_map*.json
+
+# 資料與產物
+data/raw_real/
+data/synthetic/
+artifacts/
+outputs/
+*.npy
+*.exr
+
+# freeze 與 registry 由各 run 自行產生
+freeze/*.lock.json
+registry/*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.venv/

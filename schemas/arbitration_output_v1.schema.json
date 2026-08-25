@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arbitration_output_v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "class_support", "conflict_tag", "evidence_summary"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "class_support": {
+      "type": "object",
+      "required": ["Empty", "Water-filled", "Bubbly", "Misty"],
+      "additionalProperties": false,
+      "properties": {
+        "Empty": { "type": "number", "minimum": 0, "maximum": 100 },
+        "Water-filled": { "type": "number", "minimum": 0, "maximum": 100 },
+        "Bubbly": { "type": "number", "minimum": 0, "maximum": 100 },
+        "Misty": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "conflict_tag": { "type": "string", "enum": ["none", "low", "medium", "high"] },
+    "evidence_summary": { "type": "string", "maxLength": 2000 }
+  }
+}

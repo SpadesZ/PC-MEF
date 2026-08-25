@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "specialist_proposal_v1.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "modality",
+    "class_evidence",
+    "contradictions",
+    "quality_assessment"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "modality": { "type": "string", "enum": ["physics", "visual_semantic"] },
+    "class_evidence": {
+      "type": "object",
+      "required": ["Empty", "Water-filled", "Bubbly", "Misty"],
+      "additionalProperties": false,
+      "properties": {
+        "Empty": { "type": "string", "maxLength": 600 },
+        "Water-filled": { "type": "string", "maxLength": 600 },
+        "Bubbly": { "type": "string", "maxLength": 600 },
+        "Misty": { "type": "string", "maxLength": 600 }
+      }
+    },
+    "contradictions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "maxLength": 400 }
+    },
+    "quality_assessment": { "type": "string", "maxLength": 800 }
+  }
+}

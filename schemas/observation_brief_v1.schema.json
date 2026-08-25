@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "observation_brief_v1.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "observed_facts",
+    "tof_quality",
+    "vision_quality",
+    "missing_evidence"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "observed_facts": {
+      "type": "array",
+      "maxItems": 40,
+      "items": { "type": "string", "maxLength": 400 }
+    },
+    "tof_quality": { "type": "string", "maxLength": 600 },
+    "vision_quality": { "type": "string", "maxLength": 600 },
+    "missing_evidence": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "maxLength": 300 }
+    }
+  }
+}

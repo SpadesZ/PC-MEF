@@ -1,0 +1,225 @@
+# 檔案路徑: configs/base.yaml
+# 模組定位: 全系統最低優先序的基礎設定。
+# 功能說明: 宣告已由規格文件確定的常數與錨點，並以 !required 標記所有尚待教授裁決的數值。
+# 主要責任: 讓「哪些數字已有出處、哪些還沒」在單一檔案內一目了然。
+# 呼叫來源: core.config.load_config 的第一層；module/experiment config 於其上覆蓋。
+# 輸入契約: 本檔為 YAML mapping；!required 標記會被載入成 formal-blocking sentinel。
+# 輸出契約: 供 ResolvedConfig 合併；formal 模式下殘留 !required 會直接拒絕啟動。
+# 安全邊界: 不含任何 secret；API key 只能以 secret_ref 形式出現在 llm config，值走環境變數。
+# 維護提醒: 教授核定某個 !required 之後，填值時必須同時在 NOTES.md 記錄裁決來源與日期。
+# 版本: v0.1.0 / 2026-08-25
+# ----------------------------------------------------------------------------------------------------
+#
+# !required 的意義：該數值尚未由教授核定，任何程式路徑讀到它都會拋 FormalBlockingError。
+# 這是 SRC-PLAN Appendix A Formal-readiness note 與 SRC-SAI Appendix F 的硬性要求：
+# 未核定的 numeric threshold / allocation 必須保持 formal-blocking，禁止實作端自行補值。
+# 詳見 NOTES.md 的 NOTE-005。
+
+project:
+  name: pcmef-research
+  spec_plan: "PC-MEF 實驗計畫 v0.9.7S"
+  spec_sai: "PC-MEF SAI v0.5.0"
+
+# ---------------------------------------------------------------------------
+# 前研究資料錨點（SRC-PLAN §2.1，來源：蔡連興 2026 論文）
+# ---------------------------------------------------------------------------
+real_anchors:
+  geometry:
+    sensor_to_bottle_mm: 50.0      # 約 5 cm
+    bottle_diameter_mm: 57.0       # 約 5.7 cm
+    wall_thickness_mm: 2.0         # 約 0.2 cm
+  distance_anchor_mm:
+    Empty: 100.0
+    Water-filled: 114.0
+    Bubbly: [105.0, 106.0]
+    Misty: [55.0, 85.0]
+  offset_anchor_mm:
+    baseline: 98.61
+    minus_0p1cm: 91.05
+    plus_0p1cm: 88.76
+  # 名目上的 logical count。SRC-SAI §7.9 明文禁止把它當成 final usable N；
+  # 實際可用數量必須由 M0 inventory audit 產出 count_status 後決定。
+  nominal_logical_recordings: 560
+  nominal_images: 1200
+  # 前研究原始資料時間軸約 82 ms/sample（約 12.195 Hz）。
+  # 這是歷史概述值，不是全域精確常數：每筆 recording 的實際 interval
+  # 必須由該筆的 provenance 提供（SRC-SAI §6 measurement_time）。
+  historical_sample_interval_s: 0.082
+
+# ---------------------------------------------------------------------------
+# 資料契約
+# ---------------------------------------------------------------------------
+data:
+  tof_recording_points: 500
+  tof_schema: [distance_mm, ambient_rate_mcps, signal_rate_mcps, sigma_like]
+  class_order: [Empty, Water-filled, Bubbly, Misty]
+  legacy_label_map:
+    nowater: Empty
+    water: Water-filled
+    bubble: Bubbly
+    smoke: Misty
+  # 四個 metric 長度不一致時的預設行為。SRC-SAI §7.5：formal 模式預設 ERROR，
+  # 只有在明確 audit 後才允許 configured crop，且 manifest 必須記錄原長度與裁切。
+  length_mismatch_policy: ERROR
+  crop_to_min_length: false
+
+# ---------------------------------------------------------------------------
+# Real split policy（SRC-PLAN §3.1、SRC-SAI §7.9）
+# ---------------------------------------------------------------------------
+real_split_policy:
+  creation_phase: AFTER_M0_BEFORE_ANY_CALIBRATION
+  split_unit: recording
+  stratification: class
+  # session/time grouping metadata 可用時採 group-wise，否則採 seeded stratified recording split。
+  group_rule: session_group_if_available_else_seeded_stratified_recording
+  redraw_policy: FORBIDDEN_AFTER_LOCK
+  allocation: !required
+    source: "SRC-PLAN §3.1 / SRC-SAI §7.9"
+    reason: "calibration 與 heldout_real 的比例必須由教授核定；不得由 Held-out 結果反推"
+  minimum_per_class: !required
+    source: "SRC-PLAN §3.1"
+    reason: "每類最少 recording 數為 advisor-approved 數值"
+  seed: !required
+    source: "SRC-SAI §7.9"
+    reason: "split seed 一旦鎖定不可重抽，必須是明示的核定值"
+
+# ---------------------------------------------------------------------------
+# E1
+# ---------------------------------------------------------------------------
+e1:
+  # 特徵尺度規則已定：s_f = IQR(calibration-only real canonical values)，
+  # pooled across eligible calibration recordings/classes（SRC-SAI Appendix I2）。
+  feature_scale_rule: calibration_only_pooled_iqr
+  primary_metric: dimensionless_wasserstein
+  perturbation_reference_cm: 0.1
+  scientific_rule:
+    # 預設 PASS 規則三條件（SRC-PLAN §3.2）。任何 advisor-approved 替代規則
+    # 同樣必須在 Held-out 開啟前凍結。
+    macro_mean_delta_ci_lower_bound_gt: 0.0
+    per_feature_class_macro_delta_gte: 0.0
+    distance_trend_consistency: non_degraded
+    bootstrap_replicates: !required
+      source: "SRC-PLAN §3.2 / SRC-SAI Appendix G3 e1_scientific_rule"
+      reason: "paired bootstrap replicate 數必須在 Held-out 開啟前由教授核定並凍結"
+    bootstrap_seed: !required
+      source: "SRC-PLAN §3.2"
+      reason: "bootstrap seed 必須明示以確保可重現"
+
+# ---------------------------------------------------------------------------
+# Perception
+# ---------------------------------------------------------------------------
+perception:
+  tof_backbone: 1d_cnn
+  vision_backbone: mobilenetv2
+  # SRC-SAI §14：train_core 只供 preprocessing/gradient-based fitting，
+  # train_dev 只供 early stopping / checkpoint selection，兩者 family group-disjoint。
+  internal_splits: [train_core, train_dev]
+  min_checkpoint_pairs: 3
+  training_seed_pairs: !required
+    source: "SRC-PLAN §3.4 / SRC-SAI §24"
+    reason: "training_pair_id -> tof/vision seed 的對應必須在 formal 前固定並核定"
+
+# ---------------------------------------------------------------------------
+# Reliability / Gate
+# ---------------------------------------------------------------------------
+reliability:
+  model_family: logistic_regression
+  crossfit_group_by: parent_scene_family
+  crossfit_folds: !required
+    source: "SRC-SAI §15 / §16"
+    reason: "K-fold 的 K 值需核定；folds 依 parent_scene_family group-disjoint"
+
+gate:
+  # 搜尋空間與目標函數已由文件確定（SRC-SAI §16 Hyperparameter selection 表）。
+  search_space: simplex_grid
+  search_step: 0.1
+  objective: validation_worst_condition_macro_f1
+  tie_break: [overall_macro_f1, fewer_nonzero_weights]
+  cross_pair_aggregation: arithmetic_mean
+  # alpha/beta/gamma 的最終值必須由 validation 選出後 freeze，
+  # 不得手填 —— 手填等於跳過整個 gate selection 程序。
+  alpha: !required
+    source: "SRC-SAI §16"
+    reason: "由 validation worst-condition Macro-F1 搜尋選出後才寫入 gate.lock"
+  beta: !required
+    source: "SRC-SAI §16"
+    reason: "同 alpha"
+  gamma: !required
+    source: "SRC-SAI §16"
+    reason: "同 alpha"
+
+# ---------------------------------------------------------------------------
+# Multi-Agent
+# ---------------------------------------------------------------------------
+agents:
+  class_order: [Empty, Water-filled, Bubbly, Misty]
+  schemas:
+    observation_brief: schemas/observation_brief_v1.schema.json
+    specialist_proposal: schemas/specialist_proposal_v1.schema.json
+    arbitration_output: schemas/arbitration_output_v1.schema.json
+  task_codes: [observation_agent, physics_agent, visual_semantic_agent, arbitration_agent]
+  # SRC-SAI §18：representation mode 由 Model/Gate Validation Split 決定，
+  # 決定後 formal scenarios 全程一致。
+  representation_mode: !required
+    source: "SRC-SAI §18"
+    reason: "FULL_500x4 或 FIXED_SUMMARY 取決於 token budget 實測，需在 validation 後鎖定"
+  retry:
+    max_attempts: !required
+      source: "SRC-SAI §28 / FR-013"
+      reason: "bounded retry 次數需核定；耗盡後一律 ABORT FORMAL RUN，不得 drop case"
+
+# ---------------------------------------------------------------------------
+# E2
+# ---------------------------------------------------------------------------
+e2:
+  conditions: [Clean, Vision-degraded, ToF-degraded, Conflict-Stress]
+  method_groups: [G1, G2, G3, G4, G5]
+  primary_metric: worst_condition_macro_f1
+  # 100 / 25-per-class 在 SRC-PLAN §3.3 明確標示為 "initial coverage target"，
+  # final N 必須由 e2_pilot 依 frozen sizing rule 決定並鎖入 e2_sample_size.lock。
+  initial_coverage_target_per_condition: 100
+  initial_class_balance_per_condition: 25
+  final_n_per_class: !required
+    source: "SRC-PLAN §3.3 / SRC-SAI FR-023"
+    reason: "只能由 e2_pilot 依預註冊 sizing rule 決定，禁止查看 G5-G4 delta 後回填"
+  severity_allocation: !required
+    source: "SRC-PLAN §3.3"
+    reason: "Low/Mid/High 配額由 pilot 決定後凍結"
+
+conflict_operational:
+  # 規則形式已定：OperationalConflict = [argmax(p_T) != argmax(p_V)] OR [D >= delta]。
+  # Conflict-Stress 是 generation condition 名稱，不等於實際發生跨模態衝突。
+  rule: "argmax_mismatch_or_d_ge_delta"
+  delta: !required
+    source: "SRC-PLAN §3.3 / SRC-SAI Appendix I4"
+    reason: "delta 只能由 model_gate_validation 凍結，且不得用於篩選 formal IDs"
+
+# ---------------------------------------------------------------------------
+# 統計
+# ---------------------------------------------------------------------------
+statistics:
+  resample_unit: scenario_id
+  stratification: condition
+  confidence_level: 0.95
+  pair_aggregation: mean_over_training_pairs
+  ece_semantics: score_calibration_diagnostic_only
+  bootstrap_replicates: !required
+    source: "SRC-SAI §24 / Appendix I6"
+    reason: "B 與 aggregation rule 必須凍結於 statistics_config.lock"
+  bootstrap_seed: !required
+    source: "SRC-SAI §24"
+    reason: "resample indices hash 需可重現"
+
+# ---------------------------------------------------------------------------
+# 路徑
+# ---------------------------------------------------------------------------
+paths:
+  raw_real: data/raw_real
+  inventory: data/inventory
+  canonical: data/canonical
+  synthetic: data/synthetic
+  splits: data/splits
+  freeze: freeze
+  artifacts: artifacts
+  outputs: outputs
+  registry: registry
