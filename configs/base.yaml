@@ -64,6 +64,44 @@ real_anchors:
   # 這是歷史概述值，不是全域精確常數：每筆 recording 的實際 interval
   # 必須由該筆的 provenance 提供（SRC-SAI §6 measurement_time）。
   historical_sample_interval_s: 0.082
+  # SRC-NOTION 的三份推論腳本皆寫 SAMPLE_INTERVAL = 0.02，但那是 deployment
+  # 迴圈的 sleep 值，且迴圈內另有 get_sensor_data() 的 time.sleep(0.01) 與
+  # I²C 讀取開銷，實際達成間隔必然大於 0.02 s。此值僅作為 SRC-D03 的佐證記錄，
+  # 不得用來覆蓋前研究 dataset 的時間軸 provenance。
+  deployment_script_sample_interval_s: 0.02
+
+# ---------------------------------------------------------------------------
+# 前研究來源程式的觀察事實（SRC-NOTION 直接讀碼，2026-08-25）
+# ---------------------------------------------------------------------------
+legacy_source_facts:
+  window_size: 500              # WINDOW_SIZE
+  total_windows_per_class: 140  # TOTAL_WINDOWS
+  features_per_sample: 4        # FEATURES_PER_SAMPLE（四參數腳本）
+  # 四個 metric 分資料夾存放，一筆 recording 拆成四個 CSV。
+  directory_layout: "<condition>/<metric_folder>/*.csv"
+  metric_folders: [distance, ambient, signal, sigma]
+  csv_data_column_index: 1      # df.iloc[:, 1]
+  # 對齊方式：natural sort 後依位置配對，無檔名比對（NOTE-010）。
+  legacy_alignment_method: positional_natural_sort
+  registers:
+    signal_rate_mcps: 0x1A
+    ambient_rate_mcps: 0x1C
+    # SRC-D01：四參數/兩參數用 0x1E，單一參數用 0x18。不得預設其一為正確。
+    sigma_candidates: [0x18, 0x1E]
+  scaling:
+    rate_divisor: 128.0
+    sigma_divisor: 65536.0
+
+sigma_provenance:
+  # 由 M0 audit 以 acquisition code + raw CSV range 交叉比對後填入，
+  # 不是教授裁決項，但同樣 formal-blocking：E1-G08 要求 status=RESOLVED
+  # 才允許四特徵 E1 primary。
+  resolved_register: !required
+    source: "SRC-PLAN Appendix C SRC-D01 / SRC-SAI E1-G08"
+    reason: "來源同時存在 0x18 與 0x1E；必須由 M0 register evidence 決定，不得硬編碼"
+  status: !required
+    source: "SRC-SAI E1-G08"
+    reason: "RESOLVED 或 UNRESOLVED 由 M0 audit 產出，未解析不得計算四特徵 primary"
 
 # ---------------------------------------------------------------------------
 # 資料契約

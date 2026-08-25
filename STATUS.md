@@ -37,7 +37,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 
 ## Batch 1 已完成內容（2026-08-25）
 
-測試：**288 passed**（`py -3.10 -m pytest`）
+測試：**300 passed**（`py -3.10 -m pytest`）
 
 檔頭與 NOTE 規範：全部原始檔已改為十欄位維護契約格式，
 決策記錄移至 `docs/NOTES.md` 並補齊五欄位；
@@ -67,7 +67,33 @@ formal_config.lock 將保存其 SHA-256）、`observation_brief_v1`、
 
 ---
 
-## 待教授裁決事項（formal-blocking，共 17 項）
+## SRC-NOTION 一手來源稽核（2026-08-25）
+
+直接讀取 Notion「研究交接」的原始程式碼，與 Batch 1 逐項比對。
+
+**確認正確（一手證據）**
+
+| 項目 | 一手證據 | 結果 |
+|---|---|---|
+| 四特徵 canonical 順序 | `extract_features_from_window()` 明寫 `distance, ambient, signal, sigma`，並附作者註解「根據 Edge Impulse 訓練時的特徵順序一致」 | NOTE-001 成立 |
+| 標籤映射 | `{'nowater':'Empty','water':'Water-filled','bubble':'Bubbly','smoke':'Misty'}` | 逐字相符 |
+| 500×4 形狀 | `WINDOW_SIZE = 500`、`FEATURES_PER_SAMPLE = 4` | 相符 |
+| 140 recordings/class | `TOTAL_WINDOWS = 140` | 相符（4×140=560 nominal） |
+| physical > logical | 四 metric 分檔 → 560×4 = 2240 實體檔 | 設計正確 |
+| 82ms vs 0.02s | 三份腳本皆 `SAMPLE_INTERVAL = 0.02`，且迴圈另有 `sleep(0.01)` | SRC-D03 屬實 |
+
+**發現的 Batch 1 缺口（已修）**
+
+| 缺口 | 事實 | 處置 |
+|---|---|---|
+| 無 metric 對齊 provenance | legacy 合併程式**純依排序位置**配對四個 metric 檔，無檔名比對；某資料夾少檔只記 missing 不中斷 → 該點之後全部靜默錯位 | 新增 `MetricAlignment`，real case 強制逐 metric 記錄原檔名/列數/SHA-256，四檔列數不一致即拒絕 |
+| 無 Sigma provenance 強制 | `0x1E`（四參數、兩參數）與 `0x18`（單一參數）並存；scaling 三份一致為 `/65536.0` | real case 強制 `provenance.sigma_status`；`sigma_provenance` 兩項列入 formal-blocking |
+
+決策記錄見 `docs/NOTES.md` NOTE-010。
+
+---
+
+## 待教授裁決事項（formal-blocking，共 19 項）
 
 執行 `py -3.10 -m pcmef.cli config check` 可隨時取得最新清單。
 這些數值依 SRC-PLAN Appendix A 與 SRC-SAI Appendix F **禁止實作端自行補值**，
@@ -84,6 +110,7 @@ formal_config.lock 將保存其 SHA-256）、`observation_brief_v1`、
 | E2 | `final_n_per_class`、`severity_allocation` |
 | Conflict | `delta` |
 | Statistics | `bootstrap_replicates`、`bootstrap_seed` |
+| Sigma provenance | `resolved_register`、`status`（非教授裁決，由 M0 audit 產出，但同樣 formal-blocking） |
 
 對應 SRC-PLAN Appendix A 的六個教授討論題目，其中第 1、5 題直接決定上表的
 Real split 與 E2 兩組數值。

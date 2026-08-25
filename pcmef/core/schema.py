@@ -39,6 +39,7 @@ import numpy as np
 
 from pcmef.core.constants import (
     CLASS_ORDER,
+    SIGMA_STATUS_VALUES,
     SPLIT_ROLES,
     TOF_RECORDING_SHAPE,
     TOF_SCHEMA,
@@ -51,6 +52,7 @@ __all__ = [
     "ClassLabel",
     "TruthVisibility",
     "MeasurementTime",
+    "MetricAlignment",
     "CountStatus",
     "CanonicalCase",
 ]
@@ -149,6 +151,44 @@ class MeasurementTime:
 
 
 @dataclass(frozen=True)
+class MetricAlignment:
+    """一筆 recording 中，某個 metric 的來源檔案 provenance。
+
+    NOTE(NOTE-010): legacy 合併程式把四個 metric 分別存在
+    <condition>/<metric>/*.csv，然後**純粹依排序後的位置**對齊 ——
+    第 N 個 distance 檔案就被當成第 N 個 sigma 檔案的同一次測量，
+    中間沒有任何檔名比對，而且某個資料夾檔案較少時只會被記為 missing 而不中斷。
+    只要任一 metric 資料夾少一個檔，該點之後全部靜默錯位。
+
+    因此 canonical 化時必須逐 metric 保存原始檔名與列數，
+    讓對齊變成可稽核的事實而不是隱含假設（SRC-SAI §7.4 measurement_alignment.csv）。
+    """
+
+    metric: str
+    source_filename: str
+    row_count: int
+    source_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.metric not in TOF_SCHEMA:
+            raise SchemaViolation(
+                f"metric {self.metric!r} must be one of {TOF_SCHEMA}"
+            )
+        if not self.source_filename:
+            raise SchemaViolation(
+                f"metric {self.metric!r} requires the original source filename; "
+                "positional alignment alone is not auditable"
+            )
+        if not isinstance(self.row_count, int) or self.row_count <= 0:
+            raise SchemaViolation(
+                f"metric {self.metric!r} row_count must be a positive int, "
+                f"got {self.row_count!r}"
+            )
+        if not self.source_sha256:
+            raise SchemaViolation(f"metric {self.metric!r} requires source_sha256")
+
+
+@dataclass(frozen=True)
 class CountStatus:
     """real 資料的五層計數帳（SRC-PLAN §3.1、SRC-SAI §7）。
 
@@ -222,6 +262,7 @@ class CanonicalCase:
     optical_transient_time_axis_path: str | None = None
     scenario_params: dict[str, Any] | None = None
     count_status: CountStatus | None = None
+    metric_alignment: tuple[MetricAlignment, ...] | None = None
     tof_schema: tuple[str, ...] = field(default=TOF_SCHEMA)
 
     def __post_init__(self) -> None:
@@ -296,10 +337,53 @@ class CanonicalCase:
                     "synthetic cases require scenario_params "
                     "(geometry/medium/light/degradation/seed)"
                 )
-        if self.source_role is SourceRole.REAL_ANCHOR and self.count_status is None:
+        if self.source_role is SourceRole.REAL_ANCHOR:
+            if self.count_status is None:
+                raise SchemaViolation(
+                    "real cases require count_status; usable N must be traceable to "
+                    "the M0 inventory audit and must never be hard-coded"
+                )
+            self._check_metric_alignment()
+            self._check_sigma_provenance()
+
+    def _check_metric_alignment(self) -> None:
+        """real recording 必須逐 metric 保存來源檔名（NOTE-010）。"""
+        if self.tof_sequence is None and self.tof_sequence_path is None:
+            return
+        if not self.metric_alignment:
             raise SchemaViolation(
-                "real cases require count_status; usable N must be traceable to the "
-                "M0 inventory audit and must never be hard-coded"
+                f"real recording {self.case_id} requires metric_alignment; the legacy "
+                "merge aligns four separate metric folders purely by sorted position, "
+                "so the per-metric source filenames must be recorded to make that "
+                "alignment auditable"
+            )
+        metrics = [entry.metric for entry in self.metric_alignment]
+        if sorted(metrics) != sorted(TOF_SCHEMA):
+            raise SchemaViolation(
+                f"metric_alignment must cover exactly {TOF_SCHEMA}, got {metrics}"
+            )
+        row_counts = {entry.row_count for entry in self.metric_alignment}
+        if len(row_counts) != 1:
+            raise SchemaViolation(
+                f"metric_alignment row counts disagree across metrics: "
+                f"{ {entry.metric: entry.row_count for entry in self.metric_alignment} }. "
+                "A length mismatch means the four metric files are not the same "
+                "measurement; it must be logged in the exclusion ledger, not cropped."
+            )
+
+    def _check_sigma_provenance(self) -> None:
+        """四特徵 E1 primary 前必須有明示的 Sigma provenance 狀態（SRC-SAI E1-G08）。"""
+        status = self.provenance.get("sigma_status")
+        if status is None:
+            raise SchemaViolation(
+                f"real case {self.case_id} provenance must declare sigma_status "
+                f"(one of {SIGMA_STATUS_VALUES}); the source uses two different "
+                "registers (0x18 and 0x1E) for Sigma, so the value's meaning cannot "
+                "be assumed"
+            )
+        if status not in SIGMA_STATUS_VALUES:
+            raise SchemaViolation(
+                f"sigma_status must be one of {SIGMA_STATUS_VALUES}, got {status!r}"
             )
 
     # -- 匯出 -------------------------------------------------------------

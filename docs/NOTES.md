@@ -295,6 +295,71 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-010 四個 metric 分檔存放且靠位置對齊，必須逐 metric 保存來源檔名
+
+**決策日期**：2026-08-25
+
+**適用範圍**：`pcmef/core/schema.py` 的 `MetricAlignment` 與
+`CanonicalCase._check_metric_alignment()` / `_check_sigma_provenance()`；
+`pcmef/core/constants.py` 的 `LEGACY_METRIC_FOLDERS`、`LEGACY_CSV_COLUMN_TITLES`、
+`SIGMA_REGISTER_CANDIDATES`；未來的 `adapters/legacy_csv.py`。
+
+**決策**：
+1. `source_role=real_anchor` 且帶 ToF 的 case 必須提供 `metric_alignment`，
+   逐 metric 記錄原始檔名、列數與來源 SHA-256，且四個 metric 的列數必須一致。
+2. real case 的 `provenance` 必須明示 `sigma_status`（RESOLVED / UNRESOLVED）。
+   canonical 化階段允許 UNRESOLVED，阻擋點在 E1-G08 而非此處。
+
+**原因**：2026-08-25 直接讀 SRC-NOTION 的原始程式後確認三件事實，
+這些在 SRC-PLAN 與 SRC-SAI 中只被概括描述，實際情況更嚴重：
+
+其一，資料組織是 `<condition>/<metric_folder>/*.csv` —— 一筆邏輯 recording 的
+四個特徵被拆成四個獨立檔案分開存放。合併程式的對齊邏輯是：
+
+```python
+for measurement_idx in range(max_files):
+    for metric_folder, column_name in metrics.items():
+        if measurement_idx < len(all_metric_files[metric_folder]):
+            csv_filename, file_path = all_metric_files[metric_folder][measurement_idx]
+```
+
+**純粹依 natural sort 後的位置對齊，沒有任何檔名比對**；而且某個資料夾檔案較少時，
+`if measurement_idx < len(...)` 只會讓該 metric 被記為 missing 而不中斷。
+只要任一 metric 資料夾少一個檔（或多一個暫存檔），該索引之後的所有 recording
+都會靜默錯位 —— distance 來自第 57 次測量，sigma 來自第 58 次。
+這種錯位不會產生 NaN、不會超出 range、不會有任何症狀，
+只會讓 E1 的四特徵 Wasserstein 與 perception 的輸入同時失真。
+
+這正是 SRC-SAI §7.4 要求 `measurement_alignment.csv` 的原因，但該節只說「另保存
+每個 metric 的原 filename」，沒有說明後果；實際看過程式碼才知道失效模式是靜默的。
+
+其二，Sigma register 在三份推論程式中不一致：四參數與兩參數用 `0x1E`，
+單一參數用 `0x18`，三者 scaling 皆為 `/65536.0`（Signal/Ambient 則一致為
+`0x1A`/`0x1C` 加 `/128.0`）。值得注意的是 `0x18` 只出現在
+`FEATURES_PER_SAMPLE = 1`（只用 distance）的腳本裡，也就是該常數所讀到的 sigma
+從未進入模型，因此很可能從未被驗證過。但這**不能**作為「0x1E 就是對的」的證據 ——
+dataset 是由當時的採集腳本產生的，而那份腳本不在這三份之中。
+因此系統只記錄兩個候選值，不預設其一。
+
+其三，`sigma_mm = sigma_raw / 65536.0` 這個 scaling 三份一致，
+所以 SRC-D02 的爭議點在 register 而非 divisor。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/schema/test_canonical_case_and_ids.py -k "metric_alignment or sigma or notion or legacy_csv or metric_folders"
+```
+涵蓋：缺 alignment 被拒、metric 不齊被拒、四檔列數不一致被拒、
+缺 sigma_status 被拒、UNRESOLVED 仍可 canonical 化、
+以及 canonical 順序與原始 flatten 程式碼的逐字比對。
+
+**維護邊界**：四個 metric 列數不一致時一律拒絕，**不得靜默裁切到最短長度**。
+SRC-SAI §7.5 允許在明確 audit 後以 `configured crop` 處理，
+但那必須是 adapter 層的顯式決策並記錄原長度，不是 schema 層的預設行為。
+
+相關：[NOTE-001]
+
+---
+
 ## NOTE-009 Synthetic scenario ID 的 condition token 採完整拼寫
 
 **決策日期**：2026-08-25

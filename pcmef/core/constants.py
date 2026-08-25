@@ -98,6 +98,36 @@ TOF_DISPLAY_ORDER: tuple[str, ...] = (
 # 這一欄不得被稱為「真實 VL53L0X internal Sigma」（SRC-SAI §10 禁止做法）。
 LEGACY_SIGMA_COLUMN_ALIAS: str = "sigma_mm_or_surrogate"
 
+# legacy 合併程式輸出的 CSV 欄位標題（SRC-NOTION「合併csv、資料後處理」column_order）。
+# 順序與 TOF_SCHEMA 一致，供 LegacyCSVAdapter 比對來源欄名。
+LEGACY_CSV_COLUMN_TITLES: tuple[str, ...] = (
+    "Distance (mm)",
+    "Ambient Rate (MCPS)",
+    "Signal Rate (MCPS)",
+    "Sigma (mm)",
+)
+
+# legacy 原始資料的目錄層級：<condition>/<metric_folder>/*.csv。
+# 一筆邏輯 recording 被拆成四個 metric 檔分開存放，這是 physical_source_files
+# 可以大於 nominal_logical_recordings 的原因（SRC-NOTION 合併程式）。
+LEGACY_METRIC_FOLDERS: tuple[str, ...] = ("distance", "ambient", "signal", "sigma")
+
+# NOTE(NOTE-010): Sigma register 在 SRC-NOTION 三份推論程式中不一致。
+# 四參數與兩參數用 0x1E，單一參數用 0x18；三者 scaling 皆為 /65536.0。
+# 此處僅記錄「已觀察到的候選值」，不代表 dataset 實際採用哪一個 ——
+# 那必須由 M0 的 acquisition code + raw CSV range 交叉比對後決定。
+SIGMA_REGISTER_CANDIDATES: tuple[int, ...] = (0x18, 0x1E)
+SIGMA_RAW_SCALE_DIVISOR: float = 65536.0
+RATE_RAW_SCALE_DIVISOR: float = 128.0
+
+# 四特徵 E1 primary 的前置條件（SRC-SAI E1-G08）。
+SIGMA_STATUS_RESOLVED: str = "RESOLVED"
+SIGMA_STATUS_UNRESOLVED: str = "UNRESOLVED"
+SIGMA_STATUS_VALUES: tuple[str, ...] = (
+    SIGMA_STATUS_RESOLVED,
+    SIGMA_STATUS_UNRESOLVED,
+)
+
 
 def tof_index(feature_name: str) -> int:
     """回傳 ToF 特徵在 canonical array 中的 column index；未知欄位 fail-fast。"""
