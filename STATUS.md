@@ -1,8 +1,67 @@
 # PC-MEF Research System — 進度真相
 
-本檔是進度的唯一真相來源。聊天訊息裡的說明不算完成。
+本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
+刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
 最後更新：2026-08-26
+
+---
+
+## 接手指南（HANDOFF）
+
+冷啟動接手時先看這一節，五分鐘內能跑起來。
+
+### 環境
+
+```powershell
+py -3.10 -m pip install -e ".[dev,simulation]"
+winget install --id LLVM.LLVM          # drjit 的 LLVM 後端需要
+$env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+```
+
+**三個不查會踩到的坑：**
+
+1. **一律用 `py -3.10`。** PATH 上的 `python` 是 3.12 且沒裝相依。
+2. **`LLVM-C.dll` 必須存在且在 PATH 上。** drjit 執行期動態載入它，
+   但套件**不內含**（只有 `drjit-core.dll`）。缺了會看到
+   `jitc_llvm_init(): LLVM API initialization failed`，
+   且 `llvm_ad_rgb` variant 無法使用。
+3. **本機無 NVIDIA GPU**（Intel Iris Xe），`cuda_ad_rgb` 永遠不可用，
+   固定使用 `llvm_ad_rgb`。
+
+### 常用指令
+
+```powershell
+py -3.10 -m pytest                                   # 全部測試（約 80 秒）
+py -3.10 -m pcmef.cli config check                   # 待教授裁決的 19 項
+py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
+py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
+py -3.10 -m pcmef.cli provenance resolve-sigma       # SRC-D01/D02 證據
+py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inventory
+```
+
+### 目前卡在哪
+
+| 阻塞 | 影響 | 解法 |
+|---|---|---|
+| 真實 ToF 只剩窗口 Mean/Std | E1 的 (500,4) 契約 | 去樹莓派 `/home/pi/` 撈原始 CSV，或教授裁決改走彙總路線 |
+| Sigma register 未定（0x18 vs 0x1E） | E1-G08、四特徵 primary | 需**採集當時的腳本**，不是已知那三份推論腳本 |
+| 19 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
+
+### 動手前必讀
+
+- `docs/NOTES.md` — 12 則決策記錄。**改動前先查有沒有對應 NOTE**，
+  許多看似多餘的設計都是刻意的（例如子行程隔離、檔名鍵對齊、
+  `!required` sentinel）。
+- `tests/test_repo_integrity.py` — 檔頭十欄位與 NOTE 引用的自動稽核。
+  新增檔案沒補齊欄位、或 `驗證方式` 指向不存在的檔案，都會讓 CI 失敗。
+
+### 三條不可協商的紅線
+
+1. 未核定數值一律 `!required`，**禁止補預設值**（NOTE-005）。
+2. Provider 只能看到 opaque evidence，class/condition/severity/檔名路徑
+   一律不得進入 InferencePayload（NOTE-003、NOTE-004）。
+3. Lock 不可覆寫、不可跳步；內容變更必須開新 run。
 
 ---
 
@@ -268,6 +327,31 @@ Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的�
 Python 執行環境：`py -3.10`（3.10.11，numpy 2.2.6 / scipy 1.15.3 / pandas 2.3.3
 / PyYAML 6.0.3 / pytest 9.0.3 已就緒）。
 注意 PATH 上的 `python` 指向 3.12 且缺相依，一律使用 `py -3.10`。
+
+---
+
+## 待教授裁決：E1 是否改走「彙總統計量 + 相同滑動窗口」
+
+這是目前唯一影響 **claim 強度**的待決事項，與上表 19 項數值性質不同。
+
+**背景**：真實 ToF 只剩窗口 Mean/Std，原始 500 點序列不存在（NOTE-011）。
+
+**提案做法**：synthetic 算出 500 點後套用**完全相同的**滑動窗口
+（window=10 / step=5 → 99 窗口）取 Mean/Std，再與真實側比 Wasserstein。
+兩側處理一致，因此比較本身合法。
+
+**三個代價**：
+
+1. `e1_scientific_rule.lock` 的措辭必須在 Held-out 開啟**前**改寫 ——
+   不再是「500 點行為的分佈」而是「窗口統計量的分佈」。
+2. Secondary 的 temporal variability 降為 window-level。
+3. **平均使分佈變窄**：10 點平均把 SD 壓約 √10，兩側分佈都變窄 →
+   Wasserstein 距離變小 → **fidelity 測試比原設計容易通過**。
+   這不是造假，但若不明寫，等於在較寬鬆的尺規上宣稱校準成功。
+
+**替代路徑**：取得樹莓派上的原始逐 recording CSV，照原規格執行。
+
+實作端不會自行選邊：這改變 E1 claim 的範圍與強度，屬研究主張層級決定。
 
 ---
 
