@@ -441,21 +441,55 @@ py -3.10 -m pytest tests/simulation/test_controller.py -k exit -v
 
 ---
 
-## NOTE-011 前研究原始 ToF 500 點序列未留存，只剩滑動窗口 Mean/Std
+## NOTE-011 原始 ToF 500 點序列的遺失與復原
 
-**決策日期**：2026-08-26
+**決策日期**：2026-08-26（同日先判定遺失、後判定復原）
 
 **適用範圍**：M0 資料可用性判定；E1 的 Primary/Secondary 指標定義；
-`adapters/legacy_csv.py` 的適用範圍；`configs/base.yaml` 的
-`real_anchors.historical_sample_interval_s`。本條目無對應程式標記，屬資料現況記錄。
+`adapters/legacy_csv.py`、`adapters/legacy_kg.py`、`adapters/edge_impulse.py`
+三個 reader 的適用範圍。
+
+> **狀態：已復原。** 取得 Edge Impulse 完整 dataset export 後，
+> **560 筆 500×4 原始序列全數可用**，`CanonicalCase` 的 (500,4) 契約
+> 由真實資料滿足，E1 **可照原規格進行，不需降級為窗口統計量**。
+> 下方原始判定的第 1、2 點因此撤銷；第 3 點仍成立且更為必要。
 
 **決策**：
-1. 承認**真實 ToF 的四特徵 500 點原始序列不存在**，M0 只能以滑動窗口
-   Mean/Std 作為 real 側證據；`CanonicalCase.tof_sequence` 的 (500,4) 契約
-   無法由真實資料滿足。
-2. E1 若要以現存資料進行，synthetic 側必須套用**完全相同的滑動窗口處理**後才比較；
-   此變更必須寫入 `e1_scientific_rule.lock`，不得沿用「500 點分佈比較」的措辭。
-3. 取樣間隔一律由該筆 recording 推導，**三個文件值皆不得作為預設**。
+1. ~~承認真實 ToF 的四特徵 500 點原始序列不存在，M0 只能以滑動窗口 Mean/Std
+   作為 real 側證據~~ —— **已撤銷**，見「復原紀錄」。
+2. ~~E1 若要進行，synthetic 側必須套用相同滑動窗口處理，並改寫
+   `e1_scientific_rule.lock` 的措辭~~ —— **已撤銷**，不再需要此妥協。
+3. 取樣間隔一律由該筆 recording 推導，**三個文件值皆不得作為預設**。此點成立。
+
+---
+
+### 復原紀錄
+
+來源：`andycohen-project-1-export 2.zip`（Edge Impulse 官方 dataset export，
+由擁有者自行下載）。逐檔驗證 560 個 JSON，**0 筆結構異常**：
+
+| 核對項 | 實測 |
+|---|---|
+| 樣本總數 | 560（training 448 / testing 112） |
+| 每類 | Empty / Water-filled / Bubbly / Misty 各 140（112 + 28） |
+| measurement 編號 | 每類 1–140 **完整無缺號** |
+| 每筆形狀 | 560/560 皆為 **500 × 4** |
+| 欄序 | 560/560 皆為 Distance → Ambient → Signal → Sigma |
+| interval_ms | 560/560 皆為 **82.00001312**（單一值） |
+| 500 × 82.00001312 ms | **41.0000 s** |
+| 448 × 41 s | 18,368 s = **5h 6m 8s**（與 Edge Impulse 畫面一秒不差） |
+
+**與獨立來源交叉驗證**：與先前自 Google Drive 取得的 Kaleidagraph 窗口統計量
+比對 16 個 class×feature 組合，**全部吻合到小數第四位**（相對差 0.00%）。
+兩個來源彼此獨立，因此可互為佐證。四類距離平均
+（Empty 100.91 / Water 113.87 / Bubbly 105.57 / Misty 79.51 mm）
+亦與 SRC-PLAN §2.1 的錨點相符。
+
+**邊界**：這是 Edge Impulse ingest 後再匯出的 JSON，**不是**硬碟上
+byte-for-byte 的原始 CSV。數值序列、label、train/test 切分、interval
+與 measurement 編號都保存了，但匯出時四捨五入到**四位小數**——
+這一點在 Sigma divisor 的量化檢定中直接影響可判定範圍（見 [NOTE-010]）。
+reader 因此仍逐筆驗證形狀與欄序，不因為「官方匯出」就跳過。
 
 **原因**：2026-08-26 取得 Drive「實驗交接」資料夾（擁有者 m90099457，
 共享給本人）後逐檔盤點，結果如下。
@@ -563,11 +597,45 @@ for measurement_idx in range(max_files):
 
 其二，Sigma register 在三份推論程式中不一致：四參數與兩參數用 `0x1E`，
 單一參數用 `0x18`，三者 scaling 皆為 `/65536.0`（Signal/Ambient 則一致為
-`0x1A`/`0x1C` 加 `/128.0`）。值得注意的是 `0x18` 只出現在
-`FEATURES_PER_SAMPLE = 1`（只用 distance）的腳本裡，也就是該常數所讀到的 sigma
-從未進入模型，因此很可能從未被驗證過。但這**不能**作為「0x1E 就是對的」的證據 ——
-dataset 是由當時的採集腳本產生的，而那份腳本不在這三份之中。
-因此系統只記錄兩個候選值，不預設其一。
+`0x1A`/`0x1C` 加 `/128.0`）。
+
+**2026-08-26 修正：此項已由真實資料解出為 `0x18`，且先前的直覺是錯的。**
+
+當時（以及一份外部摘要）的推論是：「四參數腳本宣告 0x1E 而它真的用到 sigma，
+所以 0x1E 是高可信候選；0x18 只出現在沒用到 sigma 的單參數腳本，
+可能是沒清乾淨的 legacy constant。」**這個推論方向完全相反。**
+
+取得 Edge Impulse 完整匯出（560 筆 × 500 列 = 280,000 列真實觀測）後做排除檢驗：
+若 sigma 欄讀自存放測距結果的暫存器，則 `sigma × 65536` 必須等於同一筆的
+`distance`（同一個 16-bit 讀值被除了兩次不同的數）。實測：
+
+| 檢驗 | 假設成立應為 | 實測 |
+|---|---|---|
+| `sigma×65536` 等於 distance 的比例 | 100% | **0.0000%** |
+| 相關係數 | +1.0 | **−0.476** |
+| 隱含 raw 值域 | 43–118（distance） | **15473–55883** |
+| 量級比 | 1.0 | **298.5** |
+
+因此 sigma 欄**不是**從存放測距值的暫存器讀來的。而 `0x1E` 正是 VL53L0X
+result 區塊中的 final range（自 `0x14` 起算 offset 10–11），
+故 `0x1E` 被排除，候選只剩 `0x18`。
+
+**這反過來說明那幾支推論腳本有 bug**：四參數與兩參數腳本把 final range
+當成 sigma 讀，再除以 65536，得到約 0.0015 mm 的假 sigma。
+單參數腳本宣告的 `0x18` 才是對的 —— 它只是剛好沒用到那個值。
+
+**這不是「挑一個」而是「刪到剩一個」**：前者需要理由，後者需要反證，
+而反證已經有了。實作為 `provenance/sigma.rule_out_range_register()`。
+
+同時 divisor 也由量化步長檢定確定為 `/65536`：`sigma × 128` 的最大殘差
+0.4992 遠超匯出四位小數所容許的 0.0064，故 `/128` 被排除；
+`/1` 因觀測值非整數被排除。注意 `/65536` 本身**無法**由量化檢定證明
+（1/65536 = 1.5e-5 比匯出精度 1e-4 還細，量化痕跡已被 rounding 抹掉），
+它是刪除其餘候選後的唯一倖存者。
+
+**保留條件**：採集腳本本身仍未取得。上述為資料反推的結論；
+若日後取得採集腳本且與此矛盾，以腳本為準並重新 freeze。
+`configs/base.yaml` 的 `acquisition_script_obtained: false` 記錄此狀態。
 
 其三，`sigma_mm = sigma_raw / 65536.0` 這個 scaling 三份一致，
 所以 SRC-D02 的爭議點在 register 而非 divisor。

@@ -101,15 +101,21 @@ legacy_source_facts:
     sigma_divisor: 65536.0
 
 sigma_provenance:
-  # 由 M0 audit 以 acquisition code + raw CSV range 交叉比對後填入，
-  # 不是教授裁決項，但同樣 formal-blocking：E1-G08 要求 status=RESOLVED
-  # 才允許四特徵 E1 primary。
-  resolved_register: !required
-    source: "SRC-PLAN Appendix C SRC-D01 / SRC-SAI E1-G08"
-    reason: "來源同時存在 0x18 與 0x1E；必須由 M0 register evidence 決定，不得硬編碼"
-  status: !required
-    source: "SRC-SAI E1-G08"
-    reason: "RESOLVED 或 UNRESOLVED 由 M0 audit 產出，未解析不得計算四特徵 primary"
+  # 已由 M0 audit 以 280,000 列真實觀測值解出（NOTE-010 v2）。
+  # 兩者都不是猜的，是「刪到剩一個」：
+  #
+  #  divisor /65536 —— 量化步長檢定。sigma x 128 的最大殘差 0.4992 遠超
+  #    匯出四位小數的容差 0.0064，因此 /128 被排除；/1 因觀測值非整數被排除。
+  #  register 0x18 —— 排除檢驗。若 sigma 欄讀自存放測距值的暫存器，
+  #    sigma x 65536 應等於同筆 distance；實測零匹配、相關 -0.476、
+  #    量級差 298 倍，故 0x1E（final range）被排除，候選只剩 0x18。
+  resolved_register: 0x18
+  status: RESOLVED
+  evidence_artifact: provenance/sigma_resolution.json
+  resolved_by: m0_audit_edge_impulse_export
+  # 保留待確認項：採集腳本本身仍未取得。上述為資料反推的結論，
+  # 若日後取得採集腳本且與此矛盾，以腳本為準並重新 freeze。
+  acquisition_script_obtained: false
 
 # ---------------------------------------------------------------------------
 # 資料契約

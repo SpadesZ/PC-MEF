@@ -33,7 +33,7 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 
 ```powershell
 py -3.10 -m pytest                                   # 全部測試（約 80 秒）
-py -3.10 -m pcmef.cli config check                   # 待教授裁決的 19 項
+py -3.10 -m pcmef.cli config check                   # 待教授裁決的 17 項
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
 py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
 py -3.10 -m pcmef.cli provenance resolve-sigma       # SRC-D01/D02 證據
@@ -44,9 +44,9 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 
 | 阻塞 | 影響 | 解法 |
 |---|---|---|
-| 真實 ToF 只剩窗口 Mean/Std | E1 的 (500,4) 契約 | **優先查 Edge Impulse 專案 AndyCohan-project-1**（完整 560 筆曾在此）；或樹莓派 /home/pi/；或教授裁決改走彙總路線 |
-| Sigma register 未定（0x18 vs 0x1E） | E1-G08、四特徵 primary | 需**採集當時的腳本**，不是已知那三份推論腳本 |
-| 19 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
+| ~~真實 ToF 只剩窗口 Mean/Std~~ | — | **已解除**：Edge Impulse export 復原 560 筆 500×4 |
+| ~~Sigma register 未定~~ | — | **已解出 0x18**（排除檢驗，NOTE-010）；採集腳本仍未取得，取得後須複核 |
+| 17 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
 
 ### 動手前必讀
 
@@ -69,7 +69,7 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 
 | 里程碑 | 狀態 | 說明 |
 |---|---|---|
-| M0 Data Audit | **部分可行** | Vision 資料完整；ToF 只剩衍生統計量（見 NOTE-011） |
+| M0 Data Audit | **資料齊備** | 560 筆 500×4 原始序列已復原；Vision 1200 張完整（NOTE-011） |
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
 | M2 Surrogate + E1 | **surrogate 完成** | E1 metrics 待 Batch 6；校準待真實資料 |
 | M3 Post-E1 Split | 未開始 | 依賴 E1 outcome |
@@ -84,7 +84,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | Batch | 內容 | 狀態 |
 |---|---|---|
 | Batch 1 | core schema + SplitRole + InferencePayload + hashing/logging | **完成** |
-| Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | **完成（等真實資料）** |
+| Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | **完成** |
 | Batch 3 | Sigma/timing provenance resolver | **完成** |
 | Batch 4 | Mitsuba/mitransient optical transient smoke adapter | **完成** |
 | Batch 5 | single-acquisition surrogate + 500-point temporal model | **完成** |
@@ -270,7 +270,34 @@ formal 模式會直接拒絕載入。
 
 ---
 
-## 待教授裁決事項（formal-blocking，共 19 項）
+## M0 資料齊備（2026-08-26）
+
+`data/raw_real/` 三個來源，`adapters/` 各有對應 reader：
+
+| 來源 | 內容 | reader | 狀態 |
+|---|---|---|---|
+| `edge_impulse_export/` | **560 筆 500×4 原始序列**（448 train / 112 test） | `edge_impulse.py` | 560/560 valid、0 排除 |
+| `vision/` | 1200 張 .jpg，4 類各 300 | 待 M4 | 完整 |
+| `tof_aggregated/` | 窗口 Mean/Std（獨立來源，用於交叉驗證） | `legacy_kg.py` | 560 recordings |
+
+**兩來源交叉驗證**：16 個 class×feature 組合全部吻合到小數第四位（相對差 0.00%）。
+四類距離平均 Empty 100.91 / Water 113.87 / Bubbly 105.57 / Misty 79.51 mm，
+與 SRC-PLAN §2.1 錨點相符。
+
+**Sigma provenance 已解出**（NOTE-010 v2，280,000 列全資料）：
+
+| 項目 | 結論 | 依據 |
+|---|---|---|
+| divisor | **/65536** | `sigma×128` 殘差 0.4992 > 容差 0.0064，`/128` 排除；`/1` 因非整數排除 |
+| register | **0x18** | `sigma×65536` 與 distance 零匹配、相關 −0.476、量級差 298 倍 → `0x1E`（final range）排除 |
+
+先前「四參數腳本用 0x1E 所以 0x1E 可信」的推論**方向相反**：
+那代表那幾支推論腳本把 final range 當 sigma 讀，是 bug。
+採集腳本仍未取得，取得後須複核（`acquisition_script_obtained: false`）。
+
+---
+
+## 待教授裁決事項（formal-blocking，共 17 項）
 
 執行 `py -3.10 -m pcmef.cli config check` 可隨時取得最新清單。
 這些數值依 SRC-PLAN Appendix A 與 SRC-SAI Appendix F **禁止實作端自行補值**，
@@ -287,7 +314,6 @@ formal 模式會直接拒絕載入。
 | E2 | `final_n_per_class`、`severity_allocation` |
 | Conflict | `delta` |
 | Statistics | `bootstrap_replicates`、`bootstrap_seed` |
-| Sigma provenance | `resolved_register`、`status`（非教授裁決，由 M0 audit 產出，但同樣 formal-blocking） |
 
 對應 SRC-PLAN Appendix A 的六個教授討論題目，其中第 1、5 題直接決定上表的
 Real split 與 E2 兩組數值。
@@ -377,28 +403,13 @@ recording: (500, 4) | 41.0 s | measurement_time | 每欄 SD 均 > 0
 
 ---
 
-## 待教授裁決：E1 是否改走「彙總統計量 + 相同滑動窗口」
+## E1 claim：已不需要妥協
 
-這是目前唯一影響 **claim 強度**的待決事項，與上表 19 項數值性質不同。
+先前因真實 ToF 只剩窗口統計量，曾規劃「彙總統計量 + 相同滑動窗口」的替代路線，
+並列出三項代價（措辭改寫、temporal 指標降級、平均使分佈變窄致 fidelity 較易通過）。
 
-**背景**：真實 ToF 只剩窗口 Mean/Std，原始 500 點序列不存在（NOTE-011）。
-
-**提案做法**：synthetic 算出 500 點後套用**完全相同的**滑動窗口
-（window=10 / step=5 → 99 窗口）取 Mean/Std，再與真實側比 Wasserstein。
-兩側處理一致，因此比較本身合法。
-
-**三個代價**：
-
-1. `e1_scientific_rule.lock` 的措辭必須在 Held-out 開啟**前**改寫 ——
-   不再是「500 點行為的分佈」而是「窗口統計量的分佈」。
-2. Secondary 的 temporal variability 降為 window-level。
-3. **平均使分佈變窄**：10 點平均把 SD 壓約 √10，兩側分佈都變窄 →
-   Wasserstein 距離變小 → **fidelity 測試比原設計容易通過**。
-   這不是造假，但若不明寫，等於在較寬鬆的尺規上宣稱校準成功。
-
-**替代路徑**：取得樹莓派上的原始逐 recording CSV，照原規格執行。
-
-實作端不會自行選邊：這改變 E1 claim 的範圍與強度，屬研究主張層級決定。
+**Edge Impulse export 復原 560 筆 500×4 原始序列後，此妥協已不需要。**
+E1 可依原規格在 500 點序列上進行，`e1_scientific_rule.lock` 沿用原措辭即可。
 
 ---
 

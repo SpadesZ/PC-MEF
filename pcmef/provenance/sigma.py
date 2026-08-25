@@ -4,7 +4,7 @@
 #         provenance/sigma_resolution.json，供 E1-G08 判定與 e1_candidates.lock 引用。
 # 檔案路徑: pcmef/provenance/sigma.py
 # 產生時間: 2026-08-26 03:35 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 判斷前研究的 Sigma 數值到底是怎麼算出來的 —— 用觀測到的數值範圍
 #           反推它除以了多少（scaling），並記錄它讀自哪個暫存器仍未確定；
 #           兩者都確定才允許四特徵 E1 把 Sigma 當 primary 證據。
@@ -23,6 +23,9 @@
 #   - 不得在 scaling 相容但 register 未定時回傳 RESOLVED；E1-G08 要求兩者皆定。
 #   - 不得用整數性檢定判斷 scaling；來源 CSV 是四捨五入後的窗口平均值，
 #     小數位已被截斷，整數性檢定必然失敗且會給出錯誤結論。
+#   - v0.2.0 新增 rule_out_range_register()：以資料檢驗「sigma 欄是否讀自存放
+#     測距值的暫存器」。排除到只剩一個候選時允許解析——那是刪到剩一個，
+#     不是挑一個（NOTE-010 v2）。
 #   - v0.1.0 新增：首版 Sigma provenance resolver，對應 NOTE-011。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/provenance/test_sigma_and_timing.py -k sigma -v
@@ -49,6 +52,8 @@ __all__ = [
     "ScalingHypothesis",
     "SigmaResolution",
     "evaluate_scaling_hypotheses",
+    "quantization_verdict",
+    "rule_out_range_register",
     "resolve_sigma",
 ]
 
@@ -102,6 +107,7 @@ class SigmaResolution:
     resolved_divisor: float | None
     register_candidates: tuple[int, ...]
     resolved_register: int | None
+    eliminated: dict[int, str] = field(default_factory=dict)
     blocking_reasons: tuple[str, ...] = field(default=())
 
     def to_artifact(self) -> dict[str, Any]:
@@ -121,6 +127,9 @@ class SigmaResolution:
             },
             "register": {
                 "candidates": [hex(c) for c in self.register_candidates],
+                "eliminated": {
+                    hex(reg): why for reg, why in sorted(self.eliminated.items())
+                },
                 "resolved": hex(self.resolved_register)
                 if self.resolved_register is not None
                 else None,
@@ -129,13 +138,53 @@ class SigmaResolution:
         }
 
 
+def quantization_verdict(
+    values: np.ndarray, divisor: float, export_decimals: int | None
+) -> tuple[bool | None, str]:
+    """以量化步長判定某個除數是否成立。
+
+    若原始值是 k/divisor（k 為整數暫存器讀值），則觀測值乘上 divisor 必須落在
+    整數附近。這比值域論證銳利得多 —— 但**只在量化步長粗於匯出精度時可用**：
+    1/65536 = 1.5e-5 比四位小數的 1e-4 還細，rounding 會把量化痕跡抹掉，
+    此時檢定無法給出結論，必須誠實回報 None 而不是當成通過。
+
+    回傳 (verdict, note)。verdict 為 None 代表不適用，不是通過。
+    """
+    if export_decimals is None:
+        return None, "export precision unknown; quantization test not applicable"
+
+    step = 1.0 / divisor
+    rounding = 10.0 ** (-export_decimals)
+    if step <= rounding:
+        return None, (
+            f"quantization step 1/{divisor:g} = {step:.2e} is finer than the export "
+            f"rounding {rounding:.0e}; the test cannot distinguish this hypothesis"
+        )
+
+    finite = np.asarray(values, dtype=np.float64).ravel()
+    scaled = finite * divisor
+    residual = float(np.abs(scaled - np.round(scaled)).max())
+    tolerance = 0.5 * rounding * divisor + 1e-9
+    if residual <= tolerance:
+        return True, (
+            f"observations are multiples of 1/{divisor:g} within the export rounding "
+            f"(max residual {residual:.4g} <= {tolerance:.4g})"
+        )
+    return False, (
+        f"observations are NOT multiples of 1/{divisor:g}: max residual "
+        f"{residual:.4g} exceeds the rounding tolerance {tolerance:.4g}"
+    )
+
+
 def evaluate_scaling_hypotheses(
-    values: np.ndarray, divisors: tuple[float, ...] | None = None
+    values: np.ndarray,
+    divisors: tuple[float, ...] | None = None,
+    export_decimals: int | None = None,
 ) -> tuple[ScalingHypothesis, ...]:
     """對每個候選除數，反推隱含的原始暫存器值域並判定相容性。
 
-    判定只用值域，不用整數性：來源 CSV 是四捨五入過的窗口平均值，
-    小數位已被截斷，任何整數性檢定都會失敗並導向錯誤結論。
+    有兩層判定：值域合理性，以及（若匯出精度已知）量化步長。
+    後者銳利得多，因此一旦量化檢定給出明確結論就以它為準。
     """
     finite = np.asarray(values, dtype=np.float64).ravel()
     finite = finite[np.isfinite(finite)]
@@ -177,6 +226,12 @@ def evaluate_scaling_hypotheses(
             plausible = True
             note = "implied raw values occupy a plausible portion of the 16-bit range"
 
+        # 量化檢定比值域論證銳利，有明確結論時以它為準。
+        verdict, quant_note = quantization_verdict(finite, divisor, export_decimals)
+        if verdict is not None:
+            plausible = verdict
+            note = quant_note
+
         hypotheses.append(
             ScalingHypothesis(
                 divisor=float(divisor),
@@ -191,10 +246,53 @@ def evaluate_scaling_hypotheses(
     return tuple(hypotheses)
 
 
+def rule_out_range_register(
+    sigma_values: np.ndarray, distance_values: np.ndarray, divisor: float
+) -> dict[str, Any]:
+    """檢驗「sigma 欄其實讀自存放測距結果的暫存器」這個假設。
+
+    若該假設成立，sigma * divisor 必須等於同一筆的 distance ——
+    因為那會是同一個 16-bit 讀值被除了兩次不同的數。
+    這是純資料檢驗，不依賴任何暫存器位址知識。
+
+    回傳的 ruled_out=True 代表：無論那個暫存器叫什麼位址，
+    sigma 欄都**不是**從存放測距值的那一個讀來的。
+    """
+    sigma = np.asarray(sigma_values, dtype=np.float64).ravel()
+    distance = np.asarray(distance_values, dtype=np.float64).ravel()
+    if sigma.size == 0 or sigma.size != distance.size:
+        raise SigmaProvenanceError(
+            "sigma and distance columns must be non-empty and the same length"
+        )
+
+    implied_raw = sigma * divisor
+    match_ratio = float(np.mean(np.abs(implied_raw - distance) < 1.0))
+    correlation = float(np.corrcoef(implied_raw, distance)[0, 1])
+    magnitude_ratio = float(
+        np.median(sigma) / (np.median(distance) / divisor)
+        if np.median(distance) > 0
+        else float("inf")
+    )
+    return {
+        "hypothesis": "sigma column was read from the register holding the range",
+        "implied_raw_range": [
+            round(float(implied_raw.min()), 2),
+            round(float(implied_raw.max()), 2),
+        ],
+        "distance_range": [float(distance.min()), float(distance.max())],
+        "match_ratio": round(match_ratio, 6),
+        "correlation": round(correlation, 4),
+        "magnitude_ratio": round(magnitude_ratio, 1),
+        "ruled_out": bool(match_ratio < 0.01 and abs(magnitude_ratio - 1.0) > 0.5),
+    }
+
+
 def resolve_sigma(
     values: np.ndarray,
     acquisition_register: int | None = None,
     acquisition_evidence: str = "",
+    ruled_out_registers: dict[int, str] | None = None,
+    export_decimals: int | None = None,
 ) -> SigmaResolution:
     """綜合觀測值與採集程式碼證據，判定 Sigma provenance 狀態。
 
@@ -207,7 +305,7 @@ def resolve_sigma(
     if finite.size == 0:
         raise SigmaProvenanceError("no finite Sigma observations to analyse")
 
-    hypotheses = evaluate_scaling_hypotheses(finite)
+    hypotheses = evaluate_scaling_hypotheses(finite, export_decimals=export_decimals)
     plausible = [h for h in hypotheses if h.plausible]
     blocking: list[str] = []
 
@@ -223,13 +321,21 @@ def resolve_sigma(
                 + ", ".join(str(h.divisor) for h in plausible)
             )
 
+    eliminated = dict(ruled_out_registers or {})
+    remaining = [c for c in SIGMA_REGISTER_CANDIDATES if c not in eliminated]
+
     resolved_register: int | None = None
-    if acquisition_register is None:
+    if acquisition_register is None and len(remaining) == 1 and eliminated:
+        # 以證據排除到只剩一個候選。這不是「挑一個」而是「刪到剩一個」，
+        # 兩者的差別在於前者需要理由、後者需要反證，而反證已經有了。
+        resolved_register = remaining[0]
+    elif acquisition_register is None:
         blocking.append(
-            "the Sigma register is not determinable from values alone; both "
-            f"{[hex(c) for c in SIGMA_REGISTER_CANDIDATES]} are 16-bit reads sharing "
-            "the same divisor. Evidence from the acquisition script that produced "
-            "this dataset is required."
+            "the Sigma register is not determinable from values alone; "
+            f"candidates {[hex(c) for c in remaining]} are 16-bit reads sharing "
+            "the same divisor. Either evidence from the acquisition script that "
+            "produced this dataset, or an elimination test that leaves exactly one "
+            "candidate, is required."
         )
     elif acquisition_register not in SIGMA_REGISTER_CANDIDATES:
         blocking.append(
@@ -261,5 +367,6 @@ def resolve_sigma(
         resolved_divisor=resolved_divisor,
         register_candidates=tuple(SIGMA_REGISTER_CANDIDATES),
         resolved_register=resolved_register,
+        eliminated=eliminated,
         blocking_reasons=tuple(blocking),
     )
