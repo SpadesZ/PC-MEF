@@ -1,0 +1,21 @@
+{
+  "aligned_by_class": {
+    "Bubbly": 140,
+    "Empty": 140,
+    "Misty": 140,
+    "Water-filled": 140
+  },
+  "config_hash": "8e5461dab2ec539e61a9424b0069d448695e304970ad601ed91d0eeb69b7e093",
+  "counts": {
+    "canonical_recordings": 560,
+    "e1_eligible_recordings": 560,
+    "nominal_logical_recordings": 560,
+    "physical_source_files": 560,
+    "valid_recordings": 560
+  },
+  "exclusions_by_reason": {},
+  "key_strategy": "edge_impulse_export (intervals=[82.00001312000211])",
+  "nominal_source": "configs/base.yaml",
+  "sigma_status": "RESOLVED",
+  "source_root": "data\\raw_real\\edge_impulse_export"
+}

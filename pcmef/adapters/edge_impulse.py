@@ -114,8 +114,15 @@ class EdgeImpulseSample:
 class EdgeImpulseAdapter:
     """Edge Impulse dataset export 的 EvidenceSource 實作。"""
 
-    def __init__(self, sigma_status: str = "UNRESOLVED") -> None:
+    def __init__(
+        self,
+        sigma_status: str = "UNRESOLVED",
+        nominal_logical_recordings: int = 0,
+        nominal_source: str = "edge_impulse_dataset_export",
+    ) -> None:
         self.sigma_status = sigma_status
+        self.nominal_logical_recordings = int(nominal_logical_recordings)
+        self.nominal_source = nominal_source
         self._source_root: Path | None = None
         self._samples: dict[str, EdgeImpulseSample] = {}
 
@@ -317,7 +324,7 @@ class EdgeImpulseAdapter:
             )
 
         counts = CountStatus(
-            nominal_logical_recordings=0,
+            nominal_logical_recordings=self.nominal_logical_recordings,
             physical_source_files=len(inventory),
             canonical_recordings=canonical,
             valid_recordings=len(aligned),
@@ -329,7 +336,7 @@ class EdgeImpulseAdapter:
             aligned=tuple(aligned),
             exclusions=tuple(exclusions),
             counts=counts,
-            nominal_source="edge_impulse_dataset_export",
+            nominal_source=self.nominal_source,
         )
 
     # -- 載入 --------------------------------------------------------------

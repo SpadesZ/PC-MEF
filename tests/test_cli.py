@@ -200,14 +200,46 @@ def test_audit_excludes_only_the_affected_measurement(tmp_path):
 
 
 def test_audit_defaults_to_unresolved_sigma_and_blocks_e1_eligibility(capsys, tmp_path):
-    """M0 盤點本身就是產生 Sigma 證據的步驟，預設不得宣稱已解析。"""
+    """Sigma 尚未凍結時，M0 盤點不得宣稱已解析。
+
+    測試刻意使用自己的 config 而非 repo 的 base.yaml：後者已把 sigma 凍結為
+    RESOLVED（NOTE-010 v2），若沿用它，這條測試會變成在驗證那個凍結值，
+    而不是在驗證「未凍結時預設不宣稱已解析」這個行為。
+    """
     source = _make_source(tmp_path / "raw")
     out = tmp_path / "inventory"
-    main(["audit", "real-data", "--source", str(source), "--out", str(out)])
+    config = _write_config(tmp_path, "real_anchors:\n  nominal_logical_recordings: 560\n")
+    main([
+        "--config", str(config),
+        "audit", "real-data", "--source", str(source), "--out", str(out),
+    ])
     report = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))
     assert report["sigma_status"] == "UNRESOLVED"
     assert report["counts"]["e1_eligible_recordings"] == 0
     assert "E1-G08" in capsys.readouterr().err
+
+
+def test_audit_honours_a_frozen_resolved_sigma_status(tmp_path):
+    """config 已把 sigma 凍結為 RESOLVED 時，盤點應沿用該結論。
+
+    這不構成循環：循環是「M0 需要它、而它來自 M0」；決策產出並凍結之後，
+    再讀它只是引用既有結論。
+    """
+    source = _make_source(tmp_path / "raw")
+    out = tmp_path / "inventory"
+    config = _write_config(
+        tmp_path,
+        "real_anchors:\n  nominal_logical_recordings: 560\n"
+        "sigma_provenance:\n  status: RESOLVED\n  resolved_register: 0x18\n",
+    )
+    main([
+        "--config", str(config),
+        "audit", "real-data", "--source", str(source), "--out", str(out),
+    ])
+    report = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))
+    assert report["sigma_status"] == "RESOLVED"
+    assert report["counts"]["e1_eligible_recordings"] == 8
+    assert report["counts"]["nominal_logical_recordings"] == 560
 
 
 def test_audit_with_resolved_sigma_reports_eligibility(tmp_path):

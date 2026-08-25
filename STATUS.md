@@ -270,6 +270,42 @@ formal 模式會直接拒絕載入。
 
 ---
 
+## 規格對照稽核（2026-08-26）
+
+以 SAI §31 目錄樹、E1-G01..G12、Appendix D Batch exit criteria 逐項盤點。
+
+| 面向 | 現況 | 說明 |
+|---|---|---|
+| §31 目錄樹 | **16/62 檔** | 缺的全在 Batch 6-8 與 M4-M8 範圍；`core/splits.py` 例外，已不再被資料阻塞 |
+| E1 gates | **4/12 有證據** | G01/G03/G04/G08 |
+| Batch exit | **1-5 完成**，6-8 未開始 | |
+| 22 formal locks | 全數登錄；**0 個已寫** | `real_split_policy` 無前置但缺 3 項教授裁決值 |
+
+**稽核抓到的缺口（已補）**：
+
+| 缺口 | 性質 | 處置 |
+|---|---|---|
+| E1-G01 artifact 不存在 | Edge Impulse adapter **從未接上 CLI**，盤點只跑在臨時腳本 | 新增 `--source-format edge-impulse`，產出四份 artifact |
+| `nominal_logical_recordings` 寫死 0 | 五層計數失去對照基準 | 由 config 帶入，現為 560 vs 實際 560 |
+| sigma 已解出但 CLI 讀不到 | E1-eligible 恆為 0 | config 已凍結時才讀（未凍結仍須 CLI 提供，避免循環） |
+| E1-G04 artifact 不存在 | surrogate 能跑但無指令 | 新增 `pcmef surrogate smoke` |
+
+**真實 M0 五層計數（`data/inventory/`）**：
+
+```
+nominal_logical_recordings : 560   [configs/base.yaml]
+physical_source_files      : 560
+canonical_recordings       : 560
+valid_recordings           : 560
+e1_eligible_recordings     : 560
+exclusions: none
+```
+
+**仍為 0/12 的 gate 各自的阻塞**：G02/G09 需 `core/splits.py` 與 3 項教授裁決值；
+G05 需 scenario generator（Batch 8）；G06/G07/G10/G11/G12 屬 Batch 6-7。
+
+---
+
 ## M0 資料齊備（2026-08-26）
 
 `data/raw_real/` 三個來源，`adapters/` 各有對應 reader：

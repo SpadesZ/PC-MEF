@@ -3,7 +3,7 @@
 #         寫出人類可讀報告到 stdout 與選用的 log 檔；exit code 供 CI 判定。
 # 檔案路徑: pcmef/cli.py
 # 產生時間: 2026-08-26 09:50 +08:00
-# 版本: v0.4.0
+# 版本: v0.5.0
 # 功能說明: 系統的命令列入口。提供查版本、檢視設定、列出所有待教授裁決的數值、
 #           顯示每個凍結點的狀態、執行 M0 前研究資料盤點，
 #           以及判定 Sigma scaling 與取樣間隔這兩處來源歧異。
@@ -24,8 +24,8 @@
 #   - 不得接受 API key 作為命令列參數；secret 一律走環境變數或 secret vault，
 #     命令列參數會留在 shell history 與 process list。
 #   - 不得讓 formal 路徑依賴互動輸入或 CLI override。
-#   - 不得讓 audit real-data 從 config 讀 sigma_status；M0 盤點正是產生該證據的
-#     步驟，反向依賴會造成循環（見 cmd_audit_real_data 說明）。
+#   - audit real-data 只有在 config 已把 sigma_status 凍結時才可讀它；
+#     未凍結時必須由 CLI 旗標提供，否則會形成「M0 需要它、而它來自 M0」的循環。
 #   - 新增子指令時同步更新 README 的常用指令表。
 #   - 不得為 provenance resolve-sigma 增加「自動挑一個 register」的選項；
 #     暫存器身分只能由採集腳本證據決定（NOTE-010）。
@@ -33,6 +33,8 @@
 #   - v0.2.0 新增：audit real-data（M0 盤點）。
 #   - v0.3.0 新增：provenance resolve-sigma / audit-timing。
 #   - v0.4.0 新增：sim smoke（子行程隔離，見 NOTE-012）。
+#   - v0.5.0 新增：audit real-data --source-format edge-impulse；nominal 計數與
+#     已凍結的 sigma_status 皆由 config 帶入。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/test_cli.py -v
 #   - py -3.10 -m pcmef.cli config check
@@ -127,20 +129,38 @@ def cmd_audit_real_data(args: argparse.Namespace) -> int:
     就成了循環相依。config 裡的 sigma_provenance 是 E1 階段的凍結決策，
     與這裡的工作狀態分屬兩件事。
     """
-    from pcmef.adapters.legacy_csv import LegacyCSVAdapter, LegacyCSVConfig
-
     config = _load(args)
     nominal = config.get("real_anchors.nominal_logical_recordings", 0)
 
-    adapter = LegacyCSVAdapter(
-        LegacyCSVConfig(
-            key_strategy=args.key_strategy,
-            sigma_status=args.sigma_status,
+    # sigma_status 預設沿用 CLI 旗標；但若 config 已把它凍結為 RESOLVED，
+    # 讀取那個「已完成的決策」不構成循環——循環是「M0 需要它、而它來自 M0」，
+    # 決策產出並凍結之後，再讀它只是引用既有結論。
+    sigma_status = args.sigma_status
+    if sigma_status == "UNRESOLVED":
+        frozen = config.get("sigma_provenance.status", None)
+        if frozen in ("RESOLVED", "UNRESOLVED"):
+            sigma_status = frozen
+
+    if args.source_format == "edge-impulse":
+        from pcmef.adapters.edge_impulse import EdgeImpulseAdapter
+
+        adapter = EdgeImpulseAdapter(
+            sigma_status=sigma_status,
             nominal_logical_recordings=int(nominal),
             nominal_source=", ".join(config.sources),
-            formal=args.formal,
         )
-    )
+    else:
+        from pcmef.adapters.legacy_csv import LegacyCSVAdapter, LegacyCSVConfig
+
+        adapter = LegacyCSVAdapter(
+            LegacyCSVConfig(
+                key_strategy=args.key_strategy,
+                sigma_status=sigma_status,
+                nominal_logical_recordings=int(nominal),
+                nominal_source=", ".join(config.sources),
+                formal=args.formal,
+            )
+        )
 
     inventory = adapter.build_inventory(args.source)
     report = adapter.audit_alignment(inventory)
@@ -165,7 +185,7 @@ def cmd_audit_real_data(args: argparse.Namespace) -> int:
     audit_report = {
         "source_root": report.source_root,
         "key_strategy": report.key_strategy,
-        "sigma_status": args.sigma_status,
+        "sigma_status": sigma_status,
         "nominal_source": report.nominal_source,
         "counts": {
             "nominal_logical_recordings": counts.nominal_logical_recordings,
@@ -285,6 +305,90 @@ def cmd_sim_smoke(args: argparse.Namespace) -> int:
         print(f"{failed} scenario(s) FAILED; see stderr.txt in each folder", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
+    """E1-G04：驗證 surrogate 能由真實 transient 產出四特徵且無 NaN/Inf。
+
+    產出 surrogate_smoke.csv：每個場景一列，含四特徵的均值與標準差、
+    物理量與 recording 形狀，供 E1-G04 判定。
+    """
+    import numpy as np
+
+    from pcmef.core.constants import TOF_SCHEMA
+    from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
+    from pcmef.surrogate.single_acquisition import SensorSurrogate
+    from pcmef.surrogate.temporal_model import TemporalModel
+
+    sim_root = Path(args.simulation_out)
+    scenarios = (
+        sorted(p for p in sim_root.iterdir() if p.is_dir()) if sim_root.is_dir() else []
+    )
+    if not scenarios:
+        print(
+            f"error: no simulation scenarios under {sim_root}; run `sim smoke` first",
+            file=sys.stderr,
+        )
+        return 1
+
+    surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
+    model = TemporalModel(surrogate)
+    rows: list[dict[str, object]] = []
+    non_finite = 0
+
+    for scenario in scenarios:
+        transient_path = scenario / "transient.npy"
+        axis_path = scenario / "transient_time.npy"
+        if not (transient_path.exists() and axis_path.exists()):
+            continue
+        transient = np.load(transient_path)
+        axis = np.load(axis_path)
+
+        observables = surrogate.observe(transient, axis)
+        recording = model.generate_recording(
+            transient, axis,
+            sample_interval_s=args.sample_interval_s,
+            sample_interval_source=args.sample_interval_source,
+            seed=args.seed, n_samples=args.n_samples,
+        )
+        finite = bool(np.all(np.isfinite(recording.values)))
+        if not finite:
+            non_finite += 1
+
+        row: dict[str, object] = {
+            "scenario_id": scenario.name,
+            "n_samples": recording.n_samples,
+            "duration_s": round(recording.duration_s, 4),
+            "fwhm_s": observables.fwhm_s,
+            "snr": observables.snr,
+            "multipath_prominence": observables.multipath_prominence,
+        }
+        for index, metric in enumerate(TOF_SCHEMA):
+            row[f"{metric}_mean"] = float(recording.values[:, index].mean())
+            row[f"{metric}_sd"] = float(recording.values[:, index].std())
+        row["all_finite"] = finite
+        rows.append(row)
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_csv(out_dir / "surrogate_smoke.csv", rows)
+
+    print(f"scenarios: {len(rows)}   non-finite: {non_finite}")
+    for row in rows:
+        summary = " ".join(
+            f"{m.split('_')[0]}={row[f'{m}_mean']:.4g}" for m in TOF_SCHEMA
+        )
+        print(
+            "  [%s] %-24s %s"
+            % ("ok " if row["all_finite"] else "FAIL", row["scenario_id"], summary)
+        )
+    print(f"\nartifact: {(out_dir / 'surrogate_smoke.csv').resolve()}")
+    print(
+        "\nnote: calibration scales are placeholders; these values are structural "
+        "evidence for E1-G04 only and carry no fidelity claim (E1-G12).",
+        file=sys.stderr,
+    )
+    return 1 if non_finite else 0
 
 
 def _run_sim_worker(args: argparse.Namespace) -> int:
@@ -530,6 +634,13 @@ def build_parser() -> argparse.ArgumentParser:
     real_data.add_argument("--source", required=True, help="原始資料根目錄（唯讀）")
     real_data.add_argument("--out", default="data/inventory", help="盤點產物輸出目錄")
     real_data.add_argument(
+        "--source-format",
+        default="legacy-csv",
+        choices=["legacy-csv", "edge-impulse"],
+        help="來源格式：legacy-csv 為逐 metric 分檔的原始 CSV；"
+             "edge-impulse 為 Edge Impulse dataset export 的 JSON",
+    )
+    real_data.add_argument(
         "--key-strategy",
         default="trailing_integer",
         choices=["trailing_integer", "full_stem", "stem_without_metric"],
@@ -557,6 +668,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,  # 內部旗標：標示此行程即為算圖 worker
     )
     smoke.set_defaults(func=cmd_sim_smoke)
+
+    sur_parser = subparsers.add_parser("surrogate", help="感測器替身")
+    sur_sub = sur_parser.add_subparsers(dest="surrogate_command", required=True)
+    sur_smoke = sur_sub.add_parser(
+        "smoke", help="E1-G04：由真實 transient 產出四特徵並檢查無 NaN/Inf"
+    )
+    sur_smoke.add_argument("--simulation-out", default="outputs/simulation")
+    sur_smoke.add_argument("--out", default="outputs/surrogate")
+    sur_smoke.add_argument("--n-samples", type=int, default=500)
+    sur_smoke.add_argument("--seed", type=int, default=1042)
+    sur_smoke.add_argument(
+        "--sample-interval-s", type=float, default=0.08200001312,
+        help="量測取樣間隔；預設為 Edge Impulse export 記錄的實際值",
+    )
+    sur_smoke.add_argument(
+        "--sample-interval-source", default="edge_impulse_export:interval_ms",
+        help="上述間隔的出處；不得留空",
+    )
+    sur_smoke.set_defaults(func=cmd_surrogate_smoke)
 
     prov_parser = subparsers.add_parser("provenance", help="來源歧異的證據判定")
     prov_sub = prov_parser.add_subparsers(dest="provenance_command", required=True)
