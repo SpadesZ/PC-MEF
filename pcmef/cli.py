@@ -2,10 +2,11 @@
 # 上下游: 由使用者終端機與 CI 呼叫；讀取 configs/ 下的 YAML 與 freeze/ 下的 lock 檔，
 #         寫出人類可讀報告到 stdout 與選用的 log 檔；exit code 供 CI 判定。
 # 檔案路徑: pcmef/cli.py
-# 產生時間: 2026-08-26 01:40 +08:00
-# 版本: v0.2.0
+# 產生時間: 2026-08-26 04:55 +08:00
+# 版本: v0.3.0
 # 功能說明: 系統的命令列入口。提供查版本、檢視設定、列出所有待教授裁決的數值、
-#           顯示每個凍結點的狀態與卡在誰身上，以及執行 M0 前研究資料盤點。
+#           顯示每個凍結點的狀態、執行 M0 前研究資料盤點，
+#           以及判定 Sigma scaling 與取樣間隔這兩處來源歧異。
 # 模組定位: 所有 formal run 的唯一進入點。它「不是」互動式工具 —— formal 路徑
 #           不得依賴任何鍵盤輸入，才能在無人值守的環境重現。
 # 主要責任:
@@ -13,8 +14,10 @@
 #   2. cmd_config_show() 顯示設定來源、hash 與待裁決數量
 #   3. cmd_config_check() 逐項列出待裁決數值與其出處
 #   4. cmd_audit_real_data() 執行 M0 盤點並產出四份 artifact 與五層計數
-#   5. cmd_locks_status() 顯示每個 lock 為 frozen / pending / BLOCKED
-#   6. main() 統一把 ConfigError / LockError / LegacyCSVError / FormalBlockingError
+#   5. cmd_provenance_resolve_sigma() 產出 E1-G08 的 Sigma 證據 artifact
+#   6. cmd_provenance_audit_timing() 並列三個取樣間隔來源並量化偏差
+#   7. cmd_locks_status() 顯示每個 lock 為 frozen / pending / BLOCKED
+#   8. main() 統一把 ConfigError / LockError / LegacyCSVError / FormalBlockingError
 #      轉成 exit code
 # 維護提醒:
 #   - 不得接受 API key 作為命令列參數；secret 一律走環境變數或 secret vault，
@@ -23,8 +26,11 @@
 #   - 不得讓 audit real-data 從 config 讀 sigma_status；M0 盤點正是產生該證據的
 #     步驟，反向依賴會造成循環（見 cmd_audit_real_data 說明）。
 #   - 新增子指令時同步更新 README 的常用指令表。
+#   - 不得為 provenance resolve-sigma 增加「自動挑一個 register」的選項；
+#     暫存器身分只能由採集腳本證據決定（NOTE-010）。
 #   - v0.1.0 新增：version / config show / config check / locks status 四組指令。
 #   - v0.2.0 新增：audit real-data（M0 盤點）。
+#   - v0.3.0 新增：provenance resolve-sigma / audit-timing。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/test_cli.py -v
 #   - py -3.10 -m pcmef.cli config check
@@ -204,6 +210,115 @@ def cmd_audit_real_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provenance_resolve_sigma(args: argparse.Namespace) -> int:
+    """SRC-D01/D02：以真實 Sigma 觀測值判定 scaling，並記錄 register 是否仍未決。
+
+    刻意不提供「指定 register」以外的捷徑：暫存器身分無法由數值反推，
+    唯一能解決它的是產生這批資料的採集腳本（NOTE-010）。
+    """
+    import numpy as np
+
+    from pcmef.adapters.legacy_kg import LegacyKGAdapter
+    from pcmef.provenance.sigma import resolve_sigma
+
+    adapter = LegacyKGAdapter()
+    inventory = adapter.build_inventory(args.kg_root)
+    per_condition = adapter.metric_values(inventory, "sigma_like", "Mean")
+    if not per_condition:
+        print("error: no Sigma matrices found", file=sys.stderr)
+        return 1
+
+    values = np.concatenate(list(per_condition.values()))
+    resolution = resolve_sigma(
+        values,
+        acquisition_register=(
+            int(args.acquisition_register, 16) if args.acquisition_register else None
+        ),
+        acquisition_evidence=args.acquisition_evidence or "",
+    )
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifact = resolution.to_artifact()
+    artifact["per_condition_observations"] = {
+        condition: int(v.size) for condition, v in per_condition.items()
+    }
+    (out_dir / "sigma_resolution.json").write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    print(f"status: {resolution.status}")
+    print(
+        f"observations: n={resolution.n_observations} "
+        f"range=[{resolution.observed_min:.4f}, {resolution.observed_max:.4f}]"
+    )
+    print("\nscaling hypotheses:")
+    for hypothesis in resolution.scaling_hypotheses:
+        mark = "OK " if hypothesis.plausible else "no "
+        print(
+            f"  [{mark}] /{hypothesis.divisor:<10g} implied raw "
+            f"[{hypothesis.implied_raw_min:.1f}, {hypothesis.implied_raw_max:.1f}] "
+            f"= {hypothesis.range_fraction:.2%} of full scale"
+        )
+        print(f"        {hypothesis.note}")
+    print(f"\nresolved divisor : {resolution.resolved_divisor}")
+    print(
+        "resolved register: "
+        + (hex(resolution.resolved_register) if resolution.resolved_register else "—")
+    )
+    if resolution.blocking_reasons:
+        print("\nblocking (E1-G08):")
+        for reason in resolution.blocking_reasons:
+            print(f"  - {reason}")
+    print(f"\nartifact: {(out_dir / 'sigma_resolution.json').resolve()}")
+    return 0
+
+
+def cmd_provenance_audit_timing(args: argparse.Namespace) -> int:
+    """SRC-D03：並列文件值、腳本設定值與實測值，量化彼此偏差。"""
+    import pandas as pd
+
+    from pcmef.provenance.timing import audit_timing, measure_interval
+
+    config = _load(args)
+    measured = None
+    if args.recording:
+        frame = pd.read_csv(args.recording)
+        column = args.time_column or frame.columns[-1]
+        measured = measure_interval(
+            frame[column].to_numpy(dtype=float),
+            source=f"{Path(args.recording).name}:{column}",
+        )
+
+    provenance = audit_timing(
+        measured,
+        documented_s=config.get("real_anchors.historical_sample_interval_s", None),
+        script_nominal_s=config.get(
+            "real_anchors.deployment_script_sample_interval_s", None
+        ),
+    )
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "timing_provenance.json").write_text(
+        json.dumps(provenance.to_artifact(), ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    print("interval evidence (only 'measured' may be used for a recording contract):")
+    for item in provenance.evidence:
+        print(f"  {item.level.value:<16} {item.value_s:<10.5f} {item.source}")
+    if provenance.discrepancies:
+        print("\ndiscrepancy vs measured:")
+        for level, delta in sorted(provenance.discrepancies.items()):
+            print(f"  {level:<16} {delta:+.1f}%")
+    else:
+        print("\nno measured evidence supplied; discrepancies cannot be computed")
+    print(f"\nartifact: {(out_dir / 'timing_provenance.json').resolve()}")
+    return 0
+
+
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     """寫出 audit artifact。空結果仍要留檔，「零筆排除」本身也是稽核結論。"""
     if not rows:
@@ -295,6 +410,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sigma register provenance 的當前狀態；RESOLVED 才允許 e1-eligible",
     )
     real_data.set_defaults(func=cmd_audit_real_data)
+
+    prov_parser = subparsers.add_parser("provenance", help="來源歧異的證據判定")
+    prov_sub = prov_parser.add_subparsers(dest="provenance_command", required=True)
+
+    sigma_cmd = prov_sub.add_parser(
+        "resolve-sigma", help="SRC-D01/D02：判定 Sigma scaling 與 register 狀態"
+    )
+    sigma_cmd.add_argument(
+        "--kg-root", default="data/raw_real/tof_aggregated/KG_all",
+        help="含 KG_<class>_<Metric>_<Stat>.csv 的目錄",
+    )
+    sigma_cmd.add_argument("--out", default="provenance", help="artifact 輸出目錄")
+    sigma_cmd.add_argument(
+        "--acquisition-register",
+        help="產生此資料集的採集腳本所用的暫存器（十六進位，例如 0x1E）；"
+             "只有附上 --acquisition-evidence 才會被採信",
+    )
+    sigma_cmd.add_argument(
+        "--acquisition-evidence",
+        help="上述暫存器的出處，例如 collect_dataset.py:31",
+    )
+    sigma_cmd.set_defaults(func=cmd_provenance_resolve_sigma)
+
+    timing_cmd = prov_sub.add_parser(
+        "audit-timing", help="SRC-D03：並列文件/腳本/實測三個取樣間隔"
+    )
+    timing_cmd.add_argument(
+        "--recording", help="含時間欄的原始 recording CSV；缺此參數則無實測值"
+    )
+    timing_cmd.add_argument("--time-column", help="時間欄名稱（預設取最後一欄）")
+    timing_cmd.add_argument("--out", default="provenance", help="artifact 輸出目錄")
+    timing_cmd.set_defaults(func=cmd_provenance_audit_timing)
 
     locks_parser = subparsers.add_parser("locks", help="formal freeze 狀態")
     locks_sub = locks_parser.add_subparsers(dest="locks_command", required=True)

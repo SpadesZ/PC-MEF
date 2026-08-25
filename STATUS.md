@@ -26,7 +26,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 |---|---|---|
 | Batch 1 | core schema + SplitRole + InferencePayload + hashing/logging | **完成** |
 | Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | **完成（等真實資料）** |
-| Batch 3 | Sigma/timing provenance resolver | 未開始 |
+| Batch 3 | Sigma/timing provenance resolver | **完成** |
 | Batch 4 | Mitsuba/mitransient optical transient smoke adapter | 未開始 |
 | Batch 5 | single-acquisition surrogate + 500-point temporal model | 未開始 |
 | Batch 6 | E1 metrics + dual-lock + scientific rule state machine | 未開始 |
@@ -93,7 +93,7 @@ formal_config.lock 將保存其 SHA-256）、`observation_brief_v1`、
 
 ## Batch 2 已完成內容（2026-08-26）
 
-測試：**356 passed**。程式碼完成且以合成 fixture 全路徑驗證；
+測試：**416 passed**。程式碼完成且以合成 fixture 全路徑驗證；
 真實資料到位後直接指向 `data/raw_real/` 即可執行，**不需要改碼**。
 
 | 模組 | 對應規格 | 內容 |
@@ -121,6 +121,45 @@ Sigma 未解析時 `e1_eligible_recordings` 強制為 0（E1-G08）。
 **尚未實作**：`core/splits.py`（SplitRegistry）。它在 §31 目錄樹中，
 但 `real_split_policy` 的 creation_phase 是 `AFTER_M0_BEFORE_ANY_CALIBRATION`，
 必須先有真實 inventory 才能建立，因此排在真實資料到位之後。
+
+---
+
+## Batch 3 已完成內容（2026-08-26）
+
+測試：**416 passed**。三個模組都在**真實資料**上實測過，不只是合成 fixture。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `adapters/legacy_kg.py` | NOTE-011 | (99,140) 彙總格式 reader；32 矩陣 → 560 recordings |
+| `provenance/sigma.py` | SRC-D01/D02、E1-G08 | scaling 假設檢定 + register 狀態判定 |
+| `provenance/timing.py` | SRC-D03、§7.7 | 雙時間軸分離 + 三來源間隔偏差量化 |
+| `cli provenance resolve-sigma` / `audit-timing` | §32 CLI 契約 | 產出兩份證據 artifact |
+
+### SRC-D02（Sigma scaling）→ **已解決**
+
+以 **55,440 個真實觀測值**檢定三個 scaling 候選：
+
+| 除數 | 隱含原始值域 | 佔 16-bit 量程 | 判定 |
+|---|---|---|---|
+| `/1` | 0.36–0.66 | — | ✗ 100% 觀測值非整數，暫存器讀值必為整數 |
+| `/128` | 45.5–85.0 | **0.06%** | ✗ 需感測器全程只用量程角落 |
+| **`/65536`** | **23311–43509** | **30.8%** | **✓ 唯一相容** |
+
+### SRC-D01（Sigma register）→ **仍 UNRESOLVED**，但理由精確
+
+0x18 與 0x1E 都是 16-bit 讀值、共用同一除數，**值域無法區分**。
+唯一能解決的是**產生這批資料的採集腳本**——不是已知那三份推論腳本。
+系統拒絕在缺此證據時標為 RESOLVED，四特徵 E1 primary continue 被 E1-G08 擋下。
+
+### SRC-D03（取樣間隔）→ 三來源偏差已量化
+
+| 來源 | 值 | 對實測偏差 |
+|---|---|---|
+| SRC-PLAN 文件記載 | 0.082 s | **+31.4%** |
+| SRC-NOTION 腳本設定 | 0.020 s | **−68.0%** |
+| **實測（偏移測試 recording）** | **0.0624 s** | — |
+
+只有 `measured` 等級可用於任何 recording 的契約；文件值與腳本值都只作記錄。
 
 ---
 
