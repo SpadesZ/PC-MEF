@@ -1,14 +1,32 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 experiments.e2_formal 於 run 開始時建立；讀寫 evaluator-only 的
+#         opaque map JSON 檔（含 salt，屬機密等級）；opaque id 流向 InferencePayload
+#         與 provider，canonical id 只流回 evaluator 的統計 join。
 # 檔案路徑: pcmef/core/opaque_ids.py
-# 模組定位: canonical case ID 與 opaque inference ID 之間的 evaluator-only 隱藏映射。
-# 功能說明: 以 run-scoped keyed HMAC 產生非語意 opaque_case_id，並保存只有 evaluator 可讀的反查表。
-# 主要責任: 讓 inference 端拿得到穩定識別碼，同時讓該識別碼無法被解碼回 class/condition/severity。
-# 呼叫來源: experiments.e2_formal、agents.provider、stats 的 evaluator join、tests.leakage。
-# 輸入契約: canonical case ID 集合；salt 由建立時隨機產生，之後只從 map 檔載入。
-# 輸出契約: 小寫 hex opaque id 與 evaluator-only 的 OpaqueIdMap；map 檔含 salt，屬機密等級。
-# 安全邊界: map 檔與 salt 絕不得進入 provider payload、manifest 可讀欄位或任何 report。
-# 維護提醒: salt 外洩等同 opaque id 可被逆推，須視為研究完整性事故並重新產生整個 run 的映射。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:20 +08:00
+# 版本: v0.1.0
+# 功能說明: 幫每個案例配一個看不出任何意義的代號（例如 9f2c41ab...），讓送給 LLM 的
+#           資料無法從識別碼反推出它是哪一類、哪個 condition；同時保留一份只有
+#           評估端能讀的對照表，跑完之後才用它把結果接回真實標籤。
+# 模組定位: truth firewall 的身分層。它「不是」加密工具，也不保證跨 run 一致；
+#           映射的有效範圍就是單一 formal run。
+# 主要責任:
+#   1. OpaqueIdMap.create() 產生 run-scoped 隨機 salt 並建立雙向映射
+#   2. OpaqueIdMap._derive() 以 HMAC-SHA256 截斷成 32 字元 hex
+#   3. to_opaque() / to_canonical() 提供雙向查詢，後者僅限 evaluator 呼叫
+#   4. map_hash() 產生可寫入 inference_firewall.lock 的摘要，且刻意不涵蓋 salt
+#   5. save() / load() 持久化並在載入時重新推導以偵測竄改
+# 維護提醒:
+#   - 不得把 salt 寫進任何 lock、manifest、report 或 log；salt 外洩等同 opaque id
+#     可被逆推，須視為研究完整性事故並重新產生整個 run 的映射。
+#   - 不得在 inference 路徑（agents、reliability、gate、fusion）呼叫 to_canonical()；
+#     那些模組本來就不該知道 canonical 身分。
+#   - 不得覆寫已存在的 map 檔；映射一旦用於任何 provider 呼叫就已固定，
+#     重寫會讓既有 artifact 的 opaque id 對不回 canonical case。
+#   - v0.1.0 新增：run-scoped keyed HMAC 的取捨理由見 NOTE-004。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/leakage/test_inference_firewall.py -k "opaque or map"
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

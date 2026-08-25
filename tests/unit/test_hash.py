@@ -1,14 +1,29 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pytest 收集執行；操作 core.hash 與 tmp_path 下的暫時檔案；
+#         不觸碰 repo 內的 freeze/ 或 data/。
 # 檔案路徑: tests/unit/test_hash.py
-# 模組定位: canonical hashing 確定性契約的可執行版本。
-# 功能說明: 驗證 key 順序無關、非有限浮點被拒、numpy 型別可序列化、array hash 涵蓋 dtype 與 shape。
-# 主要責任: 保護 NFR-01 Reproducibility 與 §48 content-addressed cache 的正確性。
-# 呼叫來源: pytest。
-# 輸入契約: 合成物件與陣列。
-# 輸出契約: 測試通過與否。
-# 安全邊界: 僅使用 tmp_path 做檔案 hash 測試。
-# 維護提醒: 序列化參數若有變更，本檔的 golden hash 會失敗 —— 那代表全系統 lock 需要重新 freeze。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:10 +08:00
+# 版本: v0.1.0
+# 功能說明: 驗證同樣內容一定得到同樣的摘要、不同內容一定不同 —— 包含 key 排列順序
+#           無關、list 順序有關、numpy 型別與 Python 型別等價、NaN/Inf 被拒絕，
+#           以及陣列摘要必須涵蓋 dtype 與 shape 而不只是 raw bytes。
+# 模組定位: 可重現性與 cache 正確性的回歸防線。它不驗證 hash 值本身是什麼，
+#           只驗證等價與相異關係成立。
+# 主要責任:
+#   1. key 順序無關與 list 順序有關的對照
+#   2. numpy 純量與 Python 純量的摘要等價
+#   3. 非有限浮點數（含 np.float64 版本）一律被拒
+#   4. 陣列摘要對 dtype、shape 與記憶體佈局的敏感度
+#   5. 檔案摘要與 combine_hashes 的順序敏感性
+# 維護提醒:
+#   - 不得放寬非有限值的拒絕；NaN 進 freeze 代表數值 invariant 已經壞掉，
+#     必須先修數值而不是先讓它通過 hash。
+#   - 本檔失敗若源自序列化參數變更，代表全系統既有 lock 需要重新 freeze，
+#     不可只改測試了事。
+#   - v0.1.0 新增：首版 hashing 回歸測試。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_hash.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

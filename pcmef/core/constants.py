@@ -1,14 +1,32 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 被 core.schema、core.numeric、core.inference_payload、adapters、surrogate、
+#         models、gate、agents、fusion、stats 匯入。本檔不讀寫任何檔案，
+#         常數直接流向各模組的 array index、驗證條件與 formal freeze payload。
 # 檔案路徑: pcmef/core/constants.py
-# 模組定位: PC-MEF 全系統唯一的凍結常數來源。
-# 功能說明: 宣告四類 class 順序、ToF 四特徵 canonical schema、數值 epsilon、前研究標籤映射與七類 split 角色名稱。
-# 主要責任: 保證 CLASS_ORDER 與 TOF_SCHEMA 不被任何模組就地重定義、重新排序或以字面字串取代。
-# 呼叫來源: core.schema、core.numeric、core.inference_payload、adapters、surrogate、models、gate、agents、fusion、stats。
-# 輸入契約: 無執行期輸入；本檔僅宣告常數，不做任何 I/O。
-# 輸出契約: 全部為 tuple 或 MappingProxyType，呼叫端不得就地修改。
-# 安全邊界: 不含 secret、檔案路徑、provider 資訊或任何 benchmark metadata。
-# 維護提醒: 任何常數變更等同 formal scientific identity 變更，必須先立 NOTE 並重新 freeze 所有下游 lock。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 20:10 +08:00
+# 版本: v0.1.0
+# 功能說明: 存放全系統共用且不可變的常數 —— 四類液態狀態的順序、ToF 四特徵的欄位
+#           順序、三個數值 epsilon、前研究標籤對照表、七類資料角色，以及 E2 的四個
+#           condition 與五個比較組名稱。
+# 模組定位: 凍結常數的唯一來源。它不是設定檔（可調參數走 core.config），
+#           也不做驗證邏輯（驗證走 core.schema 與 core.numeric）。
+# 主要責任:
+#   1. CLASS_ORDER / N_CLASSES / class_index() 定義四類機率向量的 index 意義
+#   2. TOF_SCHEMA / tof_index() 定義四特徵 canonical array 的欄位順序
+#   3. TOF_DISPLAY_ORDER 提供報表排版順序，刻意與 array index 分離
+#   4. LEGACY_LABEL_MAP 固定 nowater/water/bubble/smoke 到四類英文 label
+#   5. EPS_P / EPS_R / EPS_S 提供三個語意不同但數值相同的 epsilon
+#   6. RELIABILITY_FEATURE_CUES 宣告 numerical path 的 q_T/q_V 特徵名稱
+# 維護提醒:
+#   - 不得在其他模組就地重定義 CLASS_ORDER 或 TOF_SCHEMA，也不得以字面字串取代。
+#   - 不得用 TOF_DISPLAY_ORDER 取 array index；兩者順序不同，誤用會讓 signal 與
+#     ambient 靜默對調，且因兩者皆為 rate、量級相近而不會觸發任何 range 檢查。
+#   - 任何常數變更等同 formal scientific identity 變更，必須先立 NOTE 並重新 freeze
+#     所有下游 lock。
+#   - v0.1.0 新增：首版常數，決策見 NOTE-001（canonical 順序）與 NOTE-002（顯示順序分離）。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/schema/test_canonical_case_and_ids.py -k "canonical_order or display_order or legacy_label or class_order"
+# ------------------------------------------------------------
 
 from types import MappingProxyType
 

@@ -1,14 +1,33 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 的所有 freeze 子指令與 experiments.e1/e2、splits、reliability、gate、
+#         agents、llm.snapshot 呼叫；讀寫 freeze/<name>.lock.json；
+#         各 lock 的 payload_hash 互相交叉引用，最終匯入 formal_config.lock。
 # 檔案路徑: pcmef/core/locks.py
-# 模組定位: formal freeze 的唯一寫入/驗證通道與 lock 相依順序的守衛。
-# 功能說明: 定義 22 個 formal lock 的必要內容與前置條件，提供不可覆寫的寫入、完整性驗證與時序比較。
-# 主要責任: 讓「凍結」是可執行的檢查，而不是靠人記得先做哪一步。
-# 呼叫來源: cli 的所有 freeze 子指令、experiments.e1/e2、splits、reliability、gate、agents、llm.snapshot。
-# 輸入契約: lock 名稱必須登錄於 LOCK_SPECS；payload 為 JSON-safe dict 且含該 lock 的全部必要 key。
-# 輸出契約: freeze/<name>.lock.json，內含 payload、payload_hash 與 created_at；payload_hash 不涵蓋時間戳。
-# 安全邊界: lock 內容會被檢視與流通，任何 secret 值一律禁止寫入，只能存 secret_ref。
-# 維護提醒: 新增 lock 必須同時登錄必要 key 與前置 lock，否則狀態機會出現無人把關的缺口。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 22:05 +08:00
+# 版本: v0.1.0
+# 功能說明: 管理 22 個「凍結點」—— 每個實驗階段做完後把當時的決策與雜湊寫成一個
+#           不可再改的檔案。它同時檢查該階段的前置階段是否真的完成，
+#           讓「先鎖 split 再校準」這類順序不是靠人記得，而是跳步就會失敗。
+# 模組定位: formal freeze 的唯一寫入與驗證通道。它不產生 lock 的內容，
+#           只驗證內容齊全、順序正確、事後未被竄改。
+# 主要責任:
+#   1. LOCK_SPECS 登錄 22 個 lock 的必要 key 與前置 lock
+#   2. LockStore.write() 檢查必要欄位、secret、前置條件後寫入，並對相同內容冪等
+#   3. LockStore._assert_no_secrets() 擋下疑似 secret 值，只允許 secret_ref
+#   4. LockStore.load() 重算 payload_hash 以偵測凍結後的竄改
+#   5. LockStore.require() 斷言指定 lock 皆已存在且完整
+#   6. LockStore.assert_frozen_before() 驗證兩個 lock 的先後時序
+# 維護提醒:
+#   - 不得以不同內容覆寫既有 lock；內容變了就必須開新 run_id，而不是重新 freeze。
+#   - 不得把 secret 值寫進 lock payload；lock 會被檢視與流通，只能存 secret_ref。
+#   - 不得把 created_at 納入 payload_hash；否則相同輸入在不同時間 freeze 會被誤判
+#     為內容變更，破壞重跑的冪等性。
+#   - 新增 lock 必須同時登錄必要 key 與前置 lock，否則狀態機會出現無人把關的缺口。
+#   - v0.1.0 新增：首版 22 個 lock 與相依圖。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_config_and_locks.py -k "lock"
+#   - py -3.10 -m pcmef.cli locks status
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

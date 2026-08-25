@@ -1,14 +1,30 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 進入點、experiments runner 與 llm.admin 服務啟動時各呼叫一次；
+#         接收全系統的 log 記錄，寫出到 stderr 與選用的 log 檔；
+#         llm 層以 register_secret() 把載入的 API key 交給本檔遮蔽。
 # 檔案路徑: pcmef/core/logging_setup.py
-# 模組定位: 全系統 logging 設定與 secret 遮蔽過濾器。
-# 功能說明: 建立統一 log 格式，並在寫出前遮蔽已註冊的 secret 值與常見 API key 樣式。
-# 主要責任: 讓 NFR-08「API key 不寫入 repo/manifest/log」在 log 這條路徑上有實際攔截點。
-# 呼叫來源: cli 進入點、experiments runner、llm.admin 服務啟動時各呼叫一次。
-# 輸入契約: register_secret() 收到的字串會被視為機密；log 訊息可為任意物件。
-# 輸出契約: 遮蔽後的 log 記錄；被遮蔽處以 [REDACTED] 取代，不保留任何前綴片段。
-# 安全邊界: 本過濾器是最後一道防線，不是唯一防線；呼叫端仍不得刻意把 secret 放進訊息。
-# 維護提醒: 新增 provider 時同步補上其 key 的樣式 regex，並在 tests/secret 加對應案例。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 22:15 +08:00
+# 版本: v0.1.0
+# 功能說明: 設定全系統統一的 log 格式，並在每一筆記錄寫出前把 API key 之類的機密
+#           換成 [REDACTED] —— 包含已註冊的實際值，以及各家 provider 的常見 key 樣式。
+# 模組定位: log 這條路徑上的 secret 攔截點。它是最後一道防線而非唯一防線；
+#           呼叫端仍不得刻意把 secret 放進訊息。
+# 主要責任:
+#   1. register_secret() 登記需要遮蔽的實際 secret 值
+#   2. _SECRET_PATTERNS 涵蓋 OpenAI/Anthropic/Google/xAI 的 key 樣式與授權標頭
+#   3. SecretRedactionFilter.filter() 同時處理 record.msg 與 record.args
+#   4. setup_logging() 建立 stderr 與選用檔案 handler，並掛上遮蔽過濾器
+# 維護提醒:
+#   - 不得只遮蔽 record.msg；logger.info("key=%s", api_key) 這種延遲格式化的寫法
+#     會整個繞過，而那正是最容易不小心寫出來的形式。
+#   - 不得註冊長度小於 8 的字串為 secret；過短的值會在整份 log 造成大量誤遮，
+#     反而讓真正的問題無法診斷。
+#   - 不得保留 secret 的前綴片段當作「方便辨識」；一律整段換成 [REDACTED]。
+#   - 新增 provider 時同步補上其 key 樣式 regex，並在 tests/secret 加對應案例。
+#   - v0.1.0 新增：首版遮蔽過濾器，對應 SRC-SAI NFR-08 與 LLM-SEC-01。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/secret/test_log_redaction.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

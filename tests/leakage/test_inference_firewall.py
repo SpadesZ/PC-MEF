@@ -1,14 +1,30 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pytest 收集執行；操作 core.inference_payload、core.opaque_ids 與
+#         core.ids；opaque map 的存檔測試寫在 tmp_path，不產生常駐 artifact。
 # 檔案路徑: tests/leakage/test_inference_firewall.py
-# 模組定位: SRC-SAI Appendix I1 與 §29 Leakage 測試項的可執行版本。
-# 功能說明: 驗證 InferencePayload 不接受 truth/benchmark metadata、opaque id 非語意、quality cue allowlist 生效。
-# 主要責任: 讓 EI-P0-08「inference metadata 側漏」在 CI 就被擋下，而不是靠人工審查 payload。
-# 呼叫來源: pytest。
-# 輸入契約: 合成的 payload 與 canonical ID 樣本，不需要真實資料。
-# 輸出契約: 測試通過與否。
-# 安全邊界: 本檔刻意構造違規 payload，僅在測試內使用，不得被其他模組 import。
-# 維護提醒: 新增 payload 欄位時必須同步在此加一條「該欄位不得夾帶語意」的案例。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:55 +08:00
+# 版本: v0.1.0
+# 功能說明: 驗證送給 LLM 的內容確實看不出答案 —— 代號不具語意、品質指標只限
+#           allowlist、把類別或 condition 字串塞進任何欄位都會被擋下、
+#           未載入的檔案路徑不得代替影像張量。
+# 模組定位: truth firewall 的驗收測試。它刻意構造違規 payload，
+#           這些構造僅供本檔使用，不得被其他模組 import 當成範例。
+# 主要責任:
+#   1. opaque id 的非語意性、run 內 deterministic 與跨 run 相異
+#   2. map_hash 不涵蓋 salt，以及存檔的竄改偵測與不可覆寫
+#   3. quality cue allowlist 生效，且與 reliability 特徵不相交
+#   4. 未載入路徑、非有限 evidence、無 evidence 三種拒絕路徑
+#   5. provider payload snapshot 只含 opaque 身分
+#   6. 用合法欄位夾帶語意字串的六種變體全部被擋
+# 維護提醒:
+#   - 不得放寬 predictive entropy 的排除；那是 NOTE-003 的核心結論，
+#     放進去會讓 s_A 與 p_rel 相關而破壞 G5 對 G4 的因果解釋。
+#   - 不得把本檔的違規 payload 構造搬到其他模組重用。
+#   - 新增 payload 欄位時必須同步在此加一條「該欄位不得夾帶語意」的案例。
+#   - v0.1.0 新增：首版洩漏驗收，對應 NOTE-003 與 NOTE-004。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/leakage/test_inference_firewall.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

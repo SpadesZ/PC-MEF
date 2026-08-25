@@ -66,7 +66,21 @@ py -3.10 -m pcmef.cli locks status              # 各 formal lock 的凍結狀�
 見 `STATUS.md`。摘要：Batch 1（core schema + truth firewall + freeze 機制）
 已完成，146 項測試通過；M0 因前研究原始資料不在本機而 BLOCKED（NOTE-008）。
 
-## 決策記錄
+## 檔頭與決策記錄規範
 
-見 `NOTES.md`。程式中任何 `NOTE(NOTE-NNN)` 標記在該檔都有同號完整條目，
-包含決策、理由與套用方式。
+每個原始檔開頭都有十欄位維護契約，欄位順序固定：
+`上下游／檔案路徑／產生時間／版本／功能說明／模組定位／主要責任／維護提醒／驗證方式`。
+其中 `功能說明`（白話在做什麼）、`模組定位`（架構位置與邊界）、
+`主要責任`（編號職責清單）三者分開寫，不合併。
+
+決策層級的理由不寫檔頭，寫 `docs/NOTES.md`，每則條目五欄齊備：
+`決策日期／適用範圍／決策／原因／驗證`。程式中的 `NOTE(NOTE-NNN)` 必須能在該檔
+找到同號條目，禁止失效引用。
+
+這兩條規範由 `tests/test_repo_integrity.py` 自動稽核：欄位缺漏、順序錯誤、
+`檔案路徑` 與實際位置不符、`驗證方式` 指向不存在的檔案、NOTE 引用找不到條目、
+NOTE 條目缺欄位、NOTE 編號重用 —— 全部會讓 CI 失敗。
+
+```powershell
+py -3.10 -m pytest tests/test_repo_integrity.py -v
+```

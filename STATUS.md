@@ -37,7 +37,11 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 
 ## Batch 1 已完成內容（2026-08-25）
 
-測試：**146 passed**（`py -3.10 -m pytest`）
+測試：**288 passed**（`py -3.10 -m pytest`）
+
+檔頭與 NOTE 規範：全部原始檔已改為十欄位維護契約格式，
+決策記錄移至 `docs/NOTES.md` 並補齊五欄位；
+兩者由 `tests/test_repo_integrity.py` 自動稽核（已用三種人為破壞驗證過會攔截）。
 
 | 模組 | 對應規格 | 內容 |
 |---|---|---|
@@ -52,6 +56,9 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | `core/locks.py` | Appendix G3、§23 | 22 個 lock 的內容契約與前置順序 |
 | `core/logging_setup.py` | NFR-08、LLM-SEC-01 | secret 遮蔽過濾器 |
 | `cli.py` | FR-019、FR-043 | version / config show / config check / locks status |
+| `tests/test_repo_integrity.py` | 檔頭與 NOTE 規範 | 十欄位齊全、驗證方式有效、NOTE 引用不失效 |
+| `tests/secret/test_log_redaction.py` | NFR-08、LLM-SEC-01 | 四家 provider key 樣式的 log 遮蔽驗收 |
+| `tests/test_cli.py` | FR-019 | formal 模式必須以非零 exit code 中斷 |
 
 已建立但尚未使用的 artifact：
 `schemas/arbitration_output_v1.schema.json`（依 §21 逐字複製，

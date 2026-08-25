@@ -1,14 +1,28 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pytest 收集執行；操作 core.config 與 core.locks，讀寫 tmp_path 內
+#         即時產生的 YAML 與 freeze 目錄；不觸碰 repo 內的 configs/ 或 freeze/。
 # 檔案路徑: tests/unit/test_config_and_locks.py
-# 模組定位: NOTE-005 formal-blocking 機制與 SRC-SAI Appendix G3 lock 契約的可執行版本。
-# 功能說明: 驗證 !required sentinel 無法被預設值吸收、formal 模式全樹掃描生效、lock 不可覆寫且前置順序被強制。
-# 主要責任: 讓「未核定數值被悄悄補上」與「freeze 跳步」兩類事故在 CI 就失敗。
-# 呼叫來源: pytest。
-# 輸入契約: tmp_path 內即時產生的 YAML 與 freeze 目錄。
-# 輸出契約: 測試通過與否。
-# 安全邊界: 全部在 tmp_path 內操作，不觸碰 repo 內的 configs/ 或 freeze/。
-# 維護提醒: 新增 lock 時在此補一條 required_keys 缺漏必失敗的案例。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:40 +08:00
+# 版本: v0.1.0
+# 功能說明: 驗證兩件事不可能發生 —— 待教授裁決的數值被一個預設值悄悄蓋過去，
+#           以及某個凍結步驟在它的前置步驟還沒完成時就被寫入。
+# 模組定位: 研究完整性的回歸防線。它不驗證 lock 內容的科學正確性，
+#           只驗證流程順序與不可竄改性。
+# 主要責任:
+#   1. Required sentinel 在 get、布林與數值語境下一律中斷
+#   2. get(key, default) 不得吸收待裁決值
+#   3. formal 模式的全樹掃描與 CLI override 禁令
+#   4. lock 的必要欄位、冪等重寫、異內容拒絕與竄改偵測
+#   5. lock 前置順序（含 real_split_policy 與 synthetic_split_policy 兩條）
+#   6. lock 相依圖必須完整登錄且無環
+# 維護提醒:
+#   - 不得放寬 default 不吸收 sentinel 那條；一旦放寬，呼叫端只要順手寫個 default
+#     就能繞過整個 formal-blocking 機制。
+#   - 新增 lock 時要在此補一條 required_keys 缺漏必失敗的案例。
+#   - v0.1.0 新增：首版 config 與 lock 回歸測試。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_config_and_locks.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

@@ -1,14 +1,34 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 adapters、simulation.scenario_generator、models.train_split、experiments
+#         與 registry.artifacts 呼叫；不讀寫檔案，產出的 ID 字串成為 manifest、
+#         split registry、lock payload 與 artifact 目錄名稱的 join key。
 # 檔案路徑: pcmef/core/ids.py
-# 模組定位: 所有 immutable canonical ID 的產生與驗證入口。
-# 功能說明: 依 SRC-SAI §34 命名規範組出 recording/image/scenario/model/run/artifact ID 並提供反向解析。
-# 主要責任: 讓每個 ID 都是穩定、可 join 回原始來源、且與檔名映射分開保存的識別碼。
-# 呼叫來源: adapters、simulation.scenario_generator、models.train_split、experiments、registry.artifacts。
-# 輸入契約: 已正規化的 class/condition/severity 語意值與非負序號；序號不得重複使用。
-# 輸出契約: 小寫、以底線分隔、可被本模組 regex 完整驗證的 canonical ID 字串。
-# 安全邊界: 本模組產生的 ID 具語意，屬 evaluator-only，絕不得直接送入 InferencePayload。
-# 維護提醒: ID 格式一旦用於 formal run 即不可變更；新增 condition 必須同步更新 token 表與 regex。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:05 +08:00
+# 版本: v0.1.0
+# 功能說明: 依固定命名規則組出六種識別碼 —— 前研究 recording 與影像、synthetic
+#           scenario、模型 checkpoint、執行批次與 artifact 路徑，並提供格式驗證，
+#           讓每筆結果都能沿 ID 追回它的來源。
+# 模組定位: canonical（具語意）ID 的唯一產生處。它產生的 ID 屬 evaluator-only；
+#           送進 inference 的非語意 ID 由 core.opaque_ids 另外負責。
+# 主要責任:
+#   1. CLASS_ID_TOKEN / CONDITION_ID_TOKEN / SEVERITY_ID_TOKEN 定義語意 token 表
+#   2. real_recording_id() / real_image_id() 產生前研究資料的 immutable ID
+#   3. synthetic_scenario_id() 產生 synthetic scenario ID 並擋下 Clean+severity 組合
+#   4. model_id() / run_id() 產生 checkpoint 與執行批次 ID
+#   5. artifact_path() 組出 case-centric 的 artifact 相對路徑
+#   6. is_canonical_id() 供 leakage 測試判斷字串是否具語意
+# 維護提醒:
+#   - 不得把本模組產生的 ID 直接送入 InferencePayload；它們帶有 class 與 condition
+#     語意，等同把 ground truth 交給 provider。
+#   - 不得用原始檔名當 ID；檔名可能帶臨時語意或錯字，一旦修正就會讓既有 lock 與
+#     result row 失去 join key。ID 與檔名映射必須分開保存。
+#   - 不得把易變的軟體版本編進 ID；版本變動會讓同一 scenario 在 split 之間變成兩個
+#     身分，破壞 formal E2「G1-G5 使用完全相同 scenario IDs」的要求。
+#   - ID 格式一旦用於 formal run 即不可變更；新增 condition 要同步更新 token 表與 regex。
+#   - v0.1.0 新增：首版命名規則，condition token 取捨見 NOTE-009。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/schema/test_canonical_case_and_ids.py -k "id_formats or severity or canonical_ids or invalid_identifier"
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

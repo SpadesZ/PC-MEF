@@ -1,14 +1,33 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 adapters.legacy_csv、adapters.real_vl53l0x、adapters.simulation 建構，
+#         讀取來源檔案後轉成本結構；供 splits、experiments、registry 與 evaluator
+#         使用；經 core.inference_payload 去除 truth 後才會流向 provider。
 # 檔案路徑: pcmef/core/schema.py
-# 模組定位: 三種 EvidenceSource adapter 共同收斂的 CanonicalCase 契約。
-# 功能說明: 定義 SourceRole/SplitRole/ClassLabel/TruthVisibility 列舉與 CanonicalCase、CountStatus、MeasurementTime 資料結構。
-# 主要責任: 讓 E1/E2、模型層與統計層不必知道資料來自 legacy CSV、實體 VL53L0X 或 Mitsuba 模擬。
-# 呼叫來源: adapters.legacy_csv、adapters.real_vl53l0x、adapters.simulation、splits、experiments、registry。
-# 輸入契約: 建構時所有 Required 欄位必須齊備；conditional 欄位依 source_role 與模態各自檢查。
-# 輸出契約: frozen dataclass；to_json() 產生的 dict 可直接餵給 core.hash 做 canonical hashing。
-# 安全邊界: CanonicalCase 可以帶 truth，但它永遠不得整份傳給 provider，轉換一律經由 core.inference_payload。
-# 維護提醒: 新增欄位必須同步決定它屬於 evaluator-only 還是 inference-visible，預設一律 evaluator-only。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 20:50 +08:00
+# 版本: v0.1.0
+# 功能說明: 定義一筆「案例」在系統裡長什麼樣子 —— 不論它來自前研究的 CSV、
+#           實體 VL53L0X 感測器還是 Mitsuba 模擬，最後都收斂成同一個 CanonicalCase，
+#           並在建構當下就檢查 500x4 形狀、四特徵順序、雙時間軸與五層計數帳。
+# 模組定位: 三種資料來源共同的收斂契約。它可以帶 ground truth（供 evaluator 使用），
+#           但它「不是」可以送給 provider 的東西 —— 那必須先轉成 InferencePayload。
+# 主要責任:
+#   1. SourceRole / SplitRole / ClassLabel / TruthVisibility 四個列舉定義角色空間
+#   2. MeasurementTime 保存 measurement-time 軸，與 optical transient 時間軸分離
+#   3. CountStatus 保存 nominal/physical/canonical/valid/e1_eligible 五層計數
+#   4. CanonicalCase._check_tof() 驗證形狀、非有限值與取樣點數一致性
+#   5. CanonicalCase._check_source_role_requirements() 依來源角色檢查必要 artifact
+#   6. CanonicalCase.to_json() 產生可做 canonical hashing 的 dict
+# 維護提醒:
+#   - 不得把 CanonicalCase 整份傳給 provider；轉換一律經由 core.inference_payload。
+#   - 不得用補零或補平均值處理缺漏的 ToF 欄位；缺值必須標為 invalid 進 exclusion ledger。
+#   - 不得 hard-code usable N=560；那是 nominal logical count，實際可用數必須由
+#     M0 盤點產生的 count_status 決定。
+#   - 新增欄位時必須同步決定它屬於 evaluator-only 還是 inference-visible，
+#     預設一律 evaluator-only。
+#   - v0.1.0 新增：首版 CanonicalCase，涵蓋 SRC-D01..D05 五個 provenance 雷點。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/schema/test_canonical_case_and_ids.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

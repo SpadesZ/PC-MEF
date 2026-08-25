@@ -1,14 +1,29 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pytest 收集執行；操作 core.schema、core.ids 與 core.constants；
+#         全部使用合成陣列與參數，不需要真實資料，也不做任何 I/O。
 # 檔案路徑: tests/schema/test_canonical_case_and_ids.py
-# 模組定位: CanonicalCase 資料契約與 SRC-SAI §34 ID 命名規範的可執行版本。
-# 功能說明: 驗證 500x4 shape、四特徵 canonical 順序、雙時間軸分離、五層計數帳與 ID 格式。
-# 主要責任: 讓 SRC-D01..D05 五個已知 provenance 雷點在型別層就無法被忽略。
-# 呼叫來源: pytest。
-# 輸入契約: 合成陣列與參數，不需要真實資料。
-# 輸出契約: 測試通過與否。
-# 安全邊界: 無 I/O。
-# 維護提醒: TOF_SCHEMA 順序若被更動，本檔的 test_canonical_order_is_distance_ambient_signal_sigma 必須先失敗。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:25 +08:00
+# 版本: v0.1.0
+# 功能說明: 把規格文件裡五個已知的資料對齊雷點（Sigma 尺度、時間軸混用、欄位順序
+#           錯位、真實 RGB/ToF 非同步、計數帳不清）逐條變成建構時就會失敗的斷言，
+#           並驗證六種識別碼的格式與文件範例完全一致。
+# 模組定位: 資料契約的回歸防線。它不檢查資料內容合不合理，只檢查結構與命名。
+# 主要責任:
+#   1. 四特徵 canonical 順序與 display 順序的分離
+#   2. CanonicalCase 對 500x4 形狀、NaN、取樣點數一致性的拒絕路徑
+#   3. 雙時間軸與 measurement_time.source 的必要性
+#   4. CountStatus 的單調收斂關係與 physical > logical 的合法情形
+#   5. ID 格式與 SRC-SAI 34 節、Appendix A1 範例字串的逐字比對
+#   6. Clean condition 不得帶 severity
+# 維護提醒:
+#   - 不得為了讓某筆資料通過而放寬 shape 或 NaN 檢查；缺值要標 invalid 進
+#     exclusion ledger，不是補零。
+#   - TOF_SCHEMA 順序若被更動，本檔的 canonical_order 測試必須先失敗，
+#     不得反過來配合實作調整期望值。
+#   - v0.1.0 新增：首版資料契約與命名回歸測試。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/schema/test_canonical_case_and_ids.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

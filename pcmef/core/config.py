@@ -1,14 +1,33 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 與 experiments.e1/e2、splits、simulation、models、gate、stats 呼叫；
+#         讀取 configs/ 下的 YAML 檔（低優先序在前）與 CLI override，
+#         輸出的 ResolvedConfig 供全系統讀值，config_hash() 流向 formal_config.lock。
 # 檔案路徑: pcmef/core/config.py
-# 模組定位: 設定載入、優先序合併與「未核定數值 formal-blocking」的強制執行點。
-# 功能說明: 提供 !required sentinel、多層 config 合併、formal 模式全樹掃描與 resolved config hash。
-# 主要責任: 讓任何尚未經教授裁決的 numeric threshold/allocation 不可能被實作端悄悄補上預設值。
-# 呼叫來源: cli、experiments.e1/e2、splits、simulation、models、gate、stats 的所有 config 讀取。
-# 輸入契約: YAML 檔路徑清單（低優先序在前）與 CLI override dict；override key 使用點號路徑。
-# 輸出契約: ResolvedConfig，get() 讀到 sentinel 即拋 FormalBlockingError；config_hash() 供 freeze 使用。
-# 安全邊界: 不載入 secret；secret 只能來自環境變數或 secret vault，config 內僅保存 secret_ref。
-# 維護提醒: 新增未核定數值時寫 !required，不要寫 0、null 或「暫時的」預設值。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:50 +08:00
+# 版本: v0.1.0
+# 功能說明: 載入並依優先序合併多層設定檔，同時實作一個關鍵機制 —— 尚未經教授核定的
+#           數值在 YAML 裡寫成 !required，任何程式讀到它就直接中斷，讓「缺一個裁決」
+#           不可能被一個看似合理的預設值蓋過去。
+# 模組定位: 設定的唯一入口與 formal-blocking 的強制執行點。它不載入 secret；
+#           secret 只能來自環境變數或 secret vault，config 內僅保存 secret_ref。
+# 主要責任:
+#   1. Required sentinel 在布林與數值語境下一律拋 FormalBlockingError
+#   2. _PCMEFLoader 以 SafeLoader 為基底解析 !required tag
+#   3. _deep_merge() 實作 scalar 覆蓋、dict 逐層合併、list 整體取代的優先序規則
+#   4. _label_required() 為每個 sentinel 補上自己的 key path 供錯誤訊息定位
+#   5. ResolvedConfig.get() 讀到 sentinel 即中斷，且 default 不得吸收它
+#   6. load_config() 在 formal 模式下全樹掃描並拒絕任何 CLI override
+# 維護提醒:
+#   - 不得為尚未核定的數值填入任何預設值，包含「暫時的」預設值；一律寫 !required。
+#     這是 SRC-PLAN Appendix A 與 SRC-SAI Appendix F 的硬性要求（NOTE-005）。
+#   - 不得用 get(key, default) 繞過 sentinel；default 只在 key 不存在時生效。
+#   - 不得在 formal 模式接受 CLI override；會改變研究結果的參數只能來自版本化 config。
+#   - 不得把 Required 改成 None：None 會被 or 與 falsy 判斷悄悄吸收掉。
+#   - v0.1.0 新增：首版 formal-blocking 機制，決策見 NOTE-005。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_config_and_locks.py -k "required or formal or override or config_hash"
+#   - py -3.10 -m pcmef.cli config check
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

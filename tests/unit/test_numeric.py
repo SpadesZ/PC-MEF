@@ -1,14 +1,28 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pytest 收集執行；操作 core.numeric 與 core.constants，並掃描 pcmef/
+#         全樹確認 stabilize_prob 只有一份定義；不讀寫任何資料檔。
 # 檔案路徑: tests/unit/test_numeric.py
-# 模組定位: SRC-SAI §16 D/U/Q invariant 表與 Appendix G1 reference implementation 的可執行版本。
-# 功能說明: 驗證 stabilize_prob / JSD / entropy / support bridge / reliability 守衛的每一條數值契約。
-# 主要責任: 讓「數值語意被悄悄改掉」這件事在 CI 就失敗，而不是在 formal run 之後才被發現。
-# 呼叫來源: pytest。
-# 輸入契約: 無外部資料；全部使用文件中列出的極端案例與 toy vector。
-# 輸出契約: 測試通過與否。
-# 安全邊界: 無 I/O、無網路。
-# 維護提醒: 這些數字直接對應論文中的式 (1)-(8)，修改測試前必須先確認規格文件真的改了。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:00 +08:00
+# 版本: v0.1.0
+# 功能說明: 把規格文件裡那張 D/U/Q invariant 表逐條變成可執行的斷言 ——
+#           相同分佈的 D 要小於 1e-12、極端互斥分佈的 D 要落在 0.999 與 1 之間、
+#           熵不能因 log(0) 變成 NaN、all-zero 不得被救成均勻分佈等等。
+# 模組定位: 數值語意的回歸防線。它不驗證 gate 的搜尋結果好壞，只驗證數學定義沒被改掉。
+# 主要責任:
+#   1. stabilize_prob 的合法輸入與六種非法輸入
+#   2. D 的自反性、對稱性、有界性，以及「不是 sqrt(JSD)」
+#   3. U 的正規化、非 NaN 保證，以及不得被 top-1 confidence 取代
+#   4. support_to_vector 必須依 CLASS_ORDER 而非 dict 順序取值
+#   5. reliability 權重與 gate 係數的 simplex 守衛
+#   6. test_stabilize_prob_has_exactly_one_definition_in_the_codebase() 全樹掃描
+# 維護提醒:
+#   - 不得為了讓實作通過而放寬這裡的容差；這些數字直接對應論文的式 (1)-(8)，
+#     要改必須先確認規格文件真的改了。
+#   - 不得移除全樹掃描那一條；它是 NOTE-006「禁止影子複製」唯一的自動防線。
+#   - v0.1.0 新增：首版數值回歸測試。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_numeric.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

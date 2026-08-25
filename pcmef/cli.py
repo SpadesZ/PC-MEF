@@ -1,14 +1,29 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由使用者終端機與 CI 呼叫；讀取 configs/ 下的 YAML 與 freeze/ 下的 lock 檔，
+#         寫出人類可讀報告到 stdout 與選用的 log 檔；exit code 供 CI 判定。
 # 檔案路徑: pcmef/cli.py
-# 模組定位: 所有 formal run 的唯一命令列進入點。
-# 功能說明: 提供 version / config show / config check / locks status 子指令，後續批次在此擴充 audit 與 experiment。
-# 主要責任: 實現 FR-019「所有 formal run 可無 UI 透過 CLI 執行」與 FR-043 CLI parity。
-# 呼叫來源: 使用者終端機、CI、以及 tests/cli。
-# 輸入契約: argparse 參數；--set 覆蓋在 --formal 模式下會被拒絕。
-# 輸出契約: 人類可讀的 stdout 報告；非零 exit code 代表 formal-blocking 或 lock 違規。
-# 安全邊界: 不接受 API key 作為命令列參數，secret 一律走環境變數或 secret vault。
-# 維護提醒: 新增子指令時同步更新 README 的 CLI 對照表，並確認 formal 路徑不依賴任何互動輸入。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 22:20 +08:00
+# 版本: v0.1.0
+# 功能說明: 系統的命令列入口。目前提供查版本、檢視設定、列出所有待教授裁決的數值，
+#           以及顯示每個凍結點的狀態與卡在誰身上；後續批次在此擴充資料稽核與實驗指令。
+# 模組定位: 所有 formal run 的唯一進入點。它「不是」互動式工具 —— formal 路徑
+#           不得依賴任何鍵盤輸入，才能在無人值守的環境重現。
+# 主要責任:
+#   1. build_parser() 定義全域參數與子指令樹
+#   2. cmd_config_show() 顯示設定來源、hash 與待裁決數量
+#   3. cmd_config_check() 逐項列出待裁決數值與其出處
+#   4. cmd_locks_status() 顯示每個 lock 為 frozen / pending / BLOCKED
+#   5. main() 統一把 ConfigError / LockError / FormalBlockingError 轉成 exit code
+# 維護提醒:
+#   - 不得接受 API key 作為命令列參數；secret 一律走環境變數或 secret vault，
+#     命令列參數會留在 shell history 與 process list。
+#   - 不得讓 formal 路徑依賴互動輸入或 CLI override。
+#   - 新增子指令時同步更新 README 的常用指令表。
+#   - v0.1.0 新增：version / config show / config check / locks status 四組指令。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/test_cli.py -v
+#   - py -3.10 -m pcmef.cli config check
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

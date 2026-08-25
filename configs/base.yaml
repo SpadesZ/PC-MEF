@@ -1,14 +1,33 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 core.config.load_config() 作為最低優先序載入；module 與 experiment
+#         config 於其上覆蓋；解析結果供全系統讀值，其 hash 流向 formal_config.lock。
 # 檔案路徑: configs/base.yaml
-# 模組定位: 全系統最低優先序的基礎設定。
-# 功能說明: 宣告已由規格文件確定的常數與錨點，並以 !required 標記所有尚待教授裁決的數值。
-# 主要責任: 讓「哪些數字已有出處、哪些還沒」在單一檔案內一目了然。
-# 呼叫來源: core.config.load_config 的第一層；module/experiment config 於其上覆蓋。
-# 輸入契約: 本檔為 YAML mapping；!required 標記會被載入成 formal-blocking sentinel。
-# 輸出契約: 供 ResolvedConfig 合併；formal 模式下殘留 !required 會直接拒絕啟動。
-# 安全邊界: 不含任何 secret；API key 只能以 secret_ref 形式出現在 llm config，值走環境變數。
-# 維護提醒: 教授核定某個 !required 之後，填值時必須同時在 NOTES.md 記錄裁決來源與日期。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 22:00 +08:00
+# 版本: v0.1.0
+# 功能說明: 系統的基礎設定。已經有明確出處的數字（前研究的幾何尺寸、距離錨點、
+#           四特徵順序、gate 的搜尋規則）直接寫死；還沒經教授核定的數字一律寫成
+#           !required，讓程式讀到就中斷而不是拿預設值頂替。
+# 模組定位: 設定的最底層與「待裁決清單」的單一來源。它不存放任何 secret，
+#           也不是 formal freeze 的內容本身（那由 freeze/*.lock.json 保存）。
+# 主要責任:
+#   1. real_anchors 保存前研究的幾何、距離與偏移錨點
+#   2. data 宣告 500 點、四特徵順序與 legacy 標籤映射
+#   3. real_split_policy / e1 / perception / reliability / gate 保存各階段規則
+#   4. e2 / conflict_operational / statistics 保存 benchmark 與統計設定
+#   5. 以 !required 標記 17 項待教授裁決的數值
+# 維護提醒:
+#   - 不得為 !required 項目填入「暫時的」預設值；那個值會一路存活到 formal run
+#     並寫進論文，而屆時沒有人記得它的出處。
+#   - 不得把 nominal_logical_recordings（560）當成 final usable N 使用。
+#   - 不得把 historical_sample_interval_s（0.082）當成全域精確常數；每筆 recording
+#     的實際 interval 必須由該筆的 provenance 提供。
+#   - 教授核定某個 !required 之後，填值時必須同時在 docs/NOTES.md 立條目記錄
+#     裁決來源與日期。
+#   - v0.1.0 新增：首版基礎設定，formal-blocking 機制見 NOTE-005。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli config check
+#   - py -3.10 -m pytest tests/test_cli.py -k shipped_base_config
+# ------------------------------------------------------------
 #
 # !required 的意義：該數值尚未由教授核定，任何程式路徑讀到它都會拋 FormalBlockingError。
 # 這是 SRC-PLAN Appendix A Formal-readiness note 與 SRC-SAI Appendix F 的硬性要求：

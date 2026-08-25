@@ -1,14 +1,33 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 core.locks、core.config、core.opaque_ids、adapters、simulation、
+#         agents.cache 與 registry 匯入；讀取磁碟上的 artifact 檔案內容計算摘要，
+#         產出的 hex 摘要流向 freeze/*.lock.json、agent cache key 與 ResultRecord。
 # 檔案路徑: pcmef/core/hash.py
-# 模組定位: PC-MEF 全系統唯一的 canonical hashing 實作。
-# 功能說明: 提供 canonical JSON 序列化、SHA-256 摘要、檔案摘要與 evidence/config hash 組裝。
-# 主要責任: 讓相同語意內容在任何機器、任何執行順序下都產生相同 hash，作為 freeze 與 cache 的基礎。
-# 呼叫來源: core.locks、core.config、adapters、simulation、agents.cache、registry、所有 freeze 指令。
-# 輸入契約: JSON-safe 物件（dict/list/str/int/float/bool/None）或既有檔案路徑；不接受 NaN/Inf。
-# 輸出契約: 小寫 hex SHA-256 字串；序列化結果為 UTF-8 bytes，key 已排序且無多餘空白。
-# 安全邊界: 呼叫端必須先移除 secret；本模組不做 secret 偵測，會忠實 hash 收到的內容。
-# 維護提醒: 序列化參數任一改動都會讓所有既有 lock hash 失效，等同全系統重新 freeze。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 20:35 +08:00
+# 版本: v0.1.0
+# 功能說明: 把任意設定物件、檔案或陣列轉成一個穩定的 SHA-256 十六進位字串，
+#           讓「同樣的內容」在不同機器、不同 key 排列順序下都得到同一個值，
+#           作為 formal freeze 與 content-addressed cache 的比對依據。
+# 模組定位: 全系統唯一的 canonical hashing 實作。它不判斷內容該不該被 hash，
+#           也不偵測 secret —— 呼叫端必須先把 secret 移除。
+# 主要責任:
+#   1. canonical_json() / canonical_json_bytes() 產生 key 已排序的確定性序列化結果
+#   2. _coerce() 先整棵樹正規化 numpy 型別並攔截非有限浮點數
+#   3. hash_object() 對設定與 lock payload 取摘要
+#   4. hash_file() 分塊讀取大型 transient/RGB artifact 取摘要
+#   5. hash_array() 對 ndarray 取摘要，且涵蓋 dtype 與 shape 而非只有 bytes
+#   6. combine_hashes() 依固定順序串接多個摘要，供 agent cache key 使用
+# 維護提醒:
+#   - 不得變更 canonical_json() 的序列化參數（sort_keys/separators/ensure_ascii/
+#     allow_nan）；任一改動都會讓所有既有 lock hash 失效，等同全系統重新 freeze。
+#   - 不得改用 json.dumps 的 default= 掛勾處理 numpy：np.float64 是 float 的子類別，
+#     會走 C 加速路徑而繞過非有限值檢查。
+#   - 不得讓 hash_array() 只 hash raw bytes；dtype 或 shape 不同而摘要相同會造成
+#     agent cache 誤命中，兩個不同 evidence 共用同一份 s_A。
+#   - v0.1.0 新增：首版 hashing；PurePath 而非 Path 的判型修正見同版測試。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_hash.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

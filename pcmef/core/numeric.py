@@ -1,14 +1,33 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 gate.jsd、gate.entropy、gate.adaptive、fusion.pcmef、fusion.support_bridge、
+#         reliability 與 stats 匯入；輸入為記憶體中的機率向量與 reliability 純量，
+#         輸出的 D/U/Q/g 與 s_A 直接流入 PC-MEF 融合公式與 ResultRecord。
 # 檔案路徑: pcmef/core/numeric.py
-# 模組定位: PC-MEF 全系統唯一的 probability / divergence / entropy 數值 API。
-# 功能說明: 提供 stabilize_prob、normalized_js_divergence、normalized_entropy 與各項 runtime invariant 守衛。
-# 主要責任: 確保 D/U/Q/g 的數值語意在 gate、fusion、agents、metrics 之間完全一致且可重現。
-# 呼叫來源: gate.jsd、gate.entropy、gate.adaptive、fusion.pcmef、fusion.support_bridge、reliability、stats。
-# 輸入契約: 長度 4 的機率向量或 agent support 向量；reliability 純量須為有限且落於 [0,1]。
-# 輸出契約: float64 ndarray 或 python float；任何 invariant 違反一律拋例外，不回傳退化值。
-# 安全邊界: 純數值運算，不接觸檔案、網路、secret 或任何 case metadata。
-# 維護提醒: 本檔是 NOTE-006 指定的唯一 stabilize_prob 實作，任何模組出現第二份定義即為違規。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 20:25 +08:00
+# 版本: v0.1.0
+# 功能說明: 把論文式 (1)-(8) 用到的機率運算做成單一份實作 —— 機率向量正規化、
+#           兩個分佈的分歧度 D、分佈的不確定度 U、reliability 權重，以及 agent
+#           回傳的 class support 轉成數值向量。任一條數值契約違反就直接中斷。
+# 模組定位: 全系統唯一的機率數值 API。它不決定 alpha/beta/gamma 的值（那是 gate 的
+#           搜尋結果），也不做任何 I/O；只保證數值語意一致且可重現。
+# 主要責任:
+#   1. stabilize_prob() 為唯一的機率 clipping 與正規化入口
+#   2. normalized_js_divergence() 計算以 ln 2 正規化的 D，回傳 divergence 而非距離
+#   3. normalized_entropy() 計算以 ln 4 正規化的 U
+#   4. support_to_vector() / normalize_support() 完成 agent JSON 到 s_A 的橋接
+#   5. check_reliability() / reliability_weights() 產生式 (3) 的 w_T 與 w_V
+#   6. check_gate_coefficients() 驗證 alpha/beta/gamma 落在 simplex 上
+#   7. assert_finite_nonnegative_sum1() 作為 p_rel 與 F 的最後一道 regression invariant
+# 維護提醒:
+#   - 不得在任何其他模組定義第二份 stabilize_prob，也不得改寫其 eps 預設值；
+#     不一致的 eps 會讓 D 的上界偏移，而 alpha/beta/gamma 是在 validation 上選出來的，
+#     等於 gate 被一個不會出現在 freeze hash 的數值差異偷偷調參（NOTE-006）。
+#   - 不得把 all-zero 的機率或 support 救成 uniform 後繼續；那是語意失敗，必須中斷。
+#   - 不得用 top-1 confidence 代替 entropy，也不得回傳 sqrt(JSD) 這個 JS distance。
+#   - v0.1.0 新增：首版數值 API，對應 NOTE-006。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/unit/test_numeric.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 

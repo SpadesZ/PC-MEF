@@ -1,14 +1,34 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 experiments.e2_formal 以 CanonicalCase 加 opaque id 建構，
+#         供 agents.observation / physics / visual_semantic / arbitration 與
+#         agents.provider 使用；本檔不讀寫檔案，evidence 由 orchestrator 先載入成
+#         ndarray 後傳入，輸出直接成為送往外部 LLM 的內容。
 # 檔案路徑: pcmef/core/inference_payload.py
-# 模組定位: CanonicalCase 與 Multi-Agent provider 之間唯一的 truth firewall 閘門。
-# 功能說明: 定義 truth-free 的 InferencePayload、observable quality cue allowlist，以及送出前的洩漏掃描。
-# 主要責任: 保證 provider 只看得到 opaque_case_id、已載入的 evidence 與可觀測 quality cues。
-# 呼叫來源: agents.observation/physics/visual_semantic/arbitration、agents.provider、experiments.e2_formal。
-# 輸入契約: CanonicalCase 加上 evaluator-only 的 opaque id 映射；quality cues 必須事先由 evidence 算好。
-# 輸出契約: frozen InferencePayload；to_provider_dict() 的結果保證不含 truth 或 benchmark metadata。
-# 安全邊界: 這是整個系統最關鍵的洩漏邊界；class/condition/severity/family/path 一律 hard schema reject。
-# 維護提醒: 新增任何 payload 欄位前，先問「evaluator 能不能用它反推 ground truth」，能就不准加。
-# 版本: v0.1.0 / 2026-08-25
-# ----------------------------------------------------------------------------------------------------
+# 產生時間: 2026-08-25 21:35 +08:00
+# 版本: v0.1.0
+# 功能說明: 決定「哪些資訊可以讓 LLM 看到」。它只放行不具名的代號、已載入的影像與
+#           ToF 陣列，以及少數可從這些資料本身算出來的品質指標；任何會透露答案的
+#           欄位或字串（類別、condition、嚴重度、場景家族、檔名路徑）一律擋下。
+# 模組定位: 整個系統最關鍵的洩漏邊界。它「不是」資料轉換工具 —— 不做特徵計算，
+#           quality cues 必須由呼叫端事先從 evidence 算好再傳入。
+# 主要責任:
+#   1. OBSERVABLE_QUALITY_CUES 定義 agent 可見的品質指標 allowlist
+#   2. FORBIDDEN_PAYLOAD_FIELDS 定義硬性拒絕的欄位名
+#   3. assert_no_forbidden_tokens() 遞迴掃描字串值，擋下用合法欄位夾帶語意的情況
+#   4. InferencePayload._check_opaque_id() 拒絕具語意的 canonical ID
+#   5. InferencePayload._check_evidence() 拒絕未載入的檔案路徑與非有限值
+#   6. to_provider_dict() 在回傳前再掃描一次，供 provider payload snapshot 測試
+# 維護提醒:
+#   - 不得加入任何 perception 模型導出的量（例如 predictive entropy）；那會讓 s_A
+#     與 p_rel 統計相關，破壞 decision-space interpolation 的語意（NOTE-003）。
+#   - 不得把檔案路徑字串傳進來代替已載入的張量；provider 永遠不該看到來源路徑。
+#   - 不得只檢查 dict key 就認為安全；把語意字串塞進合法欄位的值一樣是洩漏，
+#     因此禁止 token 掃描同時涵蓋 key 與 value。
+#   - 新增任何 payload 欄位前先問「evaluator 能不能用它反推 ground truth」，能就不准加。
+#   - v0.1.0 新增：首版 firewall，quality cue 邊界見 NOTE-003、身分層見 NOTE-004。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/leakage/test_inference_firewall.py -v
+# ------------------------------------------------------------
 
 from __future__ import annotations
 
