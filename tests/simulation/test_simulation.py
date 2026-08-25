@@ -301,6 +301,51 @@ def test_all_four_classes_render_with_distinct_energy(tmp_path):
 
 
 @needs_mitsuba
+def test_transient_window_is_not_truncated(tmp_path):
+    """NOTE-013：峰值貼在窗邊代表光還在抵達時窗就關了，FWHM 會恆為 0。
+
+    nonzero_bin_ratio 看不出這件事（截斷後仍有七成 bin 帶能量），
+    真正的徵兆是 peak_bin 與 edge_fraction。
+    """
+    manifest = _run_smoke(tmp_path, [{"class_label": "Empty", "seed": 1, "medium": {}}])
+    transient = manifest["scenarios"][0]["transient"]
+    bins = transient["binning"]["temporal_bins"]
+    assert transient["peak_bin"] < bins - 2, "peak must not sit on the window edge"
+    assert transient["edge_fraction"] < 0.5
+
+
+@needs_mitsuba
+def test_surrogate_can_consume_the_rendered_transient(tmp_path):
+    """Batch 4 與 Batch 5 的整合點：算出來的 transient 必須能餵進 surrogate。
+
+    初版時間窗截斷回波，FWHM=0，Sigma 映射拒絕受理 —— 該缺陷是在這個
+    整合點才被發現的，因此把它固定成測試。
+    """
+    from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
+    from pcmef.surrogate.single_acquisition import SensorSurrogate
+    from pcmef.surrogate.temporal_model import TemporalModel
+
+    manifest = _run_smoke(tmp_path, [{"class_label": "Empty", "seed": 2, "medium": {}}])
+    outputs = manifest["scenarios"][0]["transient"]["outputs"]
+    transient = np.load(outputs["optical_transient"])
+    axis = np.load(outputs["optical_transient_time_axis"])
+
+    surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
+    observables = surrogate.observe(transient, axis)
+    assert observables.fwhm_s > 0, "a truncated window yields FWHM=0"
+
+    recording = TemporalModel(surrogate).generate_recording(
+        transient, axis,
+        sample_interval_s=0.082,
+        sample_interval_source="edge_impulse_12.19512Hz",
+        seed=1042, n_samples=64,
+    )
+    assert recording.values.shape == (64, 4)
+    assert np.all(np.isfinite(recording.values))
+    assert np.all(recording.values.std(axis=0) > 0)
+
+
+@needs_mitsuba
 def test_manifest_carries_dependency_versions_and_claim_boundary(tmp_path):
     """E1-G03 的證據必須能追到當時用的是哪個版本。"""
     manifest = _run_smoke(tmp_path, [{"class_label": "Empty", "seed": 5, "medium": {}}])

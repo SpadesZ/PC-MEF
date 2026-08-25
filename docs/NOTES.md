@@ -298,6 +298,18 @@ usable N 必須由實際 physical source file 盤點後決定。
 
 取得 CSV 時必須**同時取得採集當時的腳本** —— 沒有它就無法解析 Sigma
 究竟讀自 0x18 或 0x1E（見 [NOTE-010]），E1-G08 會卡在 UNRESOLVED。
+**Edge Impulse 上不會有這個答案**：雲端只存上傳後的數值，不存採集程式。
+
+**採集腳本的線索（2026-08-26）**：Notion 六個技術頁面均非採集腳本
+（環境架設、合併後處理、impulse 設定截圖、兩份純 Keras 模型定義、
+三份推論程式）。但 `classify4.py` 的 docstring 寫「優化內容：
+1. 禁用 sensor_data CSV 保存（節省空間）」，程式中為
+`SAVE_RAW_SENSOR_DATA = False  # ← 修改：不保存原始傳感器數據`。
+「禁用」與「修改」代表**先前存在一版把該旗標設為 True 的同支程式**，
+那一版就是（或極接近）採集腳本。向原作者索取時應直接指名這一版。
+
+此線索同時解釋取樣率差異：偏移測試用單一參數腳本（I²C 讀取少）→ 0.0624 s；
+主資料集讀四個 metric（交易多）→ 0.082 s，與 Edge Impulse 的 12.19512 Hz 一致。
 
 樹莓派的 SSH / VNC 帳密依 SRC-SAI §30 屬操作資訊，
 **不寫入本 repo、SAI config 或任何 manifest**；需要時另循 environment/secrets 管道。
@@ -309,6 +321,59 @@ py -3.10 -m pcmef.cli locks status
 `real_split_policy` 顯示為 pending，其下游全部顯示 BLOCKED，
 與本條目描述的阻塞範圍一致。真實資料到位後，`LegacyCSVAdapter` 直接指向
 `data/raw_real/` 即可執行，不需要改碼。
+
+---
+
+## NOTE-013 transient 時間窗必須涵蓋完整回波，並在產出當下偵測截斷
+
+**決策日期**：2026-08-26
+
+**適用範圍**：`pcmef/simulation/mitsuba_adapter.py` 的 `scene_path_bounds()`；
+`pcmef/simulation/mitransient_adapter.py` 的 `default_binning()` 與截斷偵測。
+
+**決策**：
+1. transient 時間窗由 `scene_path_bounds()` 依**實際場景座標**推導
+   （光源→瓶面→相機的直達路徑，加上背景板與相機的距離作為每次反射的增量上界），
+   再乘 `bounce_budget`（預設 7）。
+2. 算完 transient 後立即偵測截斷：峰值落在最後兩個 bin 內，
+   或最末 bin 仍保有峰值 50% 以上能量，即**拋例外中斷**。
+
+**原因**：Batch 4 初版的窗以「相機到瓶身來回加瓶徑三倍」估算，得到窗尾 0.442 m。
+實測掃描（Empty 場景、0–3 m、10 mm bin）顯示：
+
+| 量 | 實測 OPL |
+|---|---|
+| 首次抵達 | 0.185 m |
+| **峰值** | **0.465 m** |
+| 99% 能量 | 1.475 m |
+| 末端 | 1.675 m |
+
+**窗在峰值抵達前就關了。** 波形因此單調上升到邊界，找不到右側半高點，
+FWHM 恆為 0；而 surrogate 的 Sigma 映射以 FWHM 為基底，整條路不可用。
+
+更值得記的是**這個缺陷沒有在 Batch 4 被發現**。當時的診斷指標
+`nonzero_bin_ratio = 0.719` 看起來完全正常 —— 因為截斷後的波形確實有 72%
+的 bin 帶能量。真正的徵兆是「峰值貼在窗邊」，而初版沒有量這件事。
+缺陷直到 Batch 5 試圖消費該輸出、Sigma 模組拒絕 FWHM=0 時才浮現。
+
+修正後總能量由 712 上升到 3909（約 5.5 倍），確認先前截掉了大部分回波。
+
+**驗證**：
+```
+py -3.10 -m pcmef.cli sim smoke
+py -3.10 -m pytest tests/simulation/test_simulation.py -k "energy or truncat" -v
+```
+manifest 中每個 scenario 的 `peak_bin` 與 `edge_fraction` 即截斷診斷；
+峰值應遠離窗邊，`edge_fraction` 應遠小於 0.5。
+
+**維護邊界**：本場景的光源與相機**非共置**，與真實 ToF 感測器（收發同軸）不同。
+因此 `optical_path_to_distance = 0.5`（單程 = 光程長的一半）這個假設
+在本場景並不成立，實測 Distance 約 230–257 mm 而非真實的 100–114 mm。
+這不是缺陷而是**尚未校準**：該係數屬 E1 calibration 的產物，目前標記為 placeholder。
+若未來要讓 surrogate 更貼近真實幾何，正確做法是把光源移到相機位置
+（monostatic），而不是調整這個係數去湊距離 —— 後者是 SRC-SAI §10 明列的禁止做法。
+
+相關：[NOTE-012]
 
 ---
 

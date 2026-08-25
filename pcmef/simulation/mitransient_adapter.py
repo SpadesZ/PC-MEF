@@ -4,7 +4,7 @@
 #         到 artifact 目錄，後者即 CanonicalCase 的 optical_transient_time_axis。
 # 檔案路徑: pcmef/simulation/mitransient_adapter.py
 # 產生時間: 2026-08-26 07:20 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 算出光在場景裡隨時間傳播的過程 —— 不是一張靜態影像，而是每個時間
 #           切片各一張，合起來就是單次 acquisition 內部的光飛行歷程。
 #           同時把 mitransient 用的光程長換算成秒，存成獨立的時間軸檔。
@@ -22,6 +22,9 @@
 #     一律 FAIL_FAST，因為它代表積分器參數已經不合理。
 #   - 不得沿用 cornell_box 的 start_opl=3.5 / bin_width=0.02；那是房間尺度的
 #     設定，本場景只有 5 公分，時間軸會整段落在有效範圍之外。
+#   - v0.2.0 修正：時間窗初版在峰值抵達前就關窗（實測峰值 OPL 0.465 m，
+#     初版窗尾僅 0.442 m），導致 FWHM 恆為 0；改由 scene_path_bounds 推導，
+#     並新增截斷偵測，讓這類錯誤在產出當下就中斷而非等下游發現。
 #   - v0.1.0 新增：首版 transient smoke adapter。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "transient or reproducible" -v
@@ -41,6 +44,7 @@ from pcmef.simulation.mitsuba_adapter import (
     SimulationDependencyError,
     build_scene_dict,
     require_mitsuba,
+    scene_path_bounds,
 )
 from pcmef.simulation.scenario import ScenarioConfig
 
@@ -143,8 +147,9 @@ def build_transient_scene_dict(
 class MiTransientAdapter:
     """optical transient 算圖的封裝。"""
 
-    def __init__(self, variant: str = DEFAULT_VARIANT) -> None:
+    def __init__(self, variant: str = DEFAULT_VARIANT, bounce_budget: float = 7.0) -> None:
         self.variant = variant
+        self.bounce_budget = float(bounce_budget)
 
     def default_binning(
         self, config: ScenarioConfig, temporal_bins: int = 256
@@ -153,17 +158,20 @@ class MiTransientAdapter:
 
         cornell_box 的預設值是房間尺度（start_opl=3.5 m）；本場景只有 5 公分，
         直接沿用會讓整段時間軸落在光還沒抵達的區間，算出全零的 transient。
-        因此以幾何推導：涵蓋相機到瓶身來回再加上瓶內多次散射的餘裕。
+
+        v0.2.0 修正：初版把最長路徑估成「相機到瓶身來回加瓶徑三倍」，
+        得到 0.442 m 的窗尾。實測掃描（Empty 場景、0-3 m、10 mm bin）顯示
+        首次抵達在 0.185 m、**峰值在 0.465 m**、99% 能量到 1.475 m、
+        末端 1.675 m —— 也就是初版的窗在峰值抵達前就關了，波形單調上升到邊界，
+        找不到右側半高點，FWHM 恆為 0，surrogate 的 Sigma 映射整條路不可用。
+        改以 scene_path_bounds() 的直達路徑與場景跨距推導，並乘上反射次數預算。
         """
-        geometry = config.geometry
-        sensor_distance_m = geometry.sensor_to_bottle_mm / _MM_PER_M
-        diameter_m = geometry.bottle_diameter_mm / _MM_PER_M
-        # 最短路徑約為相機到瓶面來回；留 20% 餘裕避免截掉首個回波。
-        shortest = 2.0 * sensor_distance_m * 0.8
-        # 最長考量瓶內來回數次的散射路徑。
-        longest = 2.0 * (sensor_distance_m + diameter_m * 3.0)
-        span = max(longest - shortest, diameter_m)
-        return float(shortest), float(span / temporal_bins)
+        shortest, extent = scene_path_bounds(config)
+        # 起點略早於直達路徑，避免因幾何近似而截掉首個回波。
+        start = shortest * 0.9
+        # 反射次數預算 7：實測末端能量落在 shortest + 約 6 倍場景跨距，取 7 留餘裕。
+        end = shortest + self.bounce_budget * extent
+        return float(start), float((end - start) / temporal_bins)
 
     def render_transient(
         self,
@@ -204,6 +212,27 @@ class MiTransientAdapter:
                 "unphysical, and clipping them would hide that."
             )
 
+        # 截斷偵測。波形若在窗邊仍在上升，代表光還在抵達時窗就關了；
+        # 這種 transient 找不到右側半高點，surrogate 的 FWHM 恆為 0，
+        # Sigma 映射整條路不可用。初版沒有這個檢查，直到 Batch 5 消費它才發現。
+        waveform = transient.sum(axis=(0, 1, 3))
+        peak_bin = int(np.argmax(waveform))
+        peak_value = float(waveform[peak_bin])
+        edge_fraction = (
+            float(waveform[-1]) / peak_value if peak_value > 0 else 0.0
+        )
+        truncated = peak_bin >= temporal_bins - 2 or edge_fraction > 0.5
+        if truncated:
+            raise SimulationDependencyError(
+                "the transient time window truncates the response: peak is at bin "
+                f"{peak_bin}/{temporal_bins} and the final bin still holds "
+                f"{edge_fraction:.0%} of the peak. Widen the window "
+                f"(current: start={start_opl_m:.4f} m, "
+                f"end={start_opl_m + bin_width_opl_m * temporal_bins:.4f} m) or raise "
+                "bounce_budget. A truncated transient yields FWHM=0 and makes the "
+                "Sigma mapping unusable."
+            )
+
         transient_path = target_dir / f"{stem}.npy"
         np.save(transient_path, transient.astype(np.float32))
 
@@ -235,8 +264,11 @@ class MiTransientAdapter:
                 "temporal_filter": "box",
                 "scene_units": "metre",
                 "total_energy": float(transient.sum()),
-                "nonzero_bin_ratio": float(
-                    np.mean(transient.sum(axis=(0, 1, 3)) > 0.0)
-                ),
+                "nonzero_bin_ratio": float(np.mean(waveform > 0.0)),
+                # 截斷診斷。peak_bin 貼在窗邊或 edge_fraction 偏高，
+                # 就代表時間窗沒涵蓋完整回波（v0.2.0 新增）。
+                "peak_bin": peak_bin,
+                "edge_fraction": round(edge_fraction, 6),
+                "bounce_budget": self.bounce_budget,
             },
         )

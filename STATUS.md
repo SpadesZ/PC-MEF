@@ -50,7 +50,7 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 
 ### 動手前必讀
 
-- `docs/NOTES.md` — 12 則決策記錄。**改動前先查有沒有對應 NOTE**，
+- `docs/NOTES.md` — 13 則決策記錄。**改動前先查有沒有對應 NOTE**，
   許多看似多餘的設計都是刻意的（例如子行程隔離、檔名鍵對齊、
   `!required` sentinel）。
 - `tests/test_repo_integrity.py` — 檔頭十欄位與 NOTE 引用的自動稽核。
@@ -71,7 +71,7 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 |---|---|---|
 | M0 Data Audit | **部分可行** | Vision 資料完整；ToF 只剩衍生統計量（見 NOTE-011） |
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
-| M2 Surrogate + E1 | 未開始 | 依賴 M0、M1 |
+| M2 Surrogate + E1 | **surrogate 完成** | E1 metrics 待 Batch 6；校準待真實資料 |
 | M3 Post-E1 Split | 未開始 | 依賴 E1 outcome |
 | M4 Perception | 未開始 | 需先安裝 tensorflow / scikit-learn |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
@@ -87,7 +87,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | **完成（等真實資料）** |
 | Batch 3 | Sigma/timing provenance resolver | **完成** |
 | Batch 4 | Mitsuba/mitransient optical transient smoke adapter | **完成** |
-| Batch 5 | single-acquisition surrogate + 500-point temporal model | 未開始 |
+| Batch 5 | single-acquisition surrogate + 500-point temporal model | **完成** |
 | Batch 6 | E1 metrics + dual-lock + scientific rule state machine | 未開始 |
 | Batch 7 | E1-G01..G12 audit + heldout firewall + real split policy audit | 未開始 |
 | Batch 8 | post-E1 split generators + parent-family checks | 未開始 |
@@ -231,7 +231,7 @@ Sigma 未解析時 `e1_eligible_recordings` 強制為 0（E1-G08）。
 
 ## Batch 4 已完成內容（2026-08-26）
 
-測試：**472 passed**。M1 Simulation smoke 通過，E1-G03 的 artifact 已產出。
+測試：**558 passed**。M1 Simulation smoke 通過，E1-G03 的 artifact 已產出。
 
 | 模組 | 對應規格 | 內容 |
 |---|---|---|
@@ -334,6 +334,46 @@ Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的�
 Python 執行環境：`py -3.10`（3.10.11，numpy 2.2.6 / scipy 1.15.3 / pandas 2.3.3
 / PyYAML 6.0.3 / pytest 9.0.3 已就緒）。
 注意 PATH 上的 `python` 指向 3.12 且缺相依，一律使用 `py -3.10`。
+
+---
+
+## Batch 5 已完成內容（2026-08-26）
+
+測試：**558 passed**。整條鏈路已在**真實 mitsuba 輸出**上跑通。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `surrogate/features.py` | §10 | 峰值時間、能量重心、主/背景能量、FWHM、SNR、多路徑突起度 |
+| `surrogate/calibration.py` | §10、§21 | 校準常數容器；formal 模式拒絕 placeholder |
+| `surrogate/{distance,signal_rate,ambient,sigma}.py` | §10 對照表 | 四欄各自獨立映射 |
+| `surrogate/single_acquisition.py` | §10 介面草案 2 | 一次 transient → **恰好一筆** [4] 觀測 |
+| `surrogate/temporal_model.py` | §10 | (500,4) recording；取樣間隔必填 |
+
+**端到端實測**（Empty 場景的真實 transient）：
+
+```
+物理量: FWHM 0.99 ns | SNR 7.8 | multipath 0.56 | total_energy 3909
+recording: (500, 4) | 41.0 s | measurement_time | 每欄 SD 均 > 0
+```
+
+**三條禁止做法都有自動防線**：
+
+| 禁止做法（SRC-SAI §10） | 防線 |
+|---|---|
+| `tof_recording = transient_bins[:500]` | `n_samples` 與 bins 無關，改 bins 不改 recording 長度 |
+| 預設取樣間隔為 0.082 s | `sample_interval_s` 為必填關鍵字，且需附來源 |
+| 只用 Distance 推算 Signal | 固定回波時間只改振幅，Signal 變 10 倍而 Distance 變動 < 5% |
+
+**整合時抓到 Batch 4 的缺陷**（NOTE-013）：transient 時間窗在峰值抵達前就關窗
+（實測峰值 OPL 0.465 m，初版窗尾僅 0.442 m），導致 FWHM 恆為 0。
+當時的 `nonzero_bin_ratio = 0.719` 看起來完全正常，因為截斷後仍有七成 bin 帶能量；
+真正的徵兆是「峰值貼在窗邊」而初版沒有量。修正後總能量 712 → 3909。
+已加入截斷偵測，這類錯誤現在會在產出當下中斷。
+
+**尚未校準**：九個校準常數全部標記 placeholder，formal 模式直接拒絕。
+目前輸出的 Distance 約 230–257 mm（真實為 100–114 mm），
+因為場景光源與相機**非共置**而 `optical_path_to_distance = 0.5` 假設共置。
+正確解法是把光源移到相機位置，**不是**調係數去湊距離（§10 禁止做法）。
 
 ---
 

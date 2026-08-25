@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,7 @@ __all__ = [
     "RenderResult",
     "require_mitsuba",
     "build_scene_dict",
+    "scene_path_bounds",
     "MitsubaAdapter",
 ]
 
@@ -125,6 +127,27 @@ def require_mitsuba(variant: str = DEFAULT_VARIANT):
             f"mitsuba variant {variant!r} failed to initialise: {message}"
         ) from None
     return mi
+
+
+def scene_path_bounds(config: ScenarioConfig) -> tuple[float, float]:
+    """回傳 (最短光程 m, 場景跨距 m)，供 transient 時間窗推導使用。
+
+    最短光程取「光源 -> 瓶面前緣 -> 相機」這條直達路徑；場景跨距取背景板到
+    相機的距離與瓶身高度中的較大者，作為每次額外反射的路徑增量上界。
+    兩者都由 build_scene_dict() 實際使用的座標推得，因此場景一改這裡就跟著改，
+    不會出現「幾何改了但時間窗還停在舊尺度」的靜默錯誤。
+    """
+    geometry = config.geometry
+    outer_r = geometry.outer_radius_mm / _MM_PER_M
+    sensor_distance = geometry.sensor_to_bottle_mm / _MM_PER_M
+    camera_z = -(sensor_distance + outer_r)
+    light_position = (0.0, outer_r * 4.0, camera_z * 0.5)
+    backdrop_z = outer_r * 6.0
+
+    light_to_bottle = math.dist(light_position, (0.0, 0.0, -outer_r))
+    shortest = light_to_bottle + sensor_distance
+    extent = max(backdrop_z - camera_z, outer_r * 4.0)
+    return float(shortest), float(extent)
 
 
 def _look_at(mi, origin, target, up):
