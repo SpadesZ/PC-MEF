@@ -33,9 +33,11 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 
 ```powershell
 py -3.10 -m pytest                                   # 全部測試（約 80 秒）
-py -3.10 -m pcmef.cli config check                   # 待教授裁決的 17 項
+py -3.10 -m pcmef.cli config check                   # 待教授裁決的 14 項
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
 py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
+py -3.10 -m pcmef.cli surrogate smoke                # E1-G04 四特徵無 NaN 驗證
+py -3.10 -m pcmef.cli split plan-real --source data/raw_real/edge_impulse_export
 py -3.10 -m pcmef.cli provenance resolve-sigma       # SRC-D01/D02 證據
 py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inventory
 ```
@@ -46,11 +48,12 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 |---|---|---|
 | ~~真實 ToF 只剩窗口 Mean/Std~~ | — | **已解除**：Edge Impulse export 復原 560 筆 500×4 |
 | ~~Sigma register 未定~~ | — | **已解出 0x18**（排除檢驗，NOTE-010）；採集腳本仍未取得，取得後須複核 |
-| 17 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
+| ~~Real split 三值未裁決~~ | — | **已裁決並凍結** 392/168（NOTE-014） |
+| 14 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
 
 ### 動手前必讀
 
-- `docs/NOTES.md` — 13 則決策記錄。**改動前先查有沒有對應 NOTE**，
+- `docs/NOTES.md` — 14 則決策記錄。**改動前先查有沒有對應 NOTE**，
   許多看似多餘的設計都是刻意的（例如子行程隔離、檔名鍵對齊、
   `!required` sentinel）。
 - `tests/test_repo_integrity.py` — 檔頭十欄位與 NOTE 引用的自動稽核。
@@ -71,8 +74,8 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 |---|---|---|
 | M0 Data Audit | **資料齊備** | 560 筆 500×4 原始序列已復原；Vision 1200 張完整（NOTE-011） |
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
-| M2 Surrogate + E1 | **surrogate 完成** | E1 metrics 待 Batch 6；校準待真實資料 |
-| M3 Post-E1 Split | 未開始 | 依賴 E1 outcome |
+| M2 Surrogate + E1 | **surrogate 完成、split 已凍結** | E1 metrics 待 Batch 6 |
+| M3 Post-E1 Split | 未開始 | 依賴 E1 outcome（synthetic split 不得早於此） |
 | M4 Perception | 未開始 | 需先安裝 tensorflow / scikit-learn |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
 | M6 Multi-Agent | 未開始 | 依賴 M3 |
@@ -177,9 +180,10 @@ formal_config.lock 將保存其 SHA-256）、`observation_brief_v1`、
 推導失敗即拒絕載入，不得沿用 0.082 或 0.02 全域常數；
 Sigma 未解析時 `e1_eligible_recordings` 強制為 0（E1-G08）。
 
-**尚未實作**：`core/splits.py`（SplitRegistry）。它在 §31 目錄樹中，
-但 `real_split_policy` 的 creation_phase 是 `AFTER_M0_BEFORE_ANY_CALIBRATION`，
-必須先有真實 inventory 才能建立，因此排在真實資料到位之後。
+~~**尚未實作**：`core/splits.py`（SplitRegistry）~~ → **已於 2026-08-26 補上**。
+當初延後的理由（`real_split_policy` 的 creation_phase 是
+`AFTER_M0_BEFORE_ANY_CALIBRATION`，必須先有真實 inventory）已滿足。
+見「Real split 已凍結」與 NOTE-014。
 
 ---
 
@@ -276,10 +280,13 @@ formal 模式會直接拒絕載入。
 
 | 面向 | 現況 | 說明 |
 |---|---|---|
-| §31 目錄樹 | **16/62 檔** | 缺的全在 Batch 6-8 與 M4-M8 範圍；`core/splits.py` 例外，已不再被資料阻塞 |
-| E1 gates | **4/12 有證據** | G01/G03/G04/G08 |
+| §31 目錄樹 | **17/62 檔** | 缺的全在 Batch 6-8 與 M4-M8 範圍（`core/splits.py` 已於 8/26 補上） |
+| E1 gates | **6/12 有證據** | G01/G02/G03/G04/G08/G09 |
 | Batch exit | **1-5 完成**，6-8 未開始 | |
-| 22 formal locks | 全數登錄；**0 個已寫** | `real_split_policy` 無前置但缺 3 項教授裁決值 |
+| 22 formal locks | 全數登錄；**1 個已寫** | `real_split_policy`（`186d307571b39ce3`）；其餘 21 個仍 pending |
+
+> 上表為 2026-08-26 首次稽核後、當日稍晚 real split 落地的更新值。
+> 首次稽核時為 16/62 檔、4/12 gate、0 個 lock。
 
 **稽核抓到的缺口（已補）**：
 
@@ -301,8 +308,50 @@ e1_eligible_recordings     : 560
 exclusions: none
 ```
 
-**仍為 0/12 的 gate 各自的阻塞**：G02/G09 需 `core/splits.py` 與 3 項教授裁決值；
-G05 需 scenario generator（Batch 8）；G06/G07/G10/G11/G12 屬 Batch 6-7。
+**仍缺 artifact 的 6 個 gate 各自的阻塞**：G05 需 scenario generator（Batch 8）；
+G06/G07/G10/G11/G12 屬 Batch 6-7。G02/G09 原本的阻塞（`core/splits.py` 與
+3 項教授裁決值）已於 2026-08-26 解除，見下節。
+
+---
+
+## Real split 已凍結（2026-08-26，NOTE-014）
+
+教授裁決三項數值後，`core/splits.py` 建成並實際執行。**這是 M0 之後、任何校準
+之前**的切分，符合 SRC-PLAN §3.1 的時序要求。
+
+| 裁決項目 | 值 |
+|---|---|
+| allocation | calibration 70% / heldout_real 30% |
+| minimum_per_class | 100 支 e1-eligible recordings |
+| seed | 20260826 |
+| 任一 class < 100 | **BLOCK**（不是警告） |
+| lock 後 redraw | **禁止** |
+
+執行結果與裁決時的預測完全一致：
+
+| class | eligible | calibration | heldout_real |
+|---|---|---|---|
+| Bubbly / Empty / Misty / Water-filled | 各 140 | 各 98 | 各 42 |
+| **TOTAL** | **560** | **392** | **168** |
+
+ID 碰撞 0 筆；heldout access count 於凍結時為 0。
+`freeze/real_split_policy.lock.json`，payload hash `186d307571b39ce3`。
+以 `--set real_split_policy.seed=99999` 重凍已實測被拒（exit 1，locks are immutable）。
+
+**兩份 artifact 的版控分工**：`data/splits/split_registry.json` 進版控，
+`freeze/*.lock.json` 不進（lock 屬於個別 run）。registry 因此也帶出三組
+set hash，與 lock 同名欄位互為對照，已實測相符
+（`f76776e4` / `4bda77f6` / `8421a54e`）。
+注意 repo 單獨保有的資訊足以**稽核**切分，但不足以**重算** ——
+重算需要同樣不進版控的 `data/raw_real/`（560 個 JSON）。
+
+**group_rule = `seeded_stratified_recording`，不是 group-disjoint**，理由記錄在
+policy 與 lock 內：Edge Impulse 匯出的 560 筆樣本 payload 只有
+`device_type / interval_ms / sensors / values`，沒有任何 session 欄位；
+唯一的時間戳 `protected.iat` 全體只橫跨 46 秒（12:21:19–12:22:05），
+而實際採集 560×41 秒需 6 小時 22 分 → 那是匯入時間，不是採集時間。
+裁決說「若有 session/time grouping 以 group-disjoint 優先」，前提不成立。
+**若日後取得採集腳本或 session log，須依 NOTE-014 走新 run，不得就地重抽。**
 
 ---
 
@@ -333,7 +382,7 @@ G05 需 scenario generator（Batch 8）；G06/G07/G10/G11/G12 屬 Batch 6-7。
 
 ---
 
-## 待教授裁決事項（formal-blocking，共 17 項）
+## 待教授裁決事項（formal-blocking，共 14 項）
 
 執行 `py -3.10 -m pcmef.cli config check` 可隨時取得最新清單。
 這些數值依 SRC-PLAN Appendix A 與 SRC-SAI Appendix F **禁止實作端自行補值**，
@@ -341,7 +390,6 @@ G05 需 scenario generator（Batch 8）；G06/G07/G10/G11/G12 屬 Batch 6-7。
 
 | 分類 | 待裁決項目 |
 |---|---|
-| Real split | `allocation`、`minimum_per_class`、`seed` |
 | E1 | `bootstrap_replicates`、`bootstrap_seed` |
 | Perception | `training_seed_pairs` |
 | Reliability | `crossfit_folds` |
@@ -451,21 +499,28 @@ E1 可依原規格在 500 點序列上進行，`e1_scientific_rule.lock` 沿用�
 
 ## 下一步
 
-1. **取得前研究原始資料** —— 這是目前唯一的關鍵路徑。
-   Batch 2 的程式已完成，資料一到就能直接跑出真實的五層計數與排除帳。
+原本的關鍵路徑（取得前研究原始資料）已於 2026-08-26 解除，見「M0 資料齊備」。
+Real split 三項裁決值亦已核定並凍結。目前無外部阻塞。
 
-   **最可能的來源：Edge Impulse 專案 `AndyCohan / AndyCohan-project-1`。**
-   資料當初上傳到那裡訓練（448 training windows、5h 6m 8s、Target Raspberry Pi 4），
-   對應 560 筆的 80% 訓練切分——代表**完整 560 筆的 500 點序列曾存在於該專案**。
-   Edge Impulse 保留 raw data 且支援匯出。需要該帳號的存取權。
+1. **Batch 6** —— E1 metrics + dual-lock + scientific rule state machine。
+   對應 SRC-SAI Appendix D 的第六個 sprint，會補上 G06/G07/G10/G11/G12 五個
+   gate 的 artifact。三個子項各自的先決條件：
 
-   其餘兩條線索：
-   - 樹莓派本機（`/home/pi/`，採集腳本輸出目錄），
-     連線資訊在 Notion「研究交接」首頁 —— 依 SRC-SAI §30，
-     該帳密屬操作資訊，不寫入本 repo 或任何 config。
-   - Notion 首頁的 Google Drive 連結（Kaleidagraph Plot、影像辨識程式）。
-   取得後同時需要**採集當時的腳本**，才能解析 Sigma register（見 NOTE-010）。
-2. 向教授確認上表數值中至少 Real split 與 E2 兩組。
-3. **Batch 3**（Sigma/timing provenance resolver）可在資料到位後立即接續；
-   若要在等待期間繼續推進，Batch 4（Mitsuba/mitransient smoke adapter）
-   不依賴真實資料，但需先安裝 `mitsuba` / `drjit`。
+   | 子項 | 產出 | 先決 |
+   |---|---|---|
+   | E1 metrics | `tests/e1_metrics.xml`（G06） | `bootstrap_replicates`、`bootstrap_seed` 未核定 → formal run 會 BLOCK |
+   | dual-lock | `freeze/e1_candidates.lock.json`（G07）＋`e1_evaluation_design.lock.json`（G10） | 依 lock 先決順序，evaluation design 必須早於 candidates 定案 |
+   | scientific rule | `freeze/e1_scientific_rule.lock.json`（G11）＋`claim_boundary.lock.json`（G12） | 規則須在看到任何 E1 結果前凍結 |
+
+   **注意 G06 的裁決依賴**：E1 的 `bootstrap_replicates` / `bootstrap_seed` 仍在
+   14 項待核定清單內。程式可以先寫完並用 dev config 跑通，但 formal run 會被
+   `!required` 擋下——這是預期行為，不是 bug，**不得補預設值**。
+
+2. **仍待教授核定的 14 項**（`config check` 有完整清單）。若要一次問完，
+   優先序為：E1 bootstrap 兩項（擋 Batch 6 formal）→ Gate `alpha/beta/gamma`
+   （須由 validation 搜尋選出後才 freeze，不是憑空給值）→ E2 兩項。
+
+3. **採集腳本仍未取得**（`acquisition_script_obtained: false`）。
+   Sigma register 已用排除法解出 0x18，不再阻塞任何工作，但腳本一旦取得
+   須依 NOTE-010 複核。若複核結果與 0x18 不符，`sigma_provenance` lock
+   之後的所有 surrogate 校準都要重跑。

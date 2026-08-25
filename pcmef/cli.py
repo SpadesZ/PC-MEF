@@ -307,6 +307,110 @@ def cmd_sim_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_real_split(args: argparse.Namespace):
+    """共用：盤點 -> 依政策規劃 real split。回傳 (config, report, plan)。"""
+    from pcmef.core.splits import GroupRule, RealSplitPolicy, plan_real_split
+
+    config = _load(args)
+    if args.source_format == "edge-impulse":
+        from pcmef.adapters.edge_impulse import EdgeImpulseAdapter
+
+        adapter = EdgeImpulseAdapter(
+            sigma_status=config.get("sigma_provenance.status", "UNRESOLVED"),
+            nominal_logical_recordings=int(
+                config.get("real_anchors.nominal_logical_recordings", 0)
+            ),
+            nominal_source=", ".join(config.sources),
+        )
+    else:
+        from pcmef.adapters.legacy_csv import LegacyCSVAdapter, LegacyCSVConfig
+
+        adapter = LegacyCSVAdapter(
+            LegacyCSVConfig(sigma_status=config.get("sigma_provenance.status", "UNRESOLVED"))
+        )
+
+    report = adapter.audit_alignment(adapter.build_inventory(args.source))
+    if report.counts.e1_eligible_recordings == 0:
+        print(
+            "error: no e1-eligible recordings; the split must not be planned on "
+            "data that cannot enter E1 (see E1-G08)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    # 以 class 分組收集 e1-eligible 的 recording ID。
+    eligible: dict[str, list[str]] = {}
+    for measurement in report.aligned:
+        eligible.setdefault(measurement.class_label, []).append(
+            f"{measurement.condition}/measurement_{measurement.measurement_key}"
+        )
+
+    allocation = config.get("real_split_policy.allocation")
+    policy = RealSplitPolicy(
+        calibration_ratio=float(allocation["calibration"]),
+        heldout_ratio=float(allocation["heldout_real"]),
+        minimum_per_class=int(config.get("real_split_policy.minimum_per_class")),
+        seed=int(config.get("real_split_policy.seed")),
+        group_rule=GroupRule(config.get("real_split_policy.resolved_group_rule")),
+        group_rule_evidence=str(config.get("real_split_policy.group_rule_evidence")),
+    )
+    return config, report, plan_real_split(eligible, policy)
+
+
+def cmd_split_plan_real(args: argparse.Namespace) -> int:
+    """E1-G02：規劃 real split 並寫出 split_registry.json。"""
+    _, _, plan = _build_real_split(args)
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    registry = plan.to_registry()
+    (out_dir / "split_registry.json").write_text(
+        json.dumps(registry, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    print(f"group rule : {registry['group_rule']}")
+    print(f"seed       : {registry['seed']}")
+    print("\n%-14s %10s %13s %13s" % ("class", "eligible", "calibration", "heldout_real"))
+    for cls, counts in registry["counts"].items():
+        print(
+            "%-14s %10d %13d %13d"
+            % (cls, counts["eligible"], counts["calibration"], counts["heldout_real"])
+        )
+    totals = registry["totals"]
+    print(
+        "%-14s %10d %13d %13d"
+        % ("TOTAL", totals["eligible"], totals["calibration"], totals["heldout_real"])
+    )
+    print(f"\nid collisions       : {registry['collision_count']}")
+    print(f"heldout access count: {registry['heldout_access_count']}")
+    print(f"\nartifact: {(out_dir / 'split_registry.json').resolve()}")
+    return 0
+
+
+def cmd_freeze_real_split_policy(args: argparse.Namespace) -> int:
+    """E1-G09：把 real split policy 凍結成不可變更的 lock。"""
+    _, _, plan = _build_real_split(args)
+    store = LockStore(args.freeze_dir)
+    path = store.write("real_split_policy", plan.to_lock_payload())
+
+    payload = store.load("real_split_policy")
+    print("real_split_policy.lock frozen")
+    print(f"  path                 : {path.resolve()}")
+    print(f"  payload hash         : {store.load_hash('real_split_policy')}")
+    print(f"  eligible_set_hash    : {payload['eligible_set_hash'][:16]}")
+    print(f"  calibration_set_hash : {payload['calibration_set_hash'][:16]}")
+    print(f"  heldout_real_set_hash: {payload['heldout_real_set_hash'][:16]}")
+    print(f"  totals               : {payload['totals']}")
+    print(f"  redraw policy        : {payload['redraw_policy']}")
+    print(
+        "\nheld-out is now sealed: it may only be opened once, for E1 final "
+        "evaluation. Re-running this command with different data or seed will be "
+        "refused (locks are immutable)."
+    )
+    return 0
+
+
 def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
     """E1-G04：驗證 surrogate 能由真實 transient 產出四特徵且無 NaN/Inf。
 
@@ -668,6 +772,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,  # 內部旗標：標示此行程即為算圖 worker
     )
     smoke.set_defaults(func=cmd_sim_smoke)
+
+    split_parser = subparsers.add_parser("split", help="資料切分")
+    split_sub = split_parser.add_subparsers(dest="split_command", required=True)
+    plan_real = split_sub.add_parser(
+        "plan-real", help="E1-G02：規劃 real split 並產出 split_registry.json"
+    )
+    freeze_real = split_sub.add_parser(
+        "freeze-real", help="E1-G09：凍結 real_split_policy.lock（不可重抽）"
+    )
+    for parser_ in (plan_real, freeze_real):
+        parser_.add_argument("--source", required=True, help="原始資料根目錄（唯讀）")
+        parser_.add_argument(
+            "--source-format", default="edge-impulse",
+            choices=["legacy-csv", "edge-impulse"],
+        )
+    plan_real.add_argument("--out", default="data/splits")
+    plan_real.set_defaults(func=cmd_split_plan_real)
+    freeze_real.add_argument("--freeze-dir", default="freeze")
+    freeze_real.set_defaults(func=cmd_freeze_real_split_policy)
 
     sur_parser = subparsers.add_parser("surrogate", help="感測器替身")
     sur_sub = sur_parser.add_subparsers(dest="surrogate_command", required=True)

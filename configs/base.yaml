@@ -144,15 +144,29 @@ real_split_policy:
   # session/time grouping metadata 可用時採 group-wise，否則採 seeded stratified recording split。
   group_rule: session_group_if_available_else_seeded_stratified_recording
   redraw_policy: FORBIDDEN_AFTER_LOCK
-  allocation: !required
-    source: "SRC-PLAN §3.1 / SRC-SAI §7.9"
-    reason: "calibration 與 heldout_real 的比例必須由教授核定；不得由 Held-out 結果反推"
-  minimum_per_class: !required
-    source: "SRC-PLAN §3.1"
-    reason: "每類最少 recording 數為 advisor-approved 數值"
-  seed: !required
-    source: "SRC-SAI §7.9"
-    reason: "split seed 一旦鎖定不可重抽，必須是明示的核定值"
+  # 以下三項已由教授於 2026-08-26 核定（見 docs/NOTES.md NOTE-014）。
+  allocation:
+    calibration: 0.7
+    heldout_real: 0.3
+  # 每類必須有至少這麼多筆 e1-eligible recordings，否則 BLOCK。
+  minimum_per_class: 100
+  seed: 20260826
+  # 預期結果（560 全數 e1-eligible 時）：每類 98 calibration + 42 heldout，
+  # 合計 392 / 168。若出現 session/time grouping metadata，
+  # 改以 group-disjoint 優先，數量取最接近 70/30 的 feasible split。
+  expected_per_class:
+    calibration: 98
+    heldout_real: 42
+  # group_rule 的實際判定與證據。Edge Impulse 匯出的 protected.iat
+  # 全部落在 46 秒內（2026-03-15 12:21:19–12:22:05），而 560 筆 x 41 s
+  # 需 6h22m 才採得完，故該欄為上傳時戳而非採集時間；payload 亦無 session 欄位。
+  resolved_group_rule: seeded_stratified_recording
+  group_rule_evidence: >-
+    No acquisition session metadata exists in the Edge Impulse export.
+    protected.iat spans only 46 s across all 560 samples
+    (2026-03-15 12:21:19 to 12:22:05) whereas acquiring 560 x 41 s recordings
+    requires 6h22m, so iat is the ingestion timestamp, not acquisition time.
+    payload carries only device_type / interval_ms / sensors / values.
 
 # ---------------------------------------------------------------------------
 # E1

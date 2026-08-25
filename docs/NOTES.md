@@ -324,6 +324,82 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-014 real split policy 的教授裁決與 group_rule 判定
+
+**決策日期**：2026-08-26
+
+**適用範圍**：`pcmef/core/splits.py`；`configs/base.yaml` 的 `real_split_policy`；
+`freeze/real_split_policy.lock.json`（E1-G09）；`data/splits/split_registry.json`（E1-G02）。
+
+**決策**：以下三項由教授於 2026-08-26 核定。
+
+| 項目 | 值 |
+|---|---|
+| allocation | calibration **70%** / heldout_real **30%** |
+| minimum_per_class | **100** e1-eligible recordings |
+| seed | **20260826** |
+| 任一 class < 100 | **BLOCK** |
+| lock 後 | **禁止 redraw** |
+| group 規則 | 若有 session/time grouping 則 group-disjoint 優先，數量取最接近 70/30 的 feasible split |
+
+**group_rule 的實際判定：`seeded_stratified_recording`。**
+這不是預設值而是查證後的結論 —— Edge Impulse 匯出中**不存在採集 session metadata**：
+
+- `protected.iat` 全部落在 **46 秒**內（2026-03-15 12:21:19–12:22:05），
+  而採集 560 筆 × 41 s 需要 **6h22m**，故該欄為 ingestion 時戳而非採集時間。
+- payload 僅有 `device_type / interval_ms / sensors / values`，無任何 session 欄位。
+
+依 SRC-SAI §7.9 的 `group_rule`（session/time group if available; otherwise
+seeded stratified recording），退回 seeded stratified。此證據字串寫入
+policy 與 lock，且 `RealSplitPolicy` 拒絕在無證據時使用該退路。
+
+**執行結果**（560 筆全數 e1-eligible）：
+
+```
+class          eligible  calibration  heldout_real
+Bubbly              140           98            42
+Empty               140           98            42
+Misty               140           98            42
+Water-filled        140           98            42
+TOTAL               560          392           168
+id collisions: 0    heldout access count: 0
+```
+
+與裁決預期（98 + 42、392/168）完全一致。
+
+**原因**：這三個值先前是 `!required`，任何程式讀到即中斷（NOTE-005）。
+教授裁決後才填入，並附上預期數量供交叉檢核 —— 若實作算出的數量與預期不符，
+代表分配邏輯或資料有問題，而不是「反正接近就好」。
+
+**驗證**：
+```
+py -3.10 -m pcmef.cli split plan-real --source data/raw_real/edge_impulse_export
+py -3.10 -m pcmef.cli split freeze-real --source data/raw_real/edge_impulse_export
+py -3.10 -m pytest tests/unit/test_splits.py -v
+```
+已實測：改 seed 後重凍被拒（`locks are immutable`）。
+
+**維護邊界**：
+- heldout 只能經 `heldout_ids("e1_final_evaluation")` 取用，其他用途一律拒絕
+  並保持 access_count 為 0。calibration / tuning / sanity check 都不算例外 ——
+  取用一次就消耗掉這個一次性評估。
+- 每類使用獨立 rng（seed 混入 class 名稱與筆數），因此補了某一類的資料
+  不會意外重抽其他類。共用單一 rng 會讓「只補一類」變成全體重抽。
+- session-group 路徑刻意**未實作**並在被指定時拋例外：等真的有 metadata
+  再實作，程式路徑才測得起來。
+- `split_registry.json` **進版控**、`freeze/*.lock.json` **不進**（`.gitignore`
+  第 17 行，lock 屬於個別 run）。因此 registry 也帶出三組 set hash，與 lock
+  內同名欄位由同一個 `_set_hash` 產生。少了這三欄，被版控的 registry 就是
+  一份無法對照的孤兒檔 —— 有人改了 `assignments` 不會有任何東西攔。
+  已實測三組雜湊與既有 lock 完全相符（`f76776e4` / `4bda77f6` / `8421a54e`）。
+- 完整重現這個切分需要 `data/raw_real/`（亦不進版控，560 個 JSON）。
+  repo 單獨保有的是 registry 的 assignments 與雜湊，足以**稽核**切分，
+  但不足以**重算**。這是刻意取捨，不是遺漏。
+
+相關：[NOTE-005]、[NOTE-011]
+
+---
+
 ## NOTE-013 transient 時間窗必須涵蓋完整回波，並在產出當下偵測截斷
 
 **決策日期**：2026-08-26
