@@ -304,6 +304,70 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-012 載入 mitsuba 後以 os._exit() 結束行程，繞過 drjit 的 teardown 崩潰
+
+**決策日期**：2026-08-26
+
+**適用範圍**：`pcmef/cli.py` 的 `exit_process()`；所有會載入 mitsuba 的 CLI 子指令
+（目前為 `sim smoke`，未來的 scenario generator 與 E1 pipeline 同樣適用）。
+
+**決策**：`sim smoke` 的實際算圖在**子行程**執行，父行程完全不載入 mitsuba。
+父行程以 `simulation_smoke_manifest.json` 的內容判定成敗，
+但**仍檢查並完整回報子行程的 raw exit code** —— 子行程非零而 manifest 全成功時，
+明確標示為已知的 DLL-detach 崩潰並指向本條目。
+「以 manifest 判定」與「隱瞞 exit code」是兩回事，後者不可接受。
+
+**原因**：drjit 1.3.1 + mitsuba 3.8.0 在 Windows 上，連續算多個場景後
+行程結束時必定崩潰。實測特徵：
+
+- 單一場景算圖後正常結束（exit 0）
+- 連續算 4 個 scenario 後必定崩潰，錯誤碼在 `0xC0000005`（ACCESS_VIOLATION）
+  與 `0xC0000409`（STACK_BUFFER_OVERRUN）之間變動
+- 崩潰發生在**所有工作完成之後**：manifest 顯示 4 ok / 0 failed、
+  16 個 artifact 全部落盤、transient 全為有限值、時間軸正確
+
+排除過的做法（依嘗試順序）：
+
+1. `drjit.sync_thread()` + `flush_malloc_cache()` + `flush_kernel_cache()`
+   + `gc.collect()` 的顯式釋放 —— **無效**
+2. `os._exit(code)` —— **無效**。這一步同時推翻了「崩潰在 Python 直譯器
+   teardown」的初步判斷：`os._exit()` 已經跳過 atexit 與直譯器關閉，
+   仍然崩潰，代表問題在更下層的 **DLL_PROCESS_DETACH**，
+   也就是 Windows 卸載原生 DLL 時執行的 detach handler。
+3. `kernel32.TerminateProcess(GetCurrentProcess(), code)` —— **不可靠**。
+   單獨測試時有效，但在 CLI 中無效。原因是它是**非同步**的：
+   實測 `TerminateProcess` 呼叫後會返回，後續的 `time.sleep(5)` 甚至能完整跑完。
+   它只是送出終止請求，Python 仍繼續執行到模組結尾並進入正常關閉，
+   於是又撞上同一個崩潰。這種「有時有效」的修法比沒修更危險。
+4. **子行程隔離** —— **採用**。父行程不載入 mitsuba，因此本身能乾淨結束；
+   崩潰被關在子行程內，且父行程仍看得到它的 exit code。
+
+這不是可以忽略的雜訊。SRC-SAI FR-019 要求所有 formal run 可無 UI 透過 CLI 執行，
+而 CI 與批次腳本一律以 exit code 判定成敗；一個「工作全部成功但回報失敗」的
+指令會讓整批 simulation 被誤判為需要重跑，或更糟 —— 讓真正的失敗被當成
+「又是那個已知的假警報」而被忽略。
+
+子行程隔離同時服務 SRC-SAI NFR-07（400 scenario first-pass 可分批/平行）：
+未來要平行跑多場景時，本來就需要行程層級的隔離，
+因此這個決策不是為了繞過缺陷而付出的技術債，而是原本就該有的架構。
+
+**驗證**：
+```
+py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml
+echo $LASTEXITCODE   # 必須為 0
+py -3.10 -m pytest tests/simulation/test_controller.py -k exit -v
+```
+
+**維護邊界**：這是對上游缺陷的因應，不是好的通則。
+未來 drjit 修正此問題後應移除本函式並改回 `SystemExit`；
+移除前必須先確認連續多場景算圖能乾淨結束。
+**不得**把 `os._exit()` 擴大套用到未載入 mitsuba 的路徑 ——
+那會在無關的指令上靜默吞掉 atexit 清理與未排清的日誌。
+
+相關：[NOTE-011]
+
+---
+
 ## NOTE-011 前研究原始 ToF 500 點序列未留存，只剩滑動窗口 Mean/Std
 
 **決策日期**：2026-08-26

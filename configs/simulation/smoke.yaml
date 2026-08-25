@@ -1,0 +1,69 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 的 sim smoke 以 --config 指定載入；經 ScenarioConfig.from_mapping()
+#         解析後驅動 mitsuba/mitransient adapter；產物進 outputs/simulation/。
+# 檔案路徑: configs/simulation/smoke.yaml
+# 產生時間: 2026-08-26 08:20 +08:00
+# 版本: v0.1.0
+# 功能說明: 定義四個最小場景（每類一個），用來驗證模擬管線能穩定跑通並產出
+#           RGB 與 optical transient；解析度與取樣數刻意壓低，只求快速可重現。
+# 模組定位: smoke 測試設定。它「不是」正式實驗場景 ——
+#           介質參數全部標記為 placeholder，formal 模式會直接拒絕載入。
+# 主要責任:
+#   1. scenarios 列出四類各一個最小場景
+#   2. geometry 沿用 SRC-PLAN §2.1 的前研究錨點
+#   3. medium 以 placeholder 標記所有未校準參數
+#   4. transient.temporal_bins 設定時間軸解析度
+# 維護提醒:
+#   - 不得把此檔用於 formal run；ScenarioConfig 在 formal=True 時會因
+#     placeholder 介質參數而拒絕建構，這是刻意的守門。
+#   - 不得移除 placeholder: true 標記來讓 formal 模式通過；
+#     正確做法是等 validation 凍結真實參數後另建 formal 設定檔。
+#   - v0.1.0 新增：首版四類 smoke 場景。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml
+# ------------------------------------------------------------
+
+simulation:
+  variant: llvm_ad_rgb
+  spp: 16
+  resolution: [64, 64]
+  temporal_bins: 128
+
+  # 幾何取自 SRC-PLAN §2.1 前研究錨點，已由真實資料佐證（NOTE-011）。
+  geometry:
+    sensor_to_bottle_mm: 50.0
+    bottle_diameter_mm: 57.0
+    wall_thickness_mm: 2.0
+    lateral_offset_mm: 0.0
+
+  lighting:
+    preset: nominal
+    irradiance: 1.0
+
+  scenarios:
+    - class_label: Empty
+      seed: 1001
+      medium: {}
+
+    - class_label: Water-filled
+      seed: 1002
+      medium:
+        # 未校準：真實散射參數必須由 E1 calibration 決定。
+        turbidity:
+          value: 0.05
+          placeholder: true
+
+    - class_label: Bubbly
+      seed: 1042
+      medium:
+        # SRC-SAI §9 的 scenario.yaml 草案把此項標為 <validation-frozen range>。
+        bubble_density:
+          value: 0.30
+          placeholder: true
+
+    - class_label: Misty
+      seed: 1004
+      medium:
+        mist_density:
+          value: 0.15
+          placeholder: true

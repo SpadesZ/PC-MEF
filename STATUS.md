@@ -11,7 +11,7 @@
 | 里程碑 | 狀態 | 說明 |
 |---|---|---|
 | M0 Data Audit | **部分可行** | Vision 資料完整；ToF 只剩衍生統計量（見 NOTE-011） |
-| M1 Simulation | 未開始 | 需先安裝 mitsuba / drjit |
+| M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
 | M2 Surrogate + E1 | 未開始 | 依賴 M0、M1 |
 | M3 Post-E1 Split | 未開始 | 依賴 E1 outcome |
 | M4 Perception | 未開始 | 需先安裝 tensorflow / scikit-learn |
@@ -27,7 +27,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | Batch 1 | core schema + SplitRole + InferencePayload + hashing/logging | **完成** |
 | Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | **完成（等真實資料）** |
 | Batch 3 | Sigma/timing provenance resolver | **完成** |
-| Batch 4 | Mitsuba/mitransient optical transient smoke adapter | 未開始 |
+| Batch 4 | Mitsuba/mitransient optical transient smoke adapter | **完成** |
 | Batch 5 | single-acquisition surrogate + 500-point temporal model | 未開始 |
 | Batch 6 | E1 metrics + dual-lock + scientific rule state machine | 未開始 |
 | Batch 7 | E1-G01..G12 audit + heldout firewall + real split policy audit | 未開始 |
@@ -163,6 +163,47 @@ Sigma 未解析時 `e1_eligible_recordings` 強制為 0（E1-G08）。
 
 ---
 
+## Batch 4 已完成內容（2026-08-26）
+
+測試：**472 passed**。M1 Simulation smoke 通過，E1-G03 的 artifact 已產出。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `simulation/scenario.py` | §9 scenario.yaml | 幾何/介質/光源契約；formal 模式拒絕 placeholder 介質 |
+| `simulation/mitsuba_adapter.py` | §9 MitsubaAdapter | RGB 算圖 + version/variant/seed/spp provenance |
+| `simulation/mitransient_adapter.py` | §9 MiTransientAdapter | optical transient + 獨立時間軸檔 |
+| `simulation/controller.py` | §9 SimulationController、E1-G03 | 編排 + smoke manifest |
+| `cli sim smoke` | §32 CLI 契約 | 子行程隔離執行（NOTE-012） |
+
+**實測結果**（四類各一場景，64×64、spp=16、128 bins）：
+
+| 場景 | transient shape | bin 寬 | 總能量 |
+|---|---|---|---|
+| Empty | (64,64,128,3) | 9.43 ps | 712.7 |
+| Water-filled | 同上 | 同上 | 831.7 |
+| Bubbly | 同上 | 同上 | 842.1 |
+| Misty | 同上 | 同上 | 850.6 |
+
+時間軸 0.27–1.47 ns，與 5 公分場景的光飛行時間相符；
+連續三次執行能量完全一致（842.1），**determinism 確認**（E1-G03 要求）。
+
+**兩個關鍵設計決定**：
+
+1. **場景單位用公尺不用毫米**。transient 的時間軸由光在場景中的行進距離決定，
+   單位錯了時間軸會整整差三個數量級。
+2. **binning 由幾何推導，不沿用 cornell_box 預設**。mitransient 範例是房間尺度
+   （start_opl=3.5 m），本場景只有 5 公分，直接沿用會算出全零的 transient。
+
+**已知環境問題**：drjit/mitsuba 在 Windows 連續算多場景後，於 DLL detach 階段
+崩潰並回報非零 exit code（工作其實已全部完成）。已用子行程隔離處理，
+父行程以 manifest 判定成敗但仍完整回報子行程 exit code。詳見 NOTE-012。
+
+**claim boundary**：材質與介質參數**尚未校準**，本批次產物不得用於任何
+physics fidelity 主張（E1-G12）。介質參數在設定檔中全部標記 `placeholder: true`，
+formal 模式會直接拒絕載入。
+
+---
+
 ## 待教授裁決事項（formal-blocking，共 19 項）
 
 執行 `py -3.10 -m pcmef.cli config check` 可隨時取得最新清單。
@@ -220,7 +261,7 @@ Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的�
 | 項目 | 狀態 | 影響里程碑 |
 |---|---|---|
 | 逐 recording 的原始 ToF CSV | **未取得**；最可能在樹莓派 `/home/pi/` | E1 的 500 點契約 |
-| `mitsuba` / `drjit` | 未安裝 | M1、M2 |
+| `mitsuba` / `drjit` / `mitransient` | 已安裝（另需 LLVM toolchain 提供 LLVM-C.dll） | — |
 | `tensorflow` / `scikit-learn` | 未安裝 | M4、M5 |
 | `jsonschema` | 未安裝 | M6 agent schema 驗證 |
 

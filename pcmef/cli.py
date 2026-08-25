@@ -2,8 +2,8 @@
 # 上下游: 由使用者終端機與 CI 呼叫；讀取 configs/ 下的 YAML 與 freeze/ 下的 lock 檔，
 #         寫出人類可讀報告到 stdout 與選用的 log 檔；exit code 供 CI 判定。
 # 檔案路徑: pcmef/cli.py
-# 產生時間: 2026-08-26 04:55 +08:00
-# 版本: v0.3.0
+# 產生時間: 2026-08-26 09:50 +08:00
+# 版本: v0.4.0
 # 功能說明: 系統的命令列入口。提供查版本、檢視設定、列出所有待教授裁決的數值、
 #           顯示每個凍結點的狀態、執行 M0 前研究資料盤點，
 #           以及判定 Sigma scaling 與取樣間隔這兩處來源歧異。
@@ -16,8 +16,9 @@
 #   4. cmd_audit_real_data() 執行 M0 盤點並產出四份 artifact 與五層計數
 #   5. cmd_provenance_resolve_sigma() 產出 E1-G08 的 Sigma 證據 artifact
 #   6. cmd_provenance_audit_timing() 並列三個取樣間隔來源並量化偏差
-#   7. cmd_locks_status() 顯示每個 lock 為 frozen / pending / BLOCKED
-#   8. main() 統一把 ConfigError / LockError / LegacyCSVError / FormalBlockingError
+#   7. cmd_sim_smoke() 於子行程跑模擬並以 manifest 判定成敗（NOTE-012）
+#   8. cmd_locks_status() 顯示每個 lock 為 frozen / pending / BLOCKED
+#   9. main() 統一把 ConfigError / LockError / LegacyCSVError / FormalBlockingError
 #      轉成 exit code
 # 維護提醒:
 #   - 不得接受 API key 作為命令列參數；secret 一律走環境變數或 secret vault，
@@ -31,6 +32,7 @@
 #   - v0.1.0 新增：version / config show / config check / locks status 四組指令。
 #   - v0.2.0 新增：audit real-data（M0 盤點）。
 #   - v0.3.0 新增：provenance resolve-sigma / audit-timing。
+#   - v0.4.0 新增：sim smoke（子行程隔離，見 NOTE-012）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/test_cli.py -v
 #   - py -3.10 -m pcmef.cli config check
@@ -207,6 +209,136 @@ def cmd_audit_real_data(args: argparse.Namespace) -> int:
             "(see docs/NOTES.md NOTE-010).",
             file=sys.stderr,
         )
+    return 0
+
+
+def cmd_sim_smoke(args: argparse.Namespace) -> int:
+    """M1：跑最小模擬場景並產出 E1-G03 的 smoke manifest。
+
+    NOTE(NOTE-012): 實際算圖在子行程執行，父行程不載入 mitsuba。
+    drjit/mitsuba 在連續算多場景後會於 Windows DLL detach 階段崩潰，
+    讓已完成的 run 回報成失敗；隔離到子行程後，父行程改以 manifest 判定成敗，
+    子行程的 raw exit code 仍完整回報，不被藏起來。
+    """
+    if not args.in_worker:
+        return _run_sim_worker(args)
+    import yaml
+
+    from pcmef.simulation.controller import ScenarioStatus, SimulationController
+    from pcmef.simulation.scenario import (
+        Geometry,
+        Lighting,
+        ScenarioConfig,
+        ScenarioConfigError,
+    )
+
+    raw = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    block = raw.get("simulation", raw)
+    shared = {
+        "geometry": Geometry(**(block.get("geometry") or {})),
+        "lighting": Lighting(**(block.get("lighting") or {})),
+        "spp": int(block.get("spp", 16)),
+        "resolution": tuple(block.get("resolution", (64, 64))),
+    }
+    variant = args.variant or block.get("variant", "llvm_ad_rgb")
+    temporal_bins = int(args.temporal_bins or block.get("temporal_bins", 256))
+
+    controller = SimulationController(variant)
+    runs = []
+    for index, entry in enumerate(block.get("scenarios", []), start=1):
+        try:
+            config = ScenarioConfig(
+                class_label=str(entry["class_label"]),
+                seed=int(entry["seed"]),
+                medium_parameters=dict(entry.get("medium") or {}),
+                formal=args.formal,
+                **shared,
+            )
+        except ScenarioConfigError as error:
+            print(f"error: scenario {index}: {error}", file=sys.stderr)
+            return 2
+        scenario_id = f"smoke_{config.medium_preset.value}_{config.seed:04d}"
+        print(f"rendering {scenario_id} ...", flush=True)
+        runs.append(
+            controller.run_scenario(scenario_id, config, args.out, temporal_bins)
+        )
+
+    manifest_path = controller.write_manifest(runs, args.out)
+
+    print()
+    for run in runs:
+        mark = "ok " if run.status == ScenarioStatus.OK else "FAIL"
+        detail = ""
+        if run.transient is not None:
+            detail = (
+                f"transient {tuple(run.transient.shape)} "
+                f"bin={run.transient.bin_width_s:.3e}s "
+                f"energy={run.transient.extra['total_energy']:.1f}"
+            )
+        elif run.error:
+            detail = run.error
+        print(f"  [{mark}] {run.scenario_id:<28} {detail}")
+
+    failed = sum(1 for r in runs if r.status == ScenarioStatus.FAILED)
+    print(f"\nmanifest: {manifest_path.resolve()}")
+    if failed:
+        print(f"{failed} scenario(s) FAILED; see stderr.txt in each folder", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_sim_worker(args: argparse.Namespace) -> int:
+    """在子行程執行模擬，並以 manifest 而非子行程 exit code 判定成敗。
+
+    子行程的 exit code 仍會被檢查與回報：若它非零但 manifest 顯示全部成功，
+    視為已知的 teardown 崩潰並明確標示；若 manifest 本身缺失或有 FAILED，
+    則照實回報失敗。「忽略 exit code」與「隱瞞 exit code」是兩回事。
+    """
+    import subprocess
+
+    manifest_path = Path(args.out) / "simulation_smoke_manifest.json"
+    if manifest_path.exists():
+        manifest_path.unlink()
+
+    command = [
+        sys.executable, "-m", "pcmef.cli", "sim", "smoke",
+        "--config", str(args.config),
+        "--out", str(args.out),
+        "--in-worker",
+    ]
+    if args.variant:
+        command += ["--variant", args.variant]
+    if args.temporal_bins:
+        command += ["--temporal-bins", str(args.temporal_bins)]
+    if args.formal:
+        command.insert(3, "--formal")
+
+    completed = subprocess.run(command, check=False)
+    worker_code = completed.returncode
+
+    if not manifest_path.exists():
+        if worker_code != 0:
+            # worker 在產出 manifest 之前就失敗了，它的 exit code 帶有意義
+            # （例如 2 = formal-blocking 的設定問題），必須原樣傳遞而非壓平成 1，
+            # 否則呼叫端分不出「設定不合法」與「算圖失敗」。
+            return worker_code
+        print("error: worker exited cleanly but wrote no manifest", file=sys.stderr)
+        return 1
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    counts = manifest.get("counts", {})
+    failed = int(counts.get("failed", 0))
+
+    if worker_code != 0:
+        print(
+            f"\nnote: the render worker exited with {worker_code} after all artifacts "
+            "were written. This is the known drjit/mitsuba DLL-detach crash "
+            "(see docs/NOTES.md NOTE-012); success is judged from the manifest.",
+            file=sys.stderr,
+        )
+    if failed:
+        print(f"error: {failed} scenario(s) FAILED", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -410,6 +542,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sigma register provenance 的當前狀態；RESOLVED 才允許 e1-eligible",
     )
     real_data.set_defaults(func=cmd_audit_real_data)
+
+    sim_parser = subparsers.add_parser("sim", help="模擬")
+    sim_sub = sim_parser.add_subparsers(dest="sim_command", required=True)
+    smoke = sim_sub.add_parser(
+        "smoke", help="M1：跑最小場景並產出 E1-G03 smoke manifest"
+    )
+    smoke.add_argument("--config", default="configs/simulation/smoke.yaml")
+    smoke.add_argument("--out", default="outputs/simulation")
+    smoke.add_argument("--variant", help="mitsuba variant（預設取設定檔）")
+    smoke.add_argument("--temporal-bins", type=int, help="transient 時間軸 bin 數")
+    smoke.add_argument(
+        "--in-worker", action="store_true",
+        help=argparse.SUPPRESS,  # 內部旗標：標示此行程即為算圖 worker
+    )
+    smoke.set_defaults(func=cmd_sim_smoke)
 
     prov_parser = subparsers.add_parser("provenance", help="來源歧異的證據判定")
     prov_sub = prov_parser.add_subparsers(dest="provenance_command", required=True)
