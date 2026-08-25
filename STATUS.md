@@ -136,5 +136,11 @@ Python 執行環境：`py -3.10`（3.10.11，numpy 2.2.6 / scipy 1.15.3 / pandas
 
 1. **Batch 2**：`adapters/legacy_csv.py` + `pcmef audit real-data`，
    以合成 fixture 完成全部 FAIL 路徑測試（真實資料到位後不需改碼）。
-2. 取得前研究原始資料，或確認其存放位置。
-3. 向教授確認上表 17 項數值中至少 Real split 與 E2 兩組。
+   對齊實作必須依 NOTE-010：以檔名而非排序位置配對四個 metric 檔。
+2. 取得前研究原始資料。SRC-NOTION 掃描後有兩條線索：
+   - 樹莓派本機（`/home/pi/`，採集腳本輸出目錄），
+     連線資訊在 Notion「研究交接」首頁 —— 依 SRC-SAI §30，
+     該帳密屬操作資訊，不寫入本 repo 或任何 config。
+   - Notion 首頁的 Google Drive 連結（Kaleidagraph Plot、影像辨識程式）。
+   取得後同時需要**採集當時的腳本**，才能解析 Sigma register（見 NOTE-010）。
+3. 向教授確認上表數值中至少 Real split 與 E2 兩組。

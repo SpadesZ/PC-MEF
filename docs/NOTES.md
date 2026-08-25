@@ -285,6 +285,15 @@ SRC-SAI §7.9 的 audit rule 明文「不得 hard-code usable N=560」，
 nominal logical count（4×140=560）只是計算上的數字，
 usable N 必須由實際 physical source file 盤點後決定。
 
+**已知線索（2026-08-25 掃描 SRC-NOTION 後補充）**：原始資料最可能在樹莓派本機
+（採集腳本的輸出目錄位於 `/home/pi/`），另有一個 Google Drive 連結
+（Kaleidagraph Plot、影像辨識程式）。取得 CSV 時必須**同時取得採集當時的腳本** ——
+沒有它就無法解析 Sigma 究竟讀自 0x18 或 0x1E（見 [NOTE-010]），
+E1-G08 會卡在 UNRESOLVED。
+
+樹莓派的 SSH / VNC 帳密依 SRC-SAI §30 屬操作資訊，
+**不寫入本 repo、SAI config 或任何 manifest**；需要時另循 environment/secrets 管道。
+
 **驗證**：
 ```
 py -3.10 -m pcmef.cli locks status
