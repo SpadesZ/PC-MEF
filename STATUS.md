@@ -10,7 +10,7 @@
 
 | 里程碑 | 狀態 | 說明 |
 |---|---|---|
-| M0 Data Audit | **BLOCKED** | 前研究原始資料不在本機（見 NOTE-008） |
+| M0 Data Audit | **部分可行** | Vision 資料完整；ToF 只剩衍生統計量（見 NOTE-011） |
 | M1 Simulation | 未開始 | 需先安裝 mitsuba / drjit |
 | M2 Surrogate + E1 | 未開始 | 依賴 M0、M1 |
 | M3 Post-E1 Split | 未開始 | 依賴 E1 outcome |
@@ -148,11 +148,39 @@ Real split 與 E2 兩組數值。
 
 ---
 
+## 資料現況（2026-08-26 取得 Drive「實驗交接」後更新）
+
+已下載並封存於 `data/raw_real/`（159.5 MB，已被 .gitignore 排除）：
+
+| 模態 | 狀態 | 內容 |
+|---|---|---|
+| **RGB / Vision** | ✅ **完整** | 1200 張 .jpg，4 類各 300 張，資料夾名已是 canonical 標籤；另含 keras/pytorch checkpoint |
+| **ToF 四特徵** | ⚠️ **只有衍生統計量** | `KG_<class>_<metric>_<Mean\|Std>.csv`，各 **(99 窗口 × 140 recordings)**，無時間欄 |
+| ToF 原始 500 點 | ❌ **幾乎不存在** | 僅 3 檔、且**只有 Distance**（偏移測試的最低信心窗口副產物） |
+| 偏移錨點 | ✅ 已驗證 | 實測 98.53 / 90.91 / 88.73 mm，與計畫書 98.61 / 91.05 / 88.76 相差 < 0.15 mm |
+| 推論輸出 | ✅ | classification_results 含完整四類機率向量 |
+
+**三個關鍵後果**（詳見 NOTE-011）：
+
+1. `CanonicalCase.tof_sequence` 的 (500,4) 契約**無法由真實資料滿足**。
+   E1 若要進行，synthetic 側必須套用完全相同的滑動窗口後才比較，
+   且此變更要寫進 `e1_scientific_rule.lock`，不得沿用「500 點分佈比較」措辭。
+2. **取樣間隔實測為 0.0624 s**——既非計畫書的 0.082 也非腳本的 0.02。
+   若當初硬編 0.082，所有時間統計會偏約 31%。Batch 2 從 recording 自身推導的
+   設計因此被反向驗證為必要。
+3. `adapters/legacy_csv.py` **讀不了**這個 (99,140) 矩陣格式。它的對齊、
+   排除帳與五層計數契約仍正確，但需要第二個 reader；在補上前不得宣稱 M0 完成。
+
+Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的是
+**synthetic** Clean/Nominal scenarios，真實資料只作 E1 的 calibration 與 held-out。
+
+---
+
 ## 環境阻塞
 
 | 項目 | 狀態 | 影響里程碑 |
 |---|---|---|
-| 前研究原始 ToF CSV / RGB 影像 | **不在本機**（已掃描 Desktop/Documents/Downloads） | M0、E1 全部 |
+| 逐 recording 的原始 ToF CSV | **未取得**；最可能在樹莓派 `/home/pi/` | E1 的 500 點契約 |
 | `mitsuba` / `drjit` | 未安裝 | M1、M2 |
 | `tensorflow` / `scikit-learn` | 未安裝 | M4、M5 |
 | `jsonschema` | 未安裝 | M6 agent schema 驗證 |

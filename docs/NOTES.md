@@ -304,6 +304,73 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-011 前研究原始 ToF 500 點序列未留存，只剩滑動窗口 Mean/Std
+
+**決策日期**：2026-08-26
+
+**適用範圍**：M0 資料可用性判定；E1 的 Primary/Secondary 指標定義；
+`adapters/legacy_csv.py` 的適用範圍；`configs/base.yaml` 的
+`real_anchors.historical_sample_interval_s`。本條目無對應程式標記，屬資料現況記錄。
+
+**決策**：
+1. 承認**真實 ToF 的四特徵 500 點原始序列不存在**，M0 只能以滑動窗口
+   Mean/Std 作為 real 側證據；`CanonicalCase.tof_sequence` 的 (500,4) 契約
+   無法由真實資料滿足。
+2. E1 若要以現存資料進行，synthetic 側必須套用**完全相同的滑動窗口處理**後才比較；
+   此變更必須寫入 `e1_scientific_rule.lock`，不得沿用「500 點分佈比較」的措辭。
+3. 取樣間隔一律由該筆 recording 推導，**三個文件值皆不得作為預設**。
+
+**原因**：2026-08-26 取得 Drive「實驗交接」資料夾（擁有者 m90099457，
+共享給本人）後逐檔盤點，結果如下。
+
+`KG_all_kaleidagraph.7z`（1.2 MB，46 個 CSV）：
+- `KG_all/` 內有 32 個檔，命名為 `KG_<condition>_<Metric>_<Mean|Std>.csv`
+  （4 類 × 4 metric × 2 統計量）。每檔 shape 皆為 **(99, 140)** ——
+  140 欄是 `No.1`…`No.140`，即每類 140 筆 recording；99 列是滑動窗口。
+  由 500 點推得窗口數 99，對應 window=10 / step=5（(500−10)/5+1=99）；
+  確切參數需回讀 SRC-NOTION「合併csv、資料後處理」的
+  `calculate_sliding_window_stats()` 確認。
+- **這些檔案沒有時間欄**，因此本身不帶 measurement-time provenance。
+- 僅有 3 個檔案是真正的原始序列：`偏移量測試/{left,normal,right}/`
+  下的 `lowest_confidence_window_1.csv`，shape (500,3)，
+  欄位 `Sample_Index / Distance_mm / Timestamp` —— **只有 Distance 一個 metric**，
+  且來自推論腳本的 `save_lowest_confidence_data()` 副產物，不是資料集本體。
+
+`image_classify.7z`（81.5 MB）：**Vision 側完整**。
+`converted_keras/dataset/` 下 4 類各 300 張、共 1200 張 .jpg，
+資料夾名已是 canonical 標籤；另含 `keras_model.h5`、`best_model.pth`、`labels.txt`。
+與 SRC-PLAN §2.1「4 classes × 300 images = 1,200」完全吻合。
+
+**因此模態間的可用性是不對稱的**：Vision 有完整原始資料，ToF 只有衍生統計量。
+
+**附帶發現：時間軸出現第三個值。** 三個偏移測試原始序列的實測取樣間隔
+中位數為 **0.0624 s**（500 點 = 31.7 秒）。這既不是 SRC-PLAN 的
+82 ms/sample（推得 41 s），也不是 SRC-NOTION 三份腳本的 `SAMPLE_INTERVAL = 0.02`。
+0.0624 ≈ 0.02（迴圈 sleep）+ 0.01（`get_sensor_data()` 內 sleep）+ I²C 讀取開銷，
+與先前的推論一致。若當初把 0.082 硬編進系統，所有時間相關統計會偏離約 31%。
+這反向確認了 `adapters/legacy_csv.py` 從 recording 自身推導間隔的設計是必要的。
+
+**附帶驗證：偏移錨點來源確認。** 三筆原始序列的 Distance 平均值為
+normal 98.53 / left 90.91 / right 88.73 mm，與 SRC-PLAN §2.1 記載的
+baseline 98.61、±0.1 cm 側 91.05 / 88.76 相差均在 0.15 mm 內。
+SRC-PLAN 的 offset anchor 數字來源自此，可追溯。
+
+**驗證**：
+```
+py -3.10 -c "import pandas as pd; print(pd.read_csv(r'data/raw_real/tof_aggregated/KG_all/KG_nowater_Distance_mm_Mean.csv').shape)"
+```
+應回傳 `(99, 140)`。Vision 側：`data/raw_real/vision/` 下四類各 300 張。
+
+**維護邊界**：`adapters/legacy_csv.py` 目前只支援
+`<condition>/<metric>/*.csv` 的逐 recording 格式，**讀不了**上述 (99,140)
+矩陣格式；它的對齊、排除帳與五層計數契約仍然正確，但需要第二個 reader。
+在補上之前不得宣稱 M0 可以完成。原始逐 recording CSV 若仍存在，
+最可能在樹莓派 `/home/pi/`（見 [NOTE-008]）。
+
+相關：[NOTE-008]、[NOTE-010]
+
+---
+
 ## NOTE-010 四個 metric 分檔存放且靠位置對齊，必須逐 metric 保存來源檔名
 
 **決策日期**：2026-08-25
