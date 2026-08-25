@@ -59,7 +59,15 @@ py -3.10 -m pytest                              # 全部測試
 py -3.10 -m pcmef.cli config check              # 列出待教授裁決的數值
 py -3.10 -m pcmef.cli --formal config show      # formal 模式（有缺值即 exit 2）
 py -3.10 -m pcmef.cli locks status              # 各 formal lock 的凍結狀態與前置條件
+
+# M0：盤點前研究資料（來源全程唯讀）
+py -3.10 -m pcmef.cli audit real-data --source data/raw_real --out data/inventory
 ```
+
+`audit real-data` 產出四份 artifact：`source_inventory.csv`、
+`measurement_alignment.csv`、`exclusion_ledger.csv`、`audit_report.json`，
+並回報五層計數（nominal / physical / canonical / valid / e1-eligible）。
+四個 metric 依**檔名編號**配對而非排序位置——原因見 `docs/NOTES.md` NOTE-010。
 
 ## 目前進度
 

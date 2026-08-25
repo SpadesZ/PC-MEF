@@ -25,7 +25,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | Batch | 內容 | 狀態 |
 |---|---|---|
 | Batch 1 | core schema + SplitRole + InferencePayload + hashing/logging | **完成** |
-| Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | 未開始 |
+| Batch 2 | LegacyCSVAdapter + nominal/usable count ledger + alignment | **完成（等真實資料）** |
 | Batch 3 | Sigma/timing provenance resolver | 未開始 |
 | Batch 4 | Mitsuba/mitransient optical transient smoke adapter | 未開始 |
 | Batch 5 | single-acquisition surrogate + 500-point temporal model | 未開始 |
@@ -37,7 +37,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 
 ## Batch 1 已完成內容（2026-08-25）
 
-測試：**300 passed**（`py -3.10 -m pytest`）
+測試：**356 passed**（`py -3.10 -m pytest`）
 
 檔頭與 NOTE 規範：全部原始檔已改為十欄位維護契約格式，
 決策記錄移至 `docs/NOTES.md` 並補齊五欄位；
@@ -90,6 +90,39 @@ formal_config.lock 將保存其 SHA-256）、`observation_brief_v1`、
 | 無 Sigma provenance 強制 | `0x1E`（四參數、兩參數）與 `0x18`（單一參數）並存；scaling 三份一致為 `/65536.0` | real case 強制 `provenance.sigma_status`；`sigma_provenance` 兩項列入 formal-blocking |
 
 決策記錄見 `docs/NOTES.md` NOTE-010。
+
+---
+
+## Batch 2 已完成內容（2026-08-26）
+
+測試：**356 passed**。程式碼完成且以合成 fixture 全路徑驗證；
+真實資料到位後直接指向 `data/raw_real/` 即可執行，**不需要改碼**。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `adapters/base.py` | §6 圖2、§7.8 | EvidenceSource 契約、SourceFile、AlignedMeasurement、封閉列舉的 ExclusionReason |
+| `adapters/legacy_csv.py` | §7、§8、NOTE-010 | 盤點、檔名鍵對齊、五層計數、取樣間隔推導 |
+| `cli.py audit real-data` | §32 CLI 契約、E1-G01 | 產出四份 M0 artifact |
+
+**產出 artifact**：`source_inventory.csv`、`measurement_alignment.csv`、
+`exclusion_ledger.csv`、`audit_report.json`。
+
+**關鍵設計：對齊改用檔名編號，不用排序位置。**
+以 10 筆/類、`smoke/sigma` 刻意缺第 2 筆的合成資料實測對照：
+
+| 做法 | 結果 |
+|---|---|
+| legacy 位置配對 | `distance_004`+`sigma_005`、`distance_005`+`sigma_006`…**6 筆靜默污染**，無 NaN、不超 range、無症狀 |
+| 本系統檔名鍵配對 | **乾淨排除 1 筆**（smoke/2），其餘 9 筆四個 metric 編號完全一致 |
+
+**其他守衛**：四檔長度不一致在 formal 模式直接 ERROR（§7.5，不得靜默裁切）；
+取樣間隔一律從該筆 CSV 的時間欄推導（`derived_from_column_0`），
+推導失敗即拒絕載入，不得沿用 0.082 或 0.02 全域常數；
+Sigma 未解析時 `e1_eligible_recordings` 強制為 0（E1-G08）。
+
+**尚未實作**：`core/splits.py`（SplitRegistry）。它在 §31 目錄樹中，
+但 `real_split_policy` 的 creation_phase 是 `AFTER_M0_BEFORE_ANY_CALIBRATION`，
+必須先有真實 inventory 才能建立，因此排在真實資料到位之後。
 
 ---
 

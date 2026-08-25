@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -112,7 +113,120 @@ def test_locks_status_reports_blocked_prerequisites(capsys, tmp_path):
     assert "waiting on real_split_policy" in out
 
 
-@pytest.mark.parametrize("argv", [["config"], ["locks"]])
+@pytest.mark.parametrize("argv", [["config"], ["locks"], ["audit"]])
 def test_subcommand_group_without_action_is_rejected(argv):
     with pytest.raises(SystemExit):
         main(argv)
+
+
+# ---------------------------------------------------------------------------
+# audit real-data（M0）
+# ---------------------------------------------------------------------------
+
+
+def _make_source(root: Path, per_class: int = 2, drop=None) -> Path:
+    """合成 <condition>/<metric>/*.csv；drop=(condition, folder, n) 可刻意缺一檔。"""
+    import numpy as np
+    import pandas as pd
+
+    for condition in ("nowater", "water", "bubble", "smoke"):
+        for metric_index, folder in enumerate(
+            ("distance", "ambient", "signal", "sigma")
+        ):
+            for n in range(1, per_class + 1):
+                if drop == (condition, folder, n):
+                    continue
+                path = root / condition / folder / f"{folder}_{n:03d}.csv"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame(
+                    {
+                        "timestamp": np.arange(500) * 0.082,
+                        "value": np.full(500, (metric_index + 1) * 10.0)
+                        + np.arange(500) * 1e-3,
+                    }
+                ).to_csv(path, index=False)
+    return root
+
+
+def test_audit_real_data_writes_all_m0_artifacts(capsys, tmp_path):
+    source = _make_source(tmp_path / "raw")
+    out = tmp_path / "inventory"
+    assert main(["audit", "real-data", "--source", str(source), "--out", str(out)]) == 0
+
+    for artifact in (
+        "source_inventory.csv",
+        "measurement_alignment.csv",
+        "exclusion_ledger.csv",
+        "audit_report.json",
+    ):
+        assert (out / artifact).exists(), artifact
+
+    report = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))
+    assert report["counts"]["physical_source_files"] == 32
+    assert report["counts"]["canonical_recordings"] == 8
+    assert report["counts"]["valid_recordings"] == 8
+
+
+def test_audit_reports_nominal_separately_from_actual(tmp_path):
+    """SRC-SAI §7.9：nominal logical count 不得被當成 usable N。"""
+    source = _make_source(tmp_path / "raw")
+    out = tmp_path / "inventory"
+    main(["audit", "real-data", "--source", str(source), "--out", str(out)])
+    counts = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))["counts"]
+    assert counts["nominal_logical_recordings"] == 560
+    assert counts["canonical_recordings"] == 8
+    assert counts["nominal_logical_recordings"] != counts["canonical_recordings"]
+
+
+def test_audit_excludes_only_the_affected_measurement(tmp_path):
+    """NOTE-010：缺一個檔只該掉一筆，不得讓後續整批錯位。"""
+    source = _make_source(tmp_path / "raw", per_class=5, drop=("smoke", "sigma", 2))
+    out = tmp_path / "inventory"
+    main(["audit", "real-data", "--source", str(source), "--out", str(out)])
+
+    report = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))
+    assert report["aligned_by_class"]["Misty"] == 4
+    assert report["aligned_by_class"]["Empty"] == 5
+    assert report["exclusions_by_reason"]["missing_metric"] == 1
+
+    alignment = (out / "measurement_alignment.csv").read_text(encoding="utf-8")
+    # 被排除的是 smoke 的第 2 筆；其他 condition 的 sigma_002 不受影響，
+    # 因此必須比對完整路徑而不是檔名。
+    assert "smoke/sigma/sigma_002.csv" not in alignment
+    assert "nowater/sigma/sigma_002.csv" in alignment
+    # smoke 的其餘四筆完好，尤其是被排除那筆「之後」的編號。
+    for n in (1, 3, 4, 5):
+        assert f"smoke/sigma/sigma_{n:03d}.csv" in alignment
+
+
+def test_audit_defaults_to_unresolved_sigma_and_blocks_e1_eligibility(capsys, tmp_path):
+    """M0 盤點本身就是產生 Sigma 證據的步驟，預設不得宣稱已解析。"""
+    source = _make_source(tmp_path / "raw")
+    out = tmp_path / "inventory"
+    main(["audit", "real-data", "--source", str(source), "--out", str(out)])
+    report = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))
+    assert report["sigma_status"] == "UNRESOLVED"
+    assert report["counts"]["e1_eligible_recordings"] == 0
+    assert "E1-G08" in capsys.readouterr().err
+
+
+def test_audit_with_resolved_sigma_reports_eligibility(tmp_path):
+    source = _make_source(tmp_path / "raw")
+    out = tmp_path / "inventory"
+    main([
+        "audit", "real-data", "--source", str(source), "--out", str(out),
+        "--sigma-status", "RESOLVED",
+    ])
+    report = json.loads((out / "audit_report.json").read_text(encoding="utf-8"))
+    assert report["counts"]["e1_eligible_recordings"] == 8
+
+
+def test_audit_on_missing_source_returns_error_code(tmp_path):
+    assert (
+        main([
+            "audit", "real-data",
+            "--source", str(tmp_path / "absent"),
+            "--out", str(tmp_path / "out"),
+        ])
+        == 1
+    )
