@@ -44,7 +44,7 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 
 | 阻塞 | 影響 | 解法 |
 |---|---|---|
-| 真實 ToF 只剩窗口 Mean/Std | E1 的 (500,4) 契約 | 去樹莓派 `/home/pi/` 撈原始 CSV，或教授裁決改走彙總路線 |
+| 真實 ToF 只剩窗口 Mean/Std | E1 的 (500,4) 契約 | **優先查 Edge Impulse 專案 AndyCohan-project-1**（完整 560 筆曾在此）；或樹莓派 /home/pi/；或教授裁決改走彙總路線 |
 | Sigma register 未定（0x18 vs 0x1E） | E1-G08、四特徵 primary | 需**採集當時的腳本**，不是已知那三份推論腳本 |
 | 19 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
 
@@ -210,15 +210,22 @@ Sigma 未解析時 `e1_eligible_recordings` 強制為 0（E1-G08）。
 唯一能解決的是**產生這批資料的採集腳本**——不是已知那三份推論腳本。
 系統拒絕在缺此證據時標為 RESOLVED，四特徵 E1 primary continue 被 E1-G08 擋下。
 
-### SRC-D03（取樣間隔）→ 三來源偏差已量化
+### SRC-D03（取樣間隔）→ **已釐清：資料集內有兩種取樣率**
 
-| 來源 | 值 | 對實測偏差 |
+初次盤點時只看到偏移測試的實測值 0.0624 s，據此推論「0.082 沒有根據」。
+**該推論已修正**——後續讀到 Edge Impulse 設定截圖：
+
+| 證據 | 值 | 換算 |
 |---|---|---|
-| SRC-PLAN 文件記載 | 0.082 s | **+31.4%** |
-| SRC-NOTION 腳本設定 | 0.020 s | **−68.0%** |
-| **實測（偏移測試 recording）** | **0.0624 s** | — |
+| Edge Impulse `Frequency` | **12.19512 Hz** | → **0.082 s**，即 SRC-PLAN 記載值 |
+| Edge Impulse `Window size` | **41,001 ms** | → 41001/82 = **500.01 ≈ 500 點** |
+| `Training windows` × 41 s | 448 × 41 s | → 18,368 s = **5h 6m 8s**，與畫面吻合 |
 
-只有 `measured` 等級可用於任何 recording 的契約；文件值與腳本值都只作記錄。
+**0.082 是主資料集的正確取樣率**；0.0624 屬於偏移測試那次獨立採集。
+兩者是不同的 acquisition session，不是矛盾。
+
+這個修正**強化**了逐 recording 推導間隔的設計：同一資料家族內真的存在
+不同取樣率，任何全域常數都必然對其中一批是錯的。
 
 ---
 
@@ -359,7 +366,13 @@ Python 執行環境：`py -3.10`（3.10.11，numpy 2.2.6 / scipy 1.15.3 / pandas
 
 1. **取得前研究原始資料** —— 這是目前唯一的關鍵路徑。
    Batch 2 的程式已完成，資料一到就能直接跑出真實的五層計數與排除帳。
-   SRC-NOTION 掃描後有兩條線索：
+
+   **最可能的來源：Edge Impulse 專案 `AndyCohan / AndyCohan-project-1`。**
+   資料當初上傳到那裡訓練（448 training windows、5h 6m 8s、Target Raspberry Pi 4），
+   對應 560 筆的 80% 訓練切分——代表**完整 560 筆的 500 點序列曾存在於該專案**。
+   Edge Impulse 保留 raw data 且支援匯出。需要該帳號的存取權。
+
+   其餘兩條線索：
    - 樹莓派本機（`/home/pi/`，採集腳本輸出目錄），
      連線資訊在 Notion「研究交接」首頁 —— 依 SRC-SAI §30，
      該帳密屬操作資訊，不寫入本 repo 或任何 config。

@@ -285,11 +285,19 @@ SRC-SAI §7.9 的 audit rule 明文「不得 hard-code usable N=560」，
 nominal logical count（4×140=560）只是計算上的數字，
 usable N 必須由實際 physical source file 盤點後決定。
 
-**已知線索（2026-08-25 掃描 SRC-NOTION 後補充）**：原始資料最可能在樹莓派本機
-（採集腳本的輸出目錄位於 `/home/pi/`），另有一個 Google Drive 連結
-（Kaleidagraph Plot、影像辨識程式）。取得 CSV 時必須**同時取得採集當時的腳本** ——
-沒有它就無法解析 Sigma 究竟讀自 0x18 或 0x1E（見 [NOTE-010]），
-E1-G08 會卡在 UNRESOLVED。
+**已知線索（2026-08-26 全站重掃後更新）**：Notion 全部 10 個研究頁面
+**零附件**，全站搜尋 "csv" 僅 5 筆且全為程式碼字串，
+因此原始 CSV 確定不在 Notion。三條可能的來源，依可能性排序：
+
+1. **Edge Impulse 專案 `AndyCohan / AndyCohan-project-1`**（Target: Raspberry Pi 4）。
+   資料當初上傳至此訓練，Edge Impulse 保留 raw data 且支援匯出。
+   設定為 448 training windows、5h 6m 8s、4 類 —— 對應 560 筆的 80% 訓練切分，
+   代表**完整 560 筆的 500 點序列曾存在於該專案**。這是目前最可能的來源。
+2. 樹莓派本機 `/home/pi/`（採集腳本輸出目錄）。
+3. Google Drive「實驗交接」—— 已下載並確認**不含**原始逐 recording CSV。
+
+取得 CSV 時必須**同時取得採集當時的腳本** —— 沒有它就無法解析 Sigma
+究竟讀自 0x18 或 0x1E（見 [NOTE-010]），E1-G08 會卡在 UNRESOLVED。
 
 樹莓派的 SSH / VNC 帳密依 SRC-SAI §30 屬操作資訊，
 **不寫入本 repo、SAI config 或任何 manifest**；需要時另循 environment/secrets 管道。
@@ -407,12 +415,27 @@ py -3.10 -m pytest tests/simulation/test_controller.py -k exit -v
 
 **因此模態間的可用性是不對稱的**：Vision 有完整原始資料，ToF 只有衍生統計量。
 
-**附帶發現：時間軸出現第三個值。** 三個偏移測試原始序列的實測取樣間隔
-中位數為 **0.0624 s**（500 點 = 31.7 秒）。這既不是 SRC-PLAN 的
-82 ms/sample（推得 41 s），也不是 SRC-NOTION 三份腳本的 `SAMPLE_INTERVAL = 0.02`。
-0.0624 ≈ 0.02（迴圈 sleep）+ 0.01（`get_sensor_data()` 內 sleep）+ I²C 讀取開銷，
-與先前的推論一致。若當初把 0.082 硬編進系統，所有時間相關統計會偏離約 31%。
-這反向確認了 `adapters/legacy_csv.py` 從 recording 自身推導間隔的設計是必要的。
+**附帶發現：資料集內部存在兩種取樣率（2026-08-26 修正）。**
+
+初次盤點時，三個偏移測試原始序列的實測取樣間隔中位數為 **0.0624 s**
+（500 點 = 31.7 秒），當時據此推論「0.082 與 0.02 都不是實測值」。
+**該推論不成立**，後續讀取 SRC-NOTION 的 Edge Impulse 設定截圖後修正如下：
+
+Edge Impulse impulse 設定明列 `Frequency (Hz) = 12.19512`、
+`Window size = 41,001 ms`。換算：
+
+- 1 / 12.19512 = **0.082 s**，即 SRC-PLAN 記載的 82 ms/sample
+- 41,001 ms / 82 ms = **500.01 ≈ 500 點**，一個 window 恰為一筆 500 點 recording
+
+交叉驗算：`Training windows = 448`、`Data in training set = 5h 6m 8s`；
+448 × 41 s = 18,368 s = 5h 6m 8s，完全吻合。448 / 560 = 0.8，
+對應 Edge Impulse 的 80/20 train/test 切分。
+
+**因此 0.082 是主資料集的正確取樣率，不是未經驗證的文件數字。**
+0.0624 屬於偏移測試那次獨立採集，兩者是不同的 acquisition session。
+
+這個修正**強化**而非削弱了 `adapters/legacy_csv.py` 逐 recording 推導間隔的設計：
+同一個資料家族內部真的存在不同取樣率，任何全域常數都必然對其中一批是錯的。
 
 **附帶驗證：偏移錨點來源確認。** 三筆原始序列的 Distance 平均值為
 normal 98.53 / left 90.91 / right 88.73 mm，與 SRC-PLAN §2.1 記載的

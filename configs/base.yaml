@@ -60,10 +60,18 @@ real_anchors:
   # 實際可用數量必須由 M0 inventory audit 產出 count_status 後決定。
   nominal_logical_recordings: 560
   nominal_images: 1200
-  # 前研究原始資料時間軸約 82 ms/sample（約 12.195 Hz）。
-  # 這是歷史概述值，不是全域精確常數：每筆 recording 的實際 interval
-  # 必須由該筆的 provenance 提供（SRC-SAI §6 measurement_time）。
+  # 主資料集的取樣率。已由 SRC-NOTION 的 Edge Impulse impulse 設定佐證：
+  # Frequency = 12.19512 Hz -> 1/12.19512 = 0.082 s；
+  # Window size = 41,001 ms -> 41001/82 = 500.01，即一個 window 為一筆 500 點 recording。
+  # 交叉驗算 448 windows x 41 s = 5h 6m 8s，與該頁 Data in training set 完全吻合。
+  #
+  # 但這仍**不是**全域常數：偏移測試那批是另一次 acquisition，
+  # 實測間隔為 0.0624 s。每筆 recording 的 interval 一律由該筆 provenance
+  # 提供（SRC-SAI §6 measurement_time、NOTE-011）。
   historical_sample_interval_s: 0.082
+  edge_impulse_frequency_hz: 12.19512
+  edge_impulse_window_ms: 41001
+  offset_test_measured_interval_s: 0.0624
   # SRC-NOTION 的三份推論腳本皆寫 SAMPLE_INTERVAL = 0.02，但那是 deployment
   # 迴圈的 sleep 值，且迴圈內另有 get_sensor_data() 的 time.sleep(0.01) 與
   # I²C 讀取開銷，實際達成間隔必然大於 0.02 s。此值僅作為 SRC-D03 的佐證記錄，
