@@ -33,3 +33,7 @@ dist/
 provenance/*.json
 
 outputs/
+
+# E1-G06 的證據由 `pcmef e1 metrics-evidence` 產生。JUnit 報告帶機器專屬的
+# 時間與路徑，進版控只會製造 diff 雜訊；證據要靠「跑一次」而不是「被提交過」。
+tests/e1_metrics.xml

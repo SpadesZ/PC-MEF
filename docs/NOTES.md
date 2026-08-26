@@ -324,6 +324,81 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-024 E1 的三層分工：度量、成對重抽、判定各自獨立
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/stats/metrics.py`、`pcmef/stats/bootstrap.py`、
+`pcmef/experiments/e1.py`、`pcmef/experiments/e1_outcome.py`。
+
+**決策**：E1 拆成三個互不相依的層，且每層都有一條它自己擋得住的事：
+
+| 層 | 擋什麼 |
+|---|---|
+| `stats.metrics` | 不同物理單位的 raw W1 不得相加；s_f 退化時 BLOCK 而非套預設除數 |
+| `stats.bootstrap` | 兩個候選必須共用同一組重抽索引；推論單位是 recording/scenario |
+| `experiments.e1` | 沒鎖規則不准碰 held-out；兩候選必須跑在同一組隨機實現上 |
+| `experiments.e1_outcome` | 規則只能來自已凍結的 lock；判定不可重來 |
+
+**原因**：
+
+**其一，跨特徵平均的單位問題不是形式主義。** distance 的 W1 單位是 mm、
+signal/ambient 是 MCPS、sigma_like 無單位。實測一個對照：
+distance 差 5 mm（s_f=10）與 signal 差 0.005 MCPS（s_f=0.010），
+raw W1 相差 **1000 倍**，但兩者代表的失真程度其實相同（NW 都是 0.5）。
+直接平均 raw W1 會讓 distance 完全主導結果，而 signal 的改善與退步都看不見。
+§11 因此明訂跨特徵一律先轉 NW。
+
+**其二，成對重抽不是精緻化，它會改變結論。** 以 60 個 scenario 的合成對照
+實測：兩候選共用同一組重抽時，95% CI 寬度比各自獨立重抽窄 **5 倍以上**，
+而且**下界的符號不同** —— 配對後下界為正（判定有改善），
+獨立後下界跨越 0（判定沒有）。原因是同一個 scenario 在兩個候選下的難度本來
+就相關（它們共用 base scenarios 與 seed matrix），各自重抽等於把這份相關性
+丟掉，換來的是純粹的抽樣雜訊。這條對照寫成
+`test_paired_resampling_is_narrower_than_independent`，因為沒有它，
+把實作改成各自獨立重抽不會有任何測試失敗。
+
+**其三，規則必須早於結果，而且只能來自 lock。**
+`ScientificRule.from_lock()` 刻意不提供「直接傳三個門檻進來」的建構路徑。
+若允許，就等於允許看過 CI 下界之後臨時換一組門檻，而每一組門檻單獨看都合法。
+Appendix H2 的「frozen before Held-out access」靠的正是這個結構限制。
+
+**其四，DEGRADED 不是失敗，是必須被凍結的結論。** §12.1 規定 DEGRADED
+仍可繼續工程與探索，但下游 manifest 一律帶 `claim_mode="synthetic_testbed"`。
+因此 `freeze_outcome()` 對兩種結果一視同仁地寫 lock —— 不凍結就等於這次
+評估沒發生過，而下一次評估會以為自己是第一次。
+
+**趨勢一致性的判定方式（實作中被測試修正）**：初版以「相對變化的絕對差
+是否 ≤ 0.5」判定幅度，這是**錯的**。真實相對變化本身只有 0.1 量級時，
+「合成完全沒有變化」的絕對差只有 0.1，照樣通過 —— 而那正是最該擋下的情況
+（方向沒錯只是因為沒有反向）。已改為比值判定：`|syn/real − 1| ≤ tolerance`，
+幅度塌到千分之一會得到比值 0.001，必然落在容差外。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/e1 -v
+py -3.10 -m pcmef.cli e1 metrics-evidence     # 產出 E1-G06 的 tests/e1_metrics.xml
+py -3.10 -m pcmef.cli audit e1-gates
+```
+`test_normalization_makes_two_features_comparable` 鎖住第一點；
+`test_paired_resampling_is_narrower_than_independent` 鎖住第二點；
+`test_rule_comes_only_from_the_lock` 與
+`test_outcome_cannot_be_refrozen_with_a_different_verdict` 鎖住第三、四點。
+
+**維護邊界**：
+- 本批次完成的是**引擎**，不是可執行的 formal E1。surrogate 的九個校準常數
+  仍全部是 placeholder，formal 模式會拒絕載入，因此 E1-G07/G10/G11/G12
+  四個 lock 目前仍無法凍結。這不是缺陷，是 M2 校準尚未進行。
+- 不得因為結果不理想就重跑 E1 final。held-out 只能開一次
+  （`splits.heldout_ids` 記錄取用次數），而 `e1_outcome` 的不可覆寫性
+  是第二道保險。
+- `tests/e1_metrics.xml` 不進版控。證據要靠「跑一次」而不是「被提交過」；
+  JUnit 報告帶機器專屬的時間與路徑，提交它只會讓 diff 充滿雜訊。
+
+相關：[NOTE-015]、[NOTE-022]
+
+---
+
 ## NOTE-023 LLM setup 的流程與版型對齊 roothinks LAVA setup
 
 **決策日期**：2026-08-27

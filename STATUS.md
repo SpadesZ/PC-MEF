@@ -148,7 +148,7 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | Batch 3 | Sigma/timing provenance resolver | **完成** |
 | Batch 4 | Mitsuba/mitransient optical transient smoke adapter | **完成** |
 | Batch 5 | single-acquisition surrogate + 500-point temporal model | **完成** |
-| Batch 6 | E1 metrics + dual-lock + scientific rule state machine | 未開始（刻意暫緩） |
+| Batch 6 | E1 metrics + dual-lock + scientific rule state machine | **引擎完成**（校準常數仍 placeholder，見下） |
 | Batch 7 | E1-G01..G12 audit + heldout firewall + real split policy audit | **完成** |
 | Batch 8 | post-E1 split generators + parent-family checks | 未開始 |
 
@@ -442,6 +442,42 @@ draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitra
 `agents.representation_mode` 與 `agents.retry.max_attempts` 仍待教授裁決、
 且 lock 相依鏈要求 `agent_schema` → `synthetic_split_policy` → `e1_outcome`，
 亦即必須先跑完 E1 與 M3。Part VI 的完成度不以能否凍結衡量（NOTE-020）。
+
+---
+
+## Batch 6 已完成內容（2026-08-27）
+
+測試：**1163 passed**（新增 62 條 E1 測試）。E1-G06 由 NOT_PRODUCED 轉 **PASS**，
+gate 現況 **7 PASS / 0 FAIL / 5 NOT_PRODUCED**。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `stats/metrics.py` | §11 | raw W1、s_f（calibration-only pooled IQR）、NW、mean/SD、temporal、class ordering、trend |
+| `stats/bootstrap.py` | Appendix I2 | 成對重抽：同一組索引同時套用到兩個候選 |
+| `experiments/e1.py` | §11、Appendix H2/B | 逐 class×feature 算 Delta；檢查 lock 順序與 matched design |
+| `experiments/e1_outcome.py` | §12.1 | 三條 AND 判定 → PASS/DEGRADED → `e1_outcome.lock` → claim_mode |
+| `cli.py e1 metrics-evidence` | §12 E1-G06 | 產出 `tests/e1_metrics.xml` |
+
+**兩個量化到數字的設計理由**（NOTE-024）：
+
+*跨特徵不得平均 raw W1* —— distance 差 5 mm（s_f=10）與 signal 差 0.005 MCPS
+（s_f=0.010），raw W1 相差 **1000 倍**，但失真程度其實相同（NW 都是 0.5）。
+直接平均會讓 distance 完全主導，signal 的改善與退步都看不見。
+
+*成對重抽會改變結論* —— 60 個 scenario 的對照實測：共用同一組重抽時
+95% CI 寬度比各自獨立窄 **5 倍以上**，而且**下界的符號不同**
+（配對後為正 → 判有改善；獨立後跨 0 → 判沒有）。這條寫成
+`test_paired_resampling_is_narrower_than_independent`，因為沒有它，
+改成各自獨立重抽不會有任何測試失敗。
+
+**測試抓到的實作缺陷**：趨勢一致性初版用「相對變化的絕對差 ≤ 0.5」判幅度。
+真實相對變化只有 0.1 量級時，「合成完全沒變化」的絕對差是 0.1，照樣通過 ——
+而那正是最該擋下的（方向沒錯只因為沒有反向）。已改為比值判定。
+
+**尚不能跑 formal E1，這是正確狀態。** surrogate 的九個校準常數仍全部是
+placeholder（formal 模式直接拒絕載入），因此 E1-G07/G10/G11/G12 四個 lock
+無法凍結。Batch 6 交付的是**引擎**，不是可執行的 formal E1 ——
+要跑得起來還缺 M2 的實際校準。
 
 ---
 

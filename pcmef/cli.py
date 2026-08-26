@@ -242,6 +242,37 @@ def cmd_audit_real_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_e1_metrics_evidence(args: argparse.Namespace) -> int:
+    """E1-G06：跑度量單元測試並產出 tests/e1_metrics.xml。
+
+    §12 把 G06 的證據定義為 `tests/e1_metrics.xml` —— 也就是一份 JUnit 報告。
+    把它做成指令而非要人記得加 --junitxml，是因為 gate 的證據不該取決於
+    某個人當下有沒有打對參數。
+    """
+    import subprocess
+
+    target = Path(args.out)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable, "-m", "pytest", args.tests_dir, "-q",
+        f"--junitxml={target}",
+    ]
+    completed = subprocess.run(command, check=False)
+    if not target.exists():
+        print(
+            f"error: pytest produced no report at {target}", file=sys.stderr
+        )
+        return 1
+    print(f"E1-G06 evidence: {target.resolve()}")
+    if completed.returncode != 0:
+        print(
+            "note: the metric tests FAILED; the artifact exists but E1-G06 must "
+            "not be treated as satisfied (see `pcmef audit e1-gates`).",
+            file=sys.stderr,
+        )
+    return completed.returncode
+
+
 def _emit_audit(report, out_dir: str | None, filename: str, required=None) -> int:
     """共用：印出稽核報告、選擇性落盤、依 required 決定 exit code。"""
     print(f"audit: {report.name}")
@@ -1319,6 +1350,15 @@ def build_parser() -> argparse.ArgumentParser:
     plan_real.set_defaults(func=cmd_split_plan_real)
     freeze_real.add_argument("--freeze-dir", default="freeze")
     freeze_real.set_defaults(func=cmd_freeze_real_split_policy)
+
+    e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
+    e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)
+    e1_evidence = e1_sub.add_parser(
+        "metrics-evidence", help="E1-G06：跑度量單元測試並產出 JUnit 報告"
+    )
+    e1_evidence.add_argument("--tests-dir", default="tests/e1")
+    e1_evidence.add_argument("--out", default="tests/e1_metrics.xml")
+    e1_evidence.set_defaults(func=cmd_e1_metrics_evidence)
 
     sur_parser = subparsers.add_parser("surrogate", help="感測器替身")
     sur_sub = sur_parser.add_subparsers(dest="surrogate_command", required=True)
