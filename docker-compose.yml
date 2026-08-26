@@ -1,0 +1,92 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 docker compose 讀取；建置 Dockerfile 定義的映像，
+#         把主機的 data/ outputs/ freeze/ registry/ secrets/ provenance/
+#         artifacts/ 掛進容器；console 服務對外開 127.0.0.1:8787。
+# 檔案路徑: docker-compose.yml
+# 產生時間: 2026-08-27 11:10 +08:00
+# 版本: v0.1.0
+# 功能說明: 定義兩種用法 —— 跑一次就結束的 CLI 指令（pcmef），
+#           以及常駐的本機網頁主控台（console）。兩者共用同一個映像與同一批資料。
+# 模組定位: 環境編排。它「不是」正式部署設定 —— 埠一律綁 127.0.0.1，
+#           這套系統是 local-first 研究平台。
+# 主要責任:
+#   1. pcmef 服務：一次性 CLI，預設不啟動（profile: cli）
+#   2. console 服務：本機網頁主控台，綁 127.0.0.1:8787
+#   3. 以具名 volume 保存 registry 與 secrets，避免權限與誤刪
+#   4. 以 bind mount 讓 data/ 與 outputs/ 在主機上直接可見
+# 維護提醒:
+#   - 不得把 console 的 ports 改成 0.0.0.0 或省略前綴 IP。SRC-SAI §46 規定
+#     非 loopback 曝露必須同時具備 admin token 與 TLS，而 compose 這一層
+#     繞不過 assert_network_policy()，只會讓服務啟動失敗。
+#   - 不得把 secrets volume 換成 bind mount 到版控目錄。
+#   - 不得在 console 服務加 --formal；formal run 一律走 CLI（§208）。
+#   - v0.1.0 新增：首版。
+# 驗證方式:
+#   - docker compose build
+#   - docker compose run --rm pcmef pytest -q
+#   - docker compose up console   然後開 http://127.0.0.1:8787
+# ------------------------------------------------------------
+
+name: pcmef
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: pcmef-research:local
+  environment:
+    # secret 一律由環境提供，映像與 compose 檔都不含實際值。
+    PCMEF_SECRET_MASTER_KEY: ${PCMEF_SECRET_MASTER_KEY:-}
+    PCMEF_ADMIN_TOKEN: ${PCMEF_ADMIN_TOKEN:-}
+    PCMEF_STUB_MODELS: ${PCMEF_STUB_MODELS:-}
+  volumes:
+    # 前研究資料：唯讀掛入。SRC-SAI §38 要求 raw real 只讀備份，
+    # 掛成 ro 讓「不小心覆寫原始資料」在檔案系統層就不可能發生。
+    - ./data:/app/data:ro
+    - ./outputs:/app/outputs
+    - ./provenance:/app/provenance
+    - ./artifacts:/app/artifacts
+    - ./freeze:/app/freeze
+    - pcmef-registry:/app/registry
+    - pcmef-secrets:/app/secrets
+
+services:
+  # 一次性 CLI：docker compose run --rm pcmef <子指令>
+  pcmef:
+    <<: *common
+    profiles: ["cli"]
+
+  # 常駐本機主控台
+  console:
+    <<: *common
+    command:
+      - admin
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+    ports:
+      # 只綁主機的 loopback。容器內聽 0.0.0.0 是因為要讓 Docker 轉發，
+      # 但主機端的曝露面仍然只有 127.0.0.1。
+      # 主機埠可由 PCMEF_CONSOLE_PORT 覆蓋 —— 8787 被別的行程佔用時，
+      # 沒有這個開關就只能改檔案，而改檔案很容易忘記改回來。
+      - "127.0.0.1:${PCMEF_CONSOLE_PORT:-8787}:8787"
+    environment:
+      PCMEF_SECRET_MASTER_KEY: ${PCMEF_SECRET_MASTER_KEY:-}
+      PCMEF_STUB_MODELS: ${PCMEF_STUB_MODELS:-}
+      # 容器內必須綁 0.0.0.0 才收得到 Docker 的埠轉發，而 §46 規定
+      # 非 loopback 曝露要同時具備 admin token 與 TLS。這裡不繞過它：
+      # ports 已把主機端限制在 127.0.0.1（等同 TLS 那條的「reverse proxy」情境），
+      # token 則要求操作者自己設。缺 token 時 compose 直接報錯並說明怎麼設 ——
+      # 讓它「預設就能跑」的唯一辦法是拿掉一道兩批之前才建立的安全控制。
+      # 缺 token 時不在這裡用 `:?` 擋 —— 那會連 build 與跑測試都一起擋掉。
+      # 把關點留在 admin.auth.assert_network_policy()：一件事一個把關點，
+      # 而那裡的錯誤訊息已經寫明缺什麼、為什麼、以及怎麼補。
+      PCMEF_ADMIN_TLS: "1"
+      PCMEF_ADMIN_TOKEN: ${PCMEF_ADMIN_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  pcmef-registry:
+  pcmef-secrets:

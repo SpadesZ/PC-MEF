@@ -1,0 +1,50 @@
+# PC-MEF Research System — build context 排除清單
+# 檔案路徑: .dockerignore
+# 產生時間: 2026-08-27 11:05 +08:00
+# 版本: v0.1.0
+#
+# 這份清單的用途不只是縮小 build context，更是「研究資料與憑證不得進映像」
+# 的第一道防線 —— 映像會被複製、推送、分享，而 data/raw_real 是他人提供的
+# 前研究資料，secrets/ 是可以直接花錢的憑證。
+#
+# 維護提醒:
+#   - 不得為了讓容器內「直接有資料可跑」而把 data/ 放回來；一律走 volume。
+#   - 不得排除 configs/ 或 schemas/；它們是程式的一部分，缺了系統無法啟動。
+
+# 研究資料與憑證（NFR-08）
+data/
+secrets/
+*.secret.json
+.env
+.env.*
+**/opaque_map*.json
+
+# 個別 run 的產物，不屬於映像
+outputs/
+artifacts/
+provenance/*.json
+freeze/*.lock.json
+registry/*.db
+
+# 版控與工具
+.git/
+.github/
+.claude/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 大型二進位
+*.npy
+*.exr
+*.7z
+*.zip

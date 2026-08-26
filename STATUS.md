@@ -13,8 +13,31 @@
 
 ### 環境
 
+**方式一：Docker（推薦給交接的人）** —— 不必自己處理 LLVM-C.dll 那串坑。
+
 ```powershell
-py -3.10 -m pip install -e ".[dev,simulation]"
+cp .env.example .env      # 填 PCMEF_ADMIN_TOKEN 與 PCMEF_SECRET_MASTER_KEY
+docker compose build
+docker compose run --rm pcmef version          # 一次性 CLI
+docker compose run --rm --entrypoint python pcmef -m pytest -q
+docker compose up console                      # http://127.0.0.1:8787
+```
+
+已實測：容器內 **1101 passed**、`sim smoke` 算得出 transient，
+Empty 場景總能量 **3908.9**，與本機 Batch 5 記錄的 3909 一致 —— 容器重現本機數字。
+manifest 會如實記下容器環境（`Linux-…-WSL2`）與釘死的模擬器版本。
+
+| 注意 | 說明 |
+|---|---|
+| `data/` 掛成唯讀 | §38 要求 raw real 只讀備份；掛 `:ro` 讓誤覆寫在檔案系統層就不可能 |
+| 模擬器版本釘死 | Dockerfile 內釘 mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0，與本機相同；不釘的話容器會裝到 3.9.1，結果不可比 |
+| console 需要 token | 容器內綁 0.0.0.0 才收得到轉發，§46 因此要求 admin token；缺了會被 `assert_network_policy()` 擋下 |
+| 埠可換 | `PCMEF_CONSOLE_PORT=8791 docker compose up console` |
+
+**方式二：本機**
+
+```powershell
+py -3.10 -m pip install -e ".[dev,simulation,admin,agents]"
 winget install --id LLVM.LLVM          # drjit 的 LLVM 後端需要
 $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 ```
