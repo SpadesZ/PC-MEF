@@ -33,7 +33,7 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 
 ```powershell
 py -3.10 -m pytest                                   # 全部測試（約 80 秒）
-py -3.10 -m pcmef.cli config check                   # 待教授裁決的 14 項
+py -3.10 -m pcmef.cli config check                   # 待教授裁決的 10 項
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
 py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
 py -3.10 -m pcmef.cli surrogate smoke                # E1-G04 四特徵無 NaN 驗證
@@ -49,11 +49,12 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 | ~~真實 ToF 只剩窗口 Mean/Std~~ | — | **已解除**：Edge Impulse export 復原 560 筆 500×4 |
 | ~~Sigma register 未定~~ | — | **已解出 0x18**（排除檢驗，NOTE-010）；採集腳本仍未取得，取得後須複核 |
 | ~~Real split 三值未裁決~~ | — | **已裁決並凍結** 392/168（NOTE-014） |
-| 14 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處 |
+| ~~E1/E2 bootstrap 四值~~ | — | **已核定** 10000 / 20260826 / 20260827（NOTE-015） |
+| 10 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
 
 ### 動手前必讀
 
-- `docs/NOTES.md` — 14 則決策記錄。**改動前先查有沒有對應 NOTE**，
+- `docs/NOTES.md` — 15 則決策記錄。**改動前先查有沒有對應 NOTE**，
   許多看似多餘的設計都是刻意的（例如子行程隔離、檔名鍵對齊、
   `!required` sentinel）。
 - `tests/test_repo_integrity.py` — 檔頭十欄位與 NOTE 引用的自動稽核。
@@ -382,7 +383,7 @@ policy 與 lock 內：Edge Impulse 匯出的 560 筆樣本 payload 只有
 
 ---
 
-## 待教授裁決事項（formal-blocking，共 14 項）
+## 待教授裁決事項（formal-blocking，共 10 項）
 
 執行 `py -3.10 -m pcmef.cli config check` 可隨時取得最新清單。
 這些數值依 SRC-PLAN Appendix A 與 SRC-SAI Appendix F **禁止實作端自行補值**，
@@ -390,17 +391,28 @@ policy 與 lock 內：Edge Impulse 匯出的 560 筆樣本 payload 只有
 
 | 分類 | 待裁決項目 |
 |---|---|
-| E1 | `bootstrap_replicates`、`bootstrap_seed` |
 | Perception | `training_seed_pairs` |
 | Reliability | `crossfit_folds` |
 | Gate | `alpha`、`beta`、`gamma`（須由 validation 搜尋選出後 freeze） |
 | Agents | `representation_mode`、`retry.max_attempts` |
-| E2 | `final_n_per_class`、`severity_allocation` |
+| E2 | `final_n_per_class`（只能由 e2_pilot 依預註冊 sizing rule 決定）、`severity_allocation` |
 | Conflict | `delta` |
-| Statistics | `bootstrap_replicates`、`bootstrap_seed` |
 
-對應 SRC-PLAN Appendix A 的六個教授討論題目，其中第 1、5 題直接決定上表的
-Real split 與 E2 兩組數值。
+**已核定並寫入 config（不再 blocking）**：
+
+| 批次 | 項目 | 值 | 記錄 |
+|---|---|---|---|
+| 2026-08-26 | real split allocation / minimum / seed | 70-30 / 100 / 20260826 | NOTE-014 |
+| 2026-08-26 | `e1.scientific_rule.bootstrap_replicates` / `_seed` | 10000 / 20260826 | NOTE-015 |
+| 2026-08-26 | `statistics.bootstrap_replicates` / `_seed` | 10000 / 20260827 | NOTE-015 |
+
+E1 那組核定時 held-out access_count 為 0 且尚無任何 E1 結果 —— 這是預註冊的
+前提條件，不是行政程序。**「換個 seed 看看」在任何情況下都不是除錯手段**
+（NOTE-015 維護邊界）。
+
+上表其餘項目對應 SRC-PLAN Appendix A 的教授討論題目；`gate.alpha/beta/gamma`
+與 `e2.final_n_per_class` 性質不同 —— 它們不是「請教授給個數字」，
+而是必須由 validation 搜尋或 pilot 依預註冊規則產出後才凍結。
 
 ---
 
@@ -497,30 +509,74 @@ E1 可依原規格在 500 點序列上進行，`e1_scientific_rule.lock` 沿用�
 
 ---
 
-## 下一步
+## 下一步（2026-08-26 調整方向：先做 Part VI Admin UI 與稽核系統）
 
-原本的關鍵路徑（取得前研究原始資料）已於 2026-08-26 解除，見「M0 資料齊備」。
-Real split 三項裁決值亦已核定並凍結。目前無外部阻塞。
+外部阻塞已全部解除：資料齊備、sigma 解出、real split 凍結、E1/E2 bootstrap 核定。
 
-1. **Batch 6** —— E1 metrics + dual-lock + scientific rule state machine。
-   對應 SRC-SAI Appendix D 的第六個 sprint，會補上 G06/G07/G10/G11/G12 五個
-   gate 的 artifact。三個子項各自的先決條件：
+**Batch 6（E1 metrics + dual-lock）刻意暫緩**，改先做兩件事：
 
-   | 子項 | 產出 | 先決 |
-   |---|---|---|
-   | E1 metrics | `tests/e1_metrics.xml`（G06） | `bootstrap_replicates`、`bootstrap_seed` 未核定 → formal run 會 BLOCK |
-   | dual-lock | `freeze/e1_candidates.lock.json`（G07）＋`e1_evaluation_design.lock.json`（G10） | 依 lock 先決順序，evaluation design 必須早於 candidates 定案 |
-   | scientific rule | `freeze/e1_scientific_rule.lock.json`（G11）＋`claim_boundary.lock.json`（G12） | 規則須在看到任何 E1 結果前凍結 |
+### 1. Part VI —— Admin LLM Setup UI（SAI §38、§42、§46、§50、§51、§52）
 
-   **注意 G06 的裁決依賴**：E1 的 `bootstrap_replicates` / `bootstrap_seed` 仍在
-   14 項待核定清單內。程式可以先寫完並用 dev config 跑通，但 formal run 會被
-   `!required` 擋下——這是預期行為，不是 bug，**不得補預設值**。
+`pyproject.toml` 的 `admin = ["Flask>=3.0"]` 就是為此預留。
+**§52 明訂實作順序，不得跳步**：
 
-2. **仍待教授核定的 14 項**（`config check` 有完整清單）。若要一次問完，
-   優先序為：E1 bootstrap 兩項（擋 Batch 6 formal）→ Gate `alpha/beta/gamma`
-   （須由 validation 搜尋選出後才 freeze，不是憑空給值）→ E2 兩項。
+| 序 | 內容 | 硬性規則 |
+|---|---|---|
+| 1 | `ProviderAdapter` normalized contract + `secret_ref` 抽象 | **禁止 UI 直接碰 provider SDK** |
+| 2 | `llm_connections` / `llm_models` / `llm_task_bindings` / verification / audit 五張表 + migration | |
+| 3 | capability probes：先 chat + structured_json，再 vision；embedding 只作 optional | |
+| 4 | Flask local admin page，版型依 §42 圖 8 | 四張 card：Add Connection / Connections / Task Bindings / Formal Snapshot |
+| 5 | `llm_runtime` snapshot + hash + state invalidation | **先讓 CLI 走完全流程，再接 UI 的 Bind** |
+| 6 | Agent artifact cache | Formal runner 只走 lock + cache/ProviderAdapter |
+| 7 | security/leakage/cache/resume acceptance tests | **跑完才准標 DoD** |
 
-3. **採集腳本仍未取得**（`acquisition_script_obtained: false`）。
-   Sigma register 已用排除法解出 0x18，不再阻塞任何工作，但腳本一旦取得
-   須依 NOTE-010 複核。若複核結果與 0x18 不符，`sigma_provenance` lock
-   之後的所有 surrogate 校準都要重跑。
+**§42 視覺規則**：白底 admin console、內容最大寬約 1000–1200 px、
+三張 card 垂直排列、狀態與 capability 用 compact badge、危險操作紅色、
+主要操作深藍/青色。**第一版 server-rendered HTML + minimal JS，
+不引入 React/Vue 等大型前端依賴。**
+
+**v0.5.0 核心裁決（§52 結語）**：這個頁面可以「可寫入」，但它只寫
+**draft** LLM registry。provider/model/prompt/schema/runtime identity 一旦
+進入 Formal，就由 immutable `llm_runtime.lock` 接管。
+**UI 永遠不能成為繞過 freeze 的第二條設定通道。**
+
+驗收條件是 §51 的十條，不是「畫面看起來對」：
+
+| ID | PASS 條件 |
+|---|---|
+| LLM-UI-01 | 新增 connection 後 response / HTML / logs 均找不到完整 API key |
+| LLM-UI-02 | embedding-only model 不出現在 observation/arbitration agent 的可綁 dropdown |
+| LLM-UI-03 | Arbitration binding 若 structured-json probe FAIL，Bind 直接拒絕 |
+| LLM-UI-04 | 仍被 task 使用的 model profile Delete → 409，dependency 列表正確 |
+| LLM-UI-05 | snapshot 產生後改 live binding，既有 `llm_runtime.lock` hash 不變 |
+| LLM-UI-06 | SQLite binding table 被手改後，formal runner 仍用 lock 中的 model identity |
+| LLM-SEC-01 | manifest / report / DB plaintext 全域掃描無 secret |
+| LLM-CACHE-01 | 相同 evidence/config 在 3 checkpoint pairs 只產生 1 次 provider call |
+| LLM-CACHE-02 | prompt/schema/model/revision/representation/evidence 任一 hash 變 → cache miss |
+| LLM-RESUME-01 | 已完成 formal case resume 時只讀 frozen response，不重呼叫 provider |
+
+安全邊界（NFR-09、§46）：預設只 bind `127.0.0.1`；API key 寫入後不回傳，
+UI 只顯示 masked fingerprint（`****abcd`）；跨網段才要求 admin auth + CSRF + TLS。
+**所有 formal run 一律無 UI、走 CLI**（§208）。
+
+### 2. Batch 7 —— 稽核系統
+
+E1-G01..G12 audit + heldout firewall + real split policy audit。
+目前 6/12 gate 有 artifact；稽核系統會如實回報其餘 6 個「尚未產出」，
+**那是正確輸出而不是失敗** —— G05 屬 Batch 8，G06/G07/G10/G11/G12 屬 Batch 6。
+
+先做稽核再做 Batch 6 是刻意的：稽核器先於被稽核的產物存在，
+就不會在事後被寫成剛好符合已產出的結果。
+
+### 3. 仍待核定的 10 項
+
+`config check` 有完整清單。注意其中 `gate.alpha/beta/gamma` 與
+`e2.final_n_per_class` **不是「請教授給數字」** —— 前者須由 validation
+worst-condition Macro-F1 搜尋選出後才寫入 `gate.lock`，後者只能由 e2_pilot
+依預註冊 sizing rule 決定（禁止查看 G5−G4 delta 後回填）。
+
+### 4. 採集腳本仍未取得
+
+`acquisition_script_obtained: false`。Sigma 已用排除法解出 0x18，不阻塞任何
+工作，但腳本取得後須依 NOTE-010 複核；若與 0x18 不符，`sigma_provenance`
+之後的所有 surrogate 校準都要重跑。

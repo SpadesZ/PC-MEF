@@ -324,6 +324,58 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-015 兩組 bootstrap 參數的教授核定
+
+**決策日期**：2026-08-26
+
+**適用範圍**：`configs/base.yaml` 的 `e1.scientific_rule.bootstrap_*`
+（凍結於 `e1_scientific_rule.lock`）與 `statistics.bootstrap_*`
+（凍結於 `statistics_config.lock`）；所有讀取這兩組值計算信賴區間的模組。
+
+**決策**：以下四項由教授於 2026-08-26 核定。
+
+| 參數 | 值 | 凍結位置 |
+|---|---:|---|
+| `e1.scientific_rule.bootstrap_replicates` | 10000 | `e1_scientific_rule.lock` |
+| `e1.scientific_rule.bootstrap_seed` | 20260826 | `e1_scientific_rule.lock` |
+| `statistics.bootstrap_replicates` | 10000 | `statistics_config.lock` |
+| `statistics.bootstrap_seed` | 20260827 | `statistics_config.lock` |
+
+核定時 held-out access_count 為 0，且尚無任何 E1 結果產出。
+
+**原因**：E1 的 PASS 規則是 `macro_mean_delta_ci_lower_bound_gt: 0.0`，
+亦即 PASS/FAIL **直接由 bootstrap 信賴區間的下界決定**。seed 換一個，
+下界就會小幅移動；若由實作端選 seed，等於可以在看到結果後試多個 seed
+挑一個剛好越過門檻的，而這在論文上完全看不出來——每個 seed 單獨看都合法。
+因此這不是可由實作端便宜行事的技術細節，而是必須先於結果、由教授核定的
+預註冊項目。E2 的多 condition 比較同理。
+
+B = 10000 而非慣用的 1000：PASS 規則讀的是 2.5% 分位的尾端，B=1000 時該
+尾端自身的蒙地卡羅誤差不可忽略，結果落在門檻附近時 PASS/FAIL 可能在兩次
+執行間翻轉。168 筆 held-out 跑 10000 次僅需數秒，計算量不構成限制。
+兩組取同一個 B，也避免日後被質疑「為何此處 10000 彼處 1000」。
+
+兩組 seed 刻意不同（20260826 / 20260827）：兩者凍結於不同 lock、不同時間點，
+分開後任一組需重跑或發現缺陷時不會與另一組糾纏。此項影響很小，
+但既然沒有成本就取較乾淨的作法。
+
+**驗證**：`py -3.10 -m pcmef.cli config check` 的待核定項由 14 降為 10；
+四個值皆帶 `decided_by: advisor` 與 `decided_on: 2026-08-26`。
+
+**維護邊界**：
+- **這四個值在對應 lock 寫入後即不得修改。** 若日後認為 B 應更大，
+  必須開新 run 重跑，不得就地改值後宣稱是同一次分析。
+- 「換個 seed 看看」在任何情況下都不是除錯手段。若懷疑結果不穩，
+  正確作法是加大 B 並在新 run 中重跑，而非比較不同 seed 的結果。
+- `statistics` 這組在 `e2.final_n_per_class` 決定之前核定是正確的，
+  不是搶跑：B 是蒙地卡羅重抽次數，與樣本數無關，凍結愈早，事後
+  可調整的空間愈小。`final_n_per_class` 依 SRC-SAI FR-023 只能由
+  e2_pilot 依預註冊 sizing rule 決定，與本則無關。
+
+相關：[NOTE-005]、[NOTE-014]
+
+---
+
 ## NOTE-014 real split policy 的教授裁決與 group_rule 判定
 
 **決策日期**：2026-08-26

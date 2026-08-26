@@ -183,12 +183,13 @@ e1:
     macro_mean_delta_ci_lower_bound_gt: 0.0
     per_feature_class_macro_delta_gte: 0.0
     distance_trend_consistency: non_degraded
-    bootstrap_replicates: !required
-      source: "SRC-PLAN §3.2 / SRC-SAI Appendix G3 e1_scientific_rule"
-      reason: "paired bootstrap replicate 數必須在 Held-out 開啟前由教授核定並凍結"
-    bootstrap_seed: !required
-      source: "SRC-PLAN §3.2"
-      reason: "bootstrap seed 必須明示以確保可重現"
+    # 教授核定 2026-08-26（NOTE-015）。核定在任何 E1 結果產出之前，
+    # 且 held-out 尚未開啟（access_count = 0）——這正是這兩個值必須
+    # 由教授定而非實作端定的理由：PASS/FAIL 由 CI 下界決定，seed 可挑。
+    bootstrap_replicates: 10000
+    bootstrap_seed: 20260826
+    decided_by: advisor
+    decided_on: "2026-08-26"
 
 # ---------------------------------------------------------------------------
 # Perception
@@ -288,12 +289,14 @@ statistics:
   confidence_level: 0.95
   pair_aggregation: mean_over_training_pairs
   ece_semantics: score_calibration_diagnostic_only
-  bootstrap_replicates: !required
-    source: "SRC-SAI §24 / Appendix I6"
-    reason: "B 與 aggregation rule 必須凍結於 statistics_config.lock"
-  bootstrap_seed: !required
-    source: "SRC-SAI §24"
-    reason: "resample indices hash 需可重現"
+  # 教授核定 2026-08-26（NOTE-015）。B 與 E1 取同值；seed 刻意與 E1 不同，
+  # 兩組凍結於不同 lock、不同時間點，分開才不會在重跑時互相糾纏。
+  # 註：本組在 final_n_per_class 決定之前就核定是正確的 —— B 是蒙地卡羅
+  # 重抽次數，與樣本數無關，早凍結只會縮小事後可動手腳的空間。
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260827
+  decided_by: advisor
+  decided_on: "2026-08-26"
 
 # ---------------------------------------------------------------------------
 # 路徑
