@@ -156,12 +156,12 @@ def _bad_request(error: Exception):
 
 @blueprint.get("/")
 def index():
-    """本服務只有一個頁面，根路徑直接轉過去。
+    """根路徑轉到執行台 —— 那才是日常最常用的頁面。
 
     留一個 404 在根路徑沒有任何好處：操作者打開 http://127.0.0.1:8787
     看到 Not Found，只會以為服務壞了。
     """
-    return redirect(url_for("llm_admin.page"))
+    return redirect(url_for("console.page"))
 
 
 @blueprint.get("/admin/llm-setup")

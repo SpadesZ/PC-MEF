@@ -36,6 +36,7 @@ from typing import Mapping
 from pcmef.admin.auth import ADMIN_TOKEN_ENV, DEFAULT_HOST, assert_network_policy
 from pcmef.admin.routes_llm import blueprint
 from pcmef.admin.services import AdminService
+from pcmef.core.constants import CLASS_ORDER
 from pcmef.llm.registry import DEFAULT_REGISTRY_PATH, LLMRegistry
 from pcmef.secrets.vault import DEFAULT_VAULT_PATH, SecretVault
 
@@ -62,6 +63,8 @@ def create_app(
     host: str = DEFAULT_HOST,
     bind_enabled: bool = False,
     environ: Mapping[str, str] | None = None,
+    console_run_root: str | Path = "outputs/console/runs",
+    audit_paths=None,
 ):
     """建立 Flask app。
 
@@ -87,7 +90,47 @@ def create_app(
     app.config["PCMEF_ADMIN_BIND_ENABLED"] = bool(bind_enabled)
     app.config["PCMEF_ADMIN_TOKEN_CONFIGURED"] = bool(env.get(ADMIN_TOKEN_ENV))
     app.register_blueprint(blueprint)
+    _register_console(app, console_run_root, audit_paths)
     return app
+
+
+def _register_console(app, run_root, audit_paths) -> None:
+    """掛上探索用執行台。
+
+    與 LLM Setup 共用同一個 Flask app 與同一套 CSRF/權杖檢查：
+    兩者都是「本機、單人、可寫入 draft」的管理介面，分成兩個服務只會
+    讓安全設定有兩份，而其中一份遲早會忘記更新。
+    """
+    from pcmef.audit.e1_gates import AuditPaths
+    from pcmef.console.routes import blueprint as console_blueprint
+    from pcmef.console.runner import ConsoleRunner
+
+    app.config["PCMEF_CONSOLE_RUNNER"] = ConsoleRunner(run_root)
+    app.config["PCMEF_CONSOLE_CLASSES"] = list(CLASS_ORDER)
+    resolved_paths = audit_paths or AuditPaths()
+
+    def gate_summary():
+        """讀 E1 gate 現況給首頁的燈號用。稽核器只讀不寫，隨時可呼叫。"""
+        from pcmef.audit.e1_gates import audit_e1_gates
+
+        report = audit_e1_gates(resolved_paths)
+        css = {"PASS": "pass", "FAIL": "fail"}
+        return {
+            "counts": report.counts(),
+            "gates": [
+                {
+                    "id": r.identifier.replace("E1-", ""),
+                    "status": r.status.value.replace("NOT_PRODUCED", "尚未產出")
+                              .replace("PASS", "通過").replace("FAIL", "不符"),
+                    "requirement": r.requirement,
+                    "css": css.get(r.status.value, "pending"),
+                }
+                for r in report.results
+            ],
+        }
+
+    app.config["PCMEF_CONSOLE_GATE_SUMMARY"] = gate_summary
+    app.register_blueprint(console_blueprint)
 
 
 def serve(

@@ -69,9 +69,11 @@ services:
     ports:
       # 只綁主機的 loopback。容器內聽 0.0.0.0 是因為要讓 Docker 轉發，
       # 但主機端的曝露面仍然只有 127.0.0.1。
-      # 主機埠可由 PCMEF_CONSOLE_PORT 覆蓋 —— 8787 被別的行程佔用時，
-      # 沒有這個開關就只能改檔案，而改檔案很容易忘記改回來。
-      - "127.0.0.1:${PCMEF_CONSOLE_PORT:-8787}:8787"
+      # 預設 8801 而非 8787：8787 是 `pcmef admin serve` 的預設埠，
+      # 本機直接跑 CLI 時就會佔住它，接著 docker compose up 會撞埠而啟動失敗。
+      # 讓容器用另一個埠，本機與容器就能同時開著互相對照。
+      # 仍可由 PCMEF_CONSOLE_PORT 覆蓋。
+      - "127.0.0.1:${PCMEF_CONSOLE_PORT:-8801}:8787"
     environment:
       PCMEF_SECRET_MASTER_KEY: ${PCMEF_SECRET_MASTER_KEY:-}
       PCMEF_STUB_MODELS: ${PCMEF_STUB_MODELS:-}

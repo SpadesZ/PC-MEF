@@ -324,6 +324,85 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-025 Console 只探索不凍結，即時輸出以檔案為單一真相
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/console/{runner,results,routes}.py`；
+`pcmef/admin/templates/console*.html`；`pcmef/admin/app.py` 的 `_register_console()`。
+
+**決策**：
+1. Console 只跑**探索性**指令（`sim_smoke` / `surrogate_smoke` / `audit_gates`），
+   `_assert_not_formal()` 硬性拒絕任何含 `formal` 的參數。
+2. 子行程的輸出**逐行寫入檔案**，網頁以位元組位移增量讀取，
+   再以 Server-Sent Events 推送。
+3. 每次執行把**完整的 scenario.yaml 與指令**存進該 run 的目錄。
+4. 圖表由伺服器端產生 SVG，不引入繪圖相依。
+5. Console 與 LLM Setup 共用同一個 Flask app 與同一套 CSRF/權杖檢查。
+
+**原因**：
+
+**其一，UI 的界線與 Part VI 完全相同。** §208 與 §52 結語規定 formal run
+一律無 UI、走 CLI。Console 讓人按一下就跑模擬，但它產生的是探索用產物，
+不是 formal identity —— 頁面上也明寫這件事。`_assert_not_formal()` 掃的是
+**所有含 formal 的鍵**而不是某個特定參數名，因為繞過的方式通常是換個名字。
+
+**其二，log 落盤而非留在記憶體，是為了三件事同時成立**：重新整理頁面後
+還看得到、多個分頁能同時看同一次執行、容器重啟後證據還在。
+以位元組位移增量推送而非每秒重傳整份 log：一次高品質模擬的輸出可以到數 MB，
+重傳會讓瀏覽器與伺服器一起被自己的輸出拖垮。
+
+**其三，存完整設定而非只存幾個數字。** 日後看到一張 transient 曲線時，
+「它是用什麼參數跑出來的」必須能完整回答。存 `scenario.yaml` 全文
+（含 placeholder 標記）比存 `{"spp": 16}` 可靠 —— 後者要靠拼湊，
+而拼湊會在預設值改動後失真。
+
+**其四，SVG 而非 matplotlib。** FR-020 要的 thesis-ready figure 由 CSV
+另行產生；console 的圖是給人看趨勢的。伺服器端 SVG 足夠、不新增相依，
+也維持首頁零 script。
+
+**minimal JS 的量化定義**：§42 允許 minimal JavaScript、禁的是 React/Vue
+這類大型前端依賴。本系統的具體落點是 —— 首頁 `document.scripts.length === 0`
+（進階摺疊用原生 `<details>`），執行頁**恰好一段內嵌腳本、零外部來源**，
+內容是 `EventSource` 接收與自動捲動。`test_run_page_uses_exactly_one_inline_script`
+把這個定義釘住。
+
+**實作中被測試抓到的兩個 falsy 吸收缺陷**：
+- `classes or CLASS_ORDER` 讓「四個核取方塊全部取消」靜默變成「跑全部四類」，
+  與使用者按下去的意思正好相反。
+- `spp or preset["spp"]` 讓輸入的 `0` 靜默變成 preset 值。
+
+兩者都是 NOTE-005 那條「falsy 被 `or` 悄悄吸收」的同一個病灶，
+只是這次出現在 UI 參數而不是 config。已改為顯式區分「沒給」與「給了」。
+
+**視覺缺陷**：`results.py` 的調色盤用 `var(--chart-N)`，但 `admin.css`
+從未定義這幾個變數，於是 `stroke` 解析成 `none` —— **曲線畫得出來但完全透明**，
+畫面上只看得到圖例，看起來像「沒有資料」。這類缺陷不會有任何測試失敗，
+只有實際打開瀏覽器才看得到；已補上四個色階並在 CSS 註明理由。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/console -v
+py -3.10 -m pcmef.cli admin serve            # http://127.0.0.1:8787/console
+docker compose up console                    # http://127.0.0.1:8801
+```
+實機驗收：在瀏覽器按下「開始模擬」，log 逐行出現、結束時徽章由 running
+轉 succeeded、重新整理後四條 transient 曲線與能量長條圖正確呈現；
+四類能量 3908.9 / 3898.9 / 3879.0 / 3875.9 與 CLI、Docker 三處完全一致。
+
+**維護邊界**：
+- 不得在 console 新增任何會寫 lock 或帶 `--formal` 的端點。
+- 不得把 log 用 `innerHTML` 附加。伺服器輸出含使用者可控的檔名與錯誤字串，
+  必須以 `createTextNode` 附加，否則就是 XSS；
+  `test_the_live_log_is_appended_as_text_not_html` 守住這一條。
+- Docker 的主機埠預設 **8801** 而非 8787：8787 是 `pcmef admin serve` 的
+  預設埠，本機直接跑 CLI 時就會佔住它，接著 `docker compose up` 會撞埠。
+  兩者用不同埠才能同時開著互相對照。
+
+相關：[NOTE-005]、[NOTE-012]、[NOTE-019]、[NOTE-022]
+
+---
+
 ## NOTE-024 E1 的三層分工：度量、成對重抽、判定各自獨立
 
 **決策日期**：2026-08-27

@@ -1,0 +1,184 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/routes.py 的 GET /console 繪製；資料來自
+ #         console.runner 的 PRESETS 與歷史紀錄、audit 的 gate 摘要。
+ #         載入 pcmef/admin/static/admin.css。不發出任何對外請求。
+ # 檔案路徑: pcmef/admin/templates/console.html
+ # 產生時間: 2026-08-27 17:10 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 執行台首頁。上半是三個 preset 一鍵開跑（進階參數摺疊），
+ #           下半是系統狀態燈號與歷史執行紀錄。
+ # 模組定位: §42 版型規則的延伸（白底、1000-1200px、compact badge）。
+ #           它「不是」formal 的入口 —— 頁面上明示所有 formal run 走 CLI。
+ # 主要責任:
+ #   1. Card A 三個 preset 與摺疊的進階參數
+ #   2. Card B 系統狀態：E1 gate 燈號與待裁決數
+ #   3. Card C 歷史執行紀錄，含狀態與耗時
+ #   4. 以 <details> 做進階摺疊，不需要任何 JavaScript
+ # 維護提醒:
+ #   - 不得加入任何啟動 formal run 的控制項。
+ #   - 不得用 JavaScript 做摺疊；<details> 是原生元素，無腳本即可運作。
+ #   - v0.1.0 新增：首版。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_console_routes.py -v
+ # ------------------------------------------------------------ #}
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC-MEF · 執行台</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <h1>PC-MEF · 模擬執行台</h1>
+    <p>
+      這裡跑的是<strong>探索用</strong>模擬，用來看參數怎麼影響結果。
+      正式實驗（formal run）一律無 UI、走 CLI —— 這個頁面不會、也不能產生
+      任何 <span class="mono">freeze/*.lock.json</span>。
+      <a href="{{ url_for('llm_admin.page') }}">前往 LLM Setup →</a>
+    </p>
+  </header>
+
+  {# ---------------- Card A. 一鍵跑模擬 ---------------- #}
+  <section class="card" id="run-simulation">
+    <h2>跑一次模擬<span class="hint">選一個 preset 就能開始；要調參數再展開下面</span></h2>
+    <div class="body">
+      <form method="post" action="{{ url_for('console.start_run') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="kind" value="sim_smoke">
+
+        <div class="preset-row">
+          {% for key, preset in presets.items() %}
+          <label class="preset {{ 'selected' if key == 'standard' }}">
+            <input type="radio" name="preset" value="{{ key }}"
+                   {% if key == 'standard' %}checked{% endif %}>
+            <span class="preset-name">{{ preset.label }}</span>
+            <span class="preset-spec mono">{{ preset.resolution }}×{{ preset.resolution }}
+              · spp {{ preset.spp }} · {{ preset.temporal_bins }} bins</span>
+            <span class="preset-hint">{{ preset.hint }}</span>
+          </label>
+          {% endfor %}
+        </div>
+
+        <details class="advanced">
+          <summary>進階參數<span class="note">（留空就用 preset 的值）</span></summary>
+          <div class="grid">
+            <div class="field">
+              <label for="resolution">解析度（像素，正方形）</label>
+              <input id="resolution" name="resolution" type="number" min="8" max="512"
+                     placeholder="依 preset">
+            </div>
+            <div class="field">
+              <label for="spp">每像素取樣數 spp</label>
+              <input id="spp" name="spp" type="number" min="1" max="4096"
+                     placeholder="依 preset">
+              <span class="note">越高雜訊越低，耗時約成正比</span>
+            </div>
+            <div class="field">
+              <label for="temporal_bins">時間軸 bins</label>
+              <input id="temporal_bins" name="temporal_bins" type="number"
+                     min="16" max="4096" placeholder="依 preset">
+              <span class="note">決定 transient 曲線的時間解析度</span>
+            </div>
+            <div class="field">
+              <label for="seed_offset">Seed 位移</label>
+              <input id="seed_offset" name="seed_offset" type="number" value="0">
+              <span class="note">同一組參數換 seed 可看隨機變異；不影響已凍結的實驗</span>
+            </div>
+            <div class="field">
+              <label for="lateral_offset_mm">側向偏移 (mm)</label>
+              <input id="lateral_offset_mm" name="lateral_offset_mm" type="number"
+                     step="0.1" placeholder="0.0">
+              <span class="note">對應 SRC-PLAN §2.1 的 ±0.1 cm 偏移測試</span>
+            </div>
+            <div class="field">
+              <label for="irradiance">光源強度</label>
+              <input id="irradiance" name="irradiance" type="number" step="0.1"
+                     placeholder="1.0">
+            </div>
+            <div class="field wide">
+              <label>要跑哪幾類</label>
+              <div class="checkbox-row">
+                {% for label in classes %}
+                <label class="checkbox">
+                  <input type="checkbox" name="classes" value="{{ label }}" checked>
+                  {{ label }}
+                </label>
+                {% endfor %}
+              </div>
+              <span class="note">場景數越少越快；比較單一參數時只跑一類就夠</span>
+            </div>
+          </div>
+        </details>
+
+        <p style="margin:18px 0 0">
+          <button class="btn primary big" type="submit">▶ 開始模擬</button>
+          <span class="note">執行過程會即時逐行顯示，就像在看終端機</span>
+        </p>
+      </form>
+    </div>
+  </section>
+
+  {# ---------------- Card B. 系統狀態 ---------------- #}
+  <section class="card" id="system-status">
+    <h2>系統狀態<span class="hint">E1 開跑前的十二道關卡</span></h2>
+    <div class="body">
+      <div class="gate-grid">
+        {% for gate in gate_summary.gates %}
+        <div class="gate {{ gate.css }}" title="{{ gate.requirement }}">
+          <span class="gate-id">{{ gate.id }}</span>
+          <span class="gate-status">{{ gate.status }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="note" style="margin-top:12px">
+        <strong>{{ gate_summary.counts.PASS }}</strong> 通過 ·
+        <strong>{{ gate_summary.counts.FAIL }}</strong> 不符 ·
+        <strong>{{ gate_summary.counts.NOT_PRODUCED }}</strong> 尚未產出。
+        「尚未產出」是正確狀態而非失敗 —— 稽核器刻意先於被稽核的產物存在。
+      </p>
+    </div>
+  </section>
+
+  {# ---------------- Card C. 歷史 ---------------- #}
+  <section class="card" id="run-history">
+    <h2>執行紀錄<span class="hint">每次執行都保存了完整參數與輸出</span></h2>
+    <div class="body">
+      {% if not runs %}
+        <p class="empty">還沒有任何執行紀錄。用上面的按鈕跑第一次。</p>
+      {% else %}
+      <table>
+        <thead>
+          <tr><th>執行編號</th><th>種類</th><th>設定</th><th>狀態</th><th>開始時間</th></tr>
+        </thead>
+        <tbody>
+        {% for run in runs %}
+          <tr>
+            <td><a class="mono" href="{{ url_for('console.run_page', run_id=run.run_id) }}">{{ run.run_id }}</a></td>
+            <td>{{ run.kind }}</td>
+            <td class="note">{{ run.label }}</td>
+            <td>
+              <span class="badge {{ 'ok' if run.status == 'succeeded' else ('bad' if run.status == 'failed' else 'warn') }}">
+                {{ run.status }}</span>
+              {% if run.exit_code is not none %}<span class="note">exit {{ run.exit_code }}</span>{% endif %}
+            </td>
+            <td class="note">{{ run.started_at[:19] }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+  </section>
+
+  <p class="footnote">
+    SRC-SAI v0.5.0 · 探索用執行台。formal run 一律走 CLI（§208），
+    本頁不產生任何 lock。
+  </p>
+
+</div>
+</body>
+</html>

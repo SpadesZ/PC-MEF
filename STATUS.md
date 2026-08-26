@@ -445,6 +445,46 @@ draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitra
 
 ---
 
+## Console 已完成內容（2026-08-27）
+
+網頁執行台：**一鍵跑模擬 → 即時逐行看輸出 → 看曲線與數據**。
+
+```powershell
+py -3.10 -m pcmef.cli admin serve      # http://127.0.0.1:8787/console
+docker compose up console              # http://127.0.0.1:8801
+```
+
+| 頁面 | 內容 |
+|---|---|
+| `/console` | 三個 preset 一鍵開跑；進階參數摺疊（解析度/spp/bins/seed/偏移/光源/類別）；12 個 gate 燈號；執行歷史 |
+| `/console/runs/<id>` | 即時 log（SSE 逐行推送）、transient 曲線、各場景能量、四特徵表、這次用的完整設定 |
+
+**實機驗收**（瀏覽器實際操作）：按下「開始模擬」後 log 逐行出現，
+結束時徽章由 running 轉 succeeded 並顯示 exit code，重新整理後四條 transient
+曲線與能量長條圖正確呈現。四類能量 **3908.9 / 3898.9 / 3879.0 / 3875.9**，
+與 CLI、Docker 三處完全一致 —— 畫面與 artifact 沒有分岔。
+
+**界線與 Part VI 相同**：console 只跑探索性指令，`_assert_not_formal()`
+硬性拒絕任何含 `formal` 的參數。formal run 一律走 CLI（§208），
+本頁不產生任何 lock。
+
+**minimal JS 的量化定義**（§42 允許 minimal JS、禁大型前端依賴）：
+首頁 `document.scripts.length === 0`（進階摺疊用原生 `<details>`）；
+執行頁**恰好一段內嵌腳本、零外部來源**，內容是 `EventSource` 接收。
+
+**三個實作缺陷**（詳見 NOTE-025）：
+
+| 缺陷 | 症狀 |
+|---|---|
+| `classes or CLASS_ORDER` | 四個核取方塊全部取消 → 靜默跑全部四類，與按下去的意思相反 |
+| `spp or preset["spp"]` | 輸入 0 → 靜默變成 preset 值 |
+| `var(--chart-N)` 未定義 | **曲線畫得出來但完全透明**，畫面只剩圖例，看起來像沒資料 |
+
+前兩個是 NOTE-005「falsy 被 `or` 吸收」的同一病灶；第三個不會有任何測試失敗，
+只有實際打開瀏覽器才看得到。
+
+---
+
 ## Batch 6 已完成內容（2026-08-27）
 
 測試：**1163 passed**（新增 62 條 E1 測試）。E1-G06 由 NOT_PRODUCED 轉 **PASS**，
