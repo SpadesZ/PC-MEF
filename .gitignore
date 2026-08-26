@@ -1,7 +1,9 @@
 # secrets — NFR-08：API key 絕不進 repo
 .env
 .env.*
-secrets/
+# 前置斜線只排除 repo 根目錄下的 vault 目錄。寫成 secrets/ 會連
+# pcmef/secrets/（secret_ref 抽象層的原始碼）一起吞掉，而那份程式碼必須進版控。
+/secrets/
 *.secret.json
 **/opaque_map*.json
 

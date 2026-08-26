@@ -324,6 +324,513 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-023 LLM setup 的流程與版型對齊 roothinks LAVA setup
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/llm/registry.py` 的 `Lifecycle` 與 `ConnectionRow.bindable`；
+`pcmef/admin/services.py` 的 `select_model` / `test_connection` /
+`lock_connection` / `unlock_connection`；
+`pcmef/admin/templates/llm_setup.html` 的 Connections 與 Service Binding 兩張 card；
+`pcmef/cli.py` 的 `llm connection select-model / test / lock` 與 `llm binding lock`。
+
+**決策**：連線的設定進度採 roothinks LAVA setup 的四態
+`draft → fetched → connected → locked`，每一步解鎖下一個動作：
+
+| 狀態 | 可做 | 不可做 |
+|---|---|---|
+| draft | Fetch、選模型 | Test、Connect |
+| fetched | Test、換模型、重新 Fetch | Connect |
+| connected | Connect、Test、換模型 | — |
+| locked | Unlock、Delete | 換 vendor/key/模型、Fetch、Test |
+
+並確立三條由此衍生的規則：
+
+1. **只有 locked 的線路能被綁到 task**（LAVA 的 `僅顯示 Locked`）。
+2. **一條 locked 的線路只提供它被檢查過的那一個模型。** 同一把 key 底下其他
+   沒測過的模型不出現在綁定選單，也綁不上去。
+3. **換模型會退回 fetched。** 先前的 Test 結果對新模型無效。
+
+另外，`llm_task_bindings.is_locked` 是 **draft 層的確認鎖**，
+與 formal 的 `llm_runtime.lock` 是兩件事。
+
+**原因**：SRC-SAI §42 只規定了 Add Connection / Connections / Task Bindings /
+Formal Snapshot 四張 card 與各自的欄位，**沒有規定操作者要照什麼順序把一條線路
+設定好**。roothinks 與 rootmedicals-a 兩套系統在真實使用中收斂到同一個流程，
+而使用者是同一個人 —— 讓 PC-MEF 用第三種流程，代價是每次切換系統都要重新學，
+而且沒有換到任何研究上的好處。
+
+四態本身也解決一個 §42 沒處理的問題：`llm_models` 可以有幾十個 model profile，
+但一條線路實際上只用一個。沒有 `selected_model_profile_id` 與 locked 狀態時，
+綁定選單會列出所有「能力恰好符合」的 profile，包含從未被實際呼叫過的那些。
+LAVA 的做法是先讓操作者把一條線路收斂成一個確定的 (vendor, key, model) 三元組
+並明示確認，再讓它進入可綁定池。這比逐一檢查 profile 更接近實際的心智模型。
+
+**與 roothinks 的三處刻意差異**：
+
+| 項目 | roothinks | PC-MEF | 理由 |
+|---|---|---|---|
+| Test 的內容 | 送一句話看回不回 OK | 跑 chat + structured_json + vision 三項 probe，但**只以最低要求為門檻** | §44 規定這些能力不可只信 metadata；回一句 OK 證明不了任何一項。門檻另見下方修正。 |
+| 憑證遮蔽 | key 的後四碼 | HMAC 指紋 `****abcd` | §46 規定不顯示 key prefix/full value；指紋能達成同樣的辨識用途而不洩漏字元（NOTE-016）。 |
+| 前端 | JS 驅動、`fetch()` 逐列更新 | server-rendered 表單，零 script | §42 明訂第一版採 server-rendered HTML + minimal JavaScript。資訊架構與狀態機完全相同，只是每個按鈕是一次 POST + redirect。 |
+
+第三點值得展開：照抄 LAVA 的 JS 會直接違反 §42，而只抄版型不抄流程則失去
+這次對齊的意義。取捨的方式是**保留狀態機與資訊架構、改變傳輸方式** ——
+操作者看到的按鈕、順序與啟用/停用邏輯完全一致，差別只在每次動作會整頁刷新。
+對一個本機、單人、低頻率的設定頁面，這個代價可以接受。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/llm_admin/test_connection_lifecycle.py -v
+py -3.10 -m pytest tests/llm_admin/test_cli_llm_flow.py -v
+```
+`test_transitions_follow_the_declared_table` 以參數化窮舉九組轉移；
+`test_only_locked_lines_are_bindable` 驗證鎖定前後的綁定選單差異；
+`test_a_locked_line_offers_exactly_the_model_it_was_checked_with` 鎖住第 2 條規則；
+`test_changing_the_model_drops_back_to_fetched` 鎖住第 3 條。
+
+實機驗證（離線 stub、隔離 registry）：locked 那一列的 Fetch/Set/Test 皆為
+disabled 且只剩 Unlock/Delete；draft 那一列 Fetch/Set 可用而 Test/Connect
+為 disabled；已鎖定的 arbitration_agent 不顯示 dropdown 而顯示
+「已鎖定，解鎖後才能更換」；`document.scripts.length === 0`。
+
+**鎖定門檻的修正（2026-08-27 當日）**：初版把「chat + structured_json + vision
+三項全過」當成鎖定條件，這是**錯的**，已修正為
+`MINIMUM_BINDABLE_CAPABILITIES`（由 `TASK_REGISTRY` 推導，目前是
+`{chat, structured_json}`）。
+
+§45 是**逐 role** 的要求表，不是一張全體適用的清單：
+
+| role | 需要 vision？ |
+|---|---|
+| observation_agent | 是 |
+| visual_semantic_agent | 是 |
+| physics_agent | **否** |
+| arbitration_agent | **否** |
+
+因此一個沒有視覺能力的純文字強模型完全可以服務 physics 與 arbitration。
+把 vision 提升成線路層的鎖定門檻，會讓這種模型永遠鎖不起來，
+連帶把它能勝任的兩個角色一併排除 —— 而畫面上只會顯示「Test 未通過」，
+看不出被排除的其實是兩個它本來做得到的工作。
+
+正確的分層是：**線路層只問「這條線路至少能服務某一個角色嗎」，
+逐 role 的能力守門留在 bind 時**（`compatible_models` 與
+`registry.set_binding` 已經在做）。vision probe 失敗現在只記錄在
+`last_error` 並反映在 `servable_roles`，不阻擋 lock。
+
+只有當一個角色都服務不了（連 chat + structured_json 都不到）才算 Test 失敗。
+
+**維護邊界**：
+- 不得允許 `draft` 直接跳到 `locked`。那會讓 Test 變成裝飾品，
+  而綁定選單的可信度完全建立在「locked 代表測過」這個假設上。
+- 不得把 vision 加回線路層的鎖定門檻，也不得手寫
+  `MINIMUM_BINDABLE_CAPABILITIES` 的內容；它必須由 `TASK_REGISTRY` 推導，
+  否則改了 §45 的能力矩陣就會留下一個對不上表格的常數。
+- `is_locked`（draft 確認鎖）不得被當成 formal identity 使用。
+  §52 結語的裁決是 UI 永遠不能成為繞過 freeze 的第二條設定通道；
+  draft 層多一個確認鎖不違反它，但如果哪天有程式讀 `is_locked` 來決定
+  formal 行為，那就違反了。formal 只能讀 `llm_runtime.lock`。
+- 解鎖仍被綁定的線路一律拒絕，否則會留下綁著未鎖線路的 task。
+
+相關：[NOTE-016]、[NOTE-018]、[NOTE-019]、[NOTE-020]
+
+---
+
+## NOTE-022 稽核狀態分四種，「尚未產出」不是失敗
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/audit/result.py` 的 `CheckStatus` 與 `AuditReport.exit_code()`；
+`pcmef/audit/e1_gates.py`；`pcmef/audit/firewall.py`；
+`pcmef/cli.py` 的 `audit e1-gates / heldout-firewall / real-split-policy`。
+
+**決策**：
+1. 稽核結果分成 **PASS / FAIL / NOT_PRODUCED / BLOCKED** 四種，
+   **NOT_PRODUCED 不計入失敗**。
+2. 不帶 `--require` 時只是盤點：只有 FAIL 會讓 exit code 非零。
+   帶 `--require` 時，被指名的檢查只要不是 PASS（含 NOT_PRODUCED）就非零。
+3. 稽核模組**只讀不寫**被稽核的產物，且不提供任何「修復」路徑。
+4. 每個宣告的 gate 都必須有對應的檢查函式；缺一個就在啟動時拋例外。
+
+**原因**：Batch 7 刻意排在 Batch 6 之前 —— 稽核器先於被稽核的產物存在，
+就不會在事後被寫成剛好符合已產出的結果。但這個順序有個直接後果：
+執行當下必然有一半的證據還不存在（G05 屬 Batch 8，G06/G07/G10/G11/G12 屬 Batch 6）。
+
+若把「還沒產出」報成 FAIL，這個指令從第一天起就會一直是紅的。
+一個永遠紅的檢查等於沒有檢查 —— 讀報告的人會學會忽略它，
+而真正的 FAIL 出現時也不會有人注意到。因此四種狀態的分野不是文件上的細膩，
+是這份報告能不能被當真的前提。
+
+反過來，FAIL 在任何情況下都必須非零：它代表**已經產出**的證據自相矛盾
+（例如五層計數不單調、registry 雜湊與 assignments 對不上），
+那與「還沒做」完全是兩回事。
+
+第 3 點：稽核器一旦能寫，就會有人在發現不一致時「順手修好」，
+而 NOTE-014 已經寫明發現不一致的正確處置是開新 run。能修的稽核器
+會變成掩蓋工具，`test_the_audit_never_writes_to_what_it_audits` 把這條釘住。
+
+第 4 點擋的是「有宣告卻沒有檢查」的空殼 gate —— 那比沒有 gate 更糟，
+因為它在報告上看起來被稽核過。
+
+**首次執行的發現（2026-08-27）**：稽核器上線第一次跑就抓到一個真實不一致 ——
+`provenance/sigma_resolution.json` 顯示 `status=UNRESOLVED`、`register=null`，
+但 `configs/base.yaml` 與 STATUS.md 都宣稱 sigma 已解出 `0x18`。
+
+追查後確認**結論是對的，證據是舊的**：NOTE-010 v2 的排除法分析當時以臨時
+腳本完成，而產生 E1-G08 證據的 `provenance resolve-sigma` 指令從未實作
+那條路徑 —— 它只讀彙總格式的 sigma 值（55,440 筆），既沒有呼叫
+`rule_out_range_register()`，也沒有傳 `export_decimals`。
+
+修正是把兩者都接進 CLI（`--paired-source` 與 `--export-decimals`），
+重跑後獨立重現了 NOTE-010 v2 記載的數字：280,000 列、`/128` 殘差 0.4992
+遠超容差 0.0064、register 解出 `0x18`。E1-G08 因此由 FAIL 轉為 PASS。
+
+**排除法需要逐 recording 的來源**：`sigma × 65536` 是否等於同一筆的 `distance`
+這個檢驗，需要**同一列**的兩個 metric 配對。彙總格式已把時間軸摺成窗口統計量，
+兩個 metric 的列不再對應同一個時刻，因此只有 Edge Impulse export 做得到。
+這也是 `EdgeImpulseAdapter.stacked_values()` 存在的理由。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/audit -v
+py -3.10 -m pcmef.cli audit e1-gates
+py -3.10 -m pcmef.cli audit heldout-firewall
+py -3.10 -m pcmef.cli audit real-split-policy
+```
+`tests/audit/test_e1_gates.py` 對每個檢查都有對應的「破壞後應該 FAIL」案例；
+一個永遠回 PASS 的稽核器與沒有稽核器等價，因此只測 PASS 路徑不算數。
+
+**維護邊界**：
+- 不得把 NOT_PRODUCED 併進 FAIL，也不得反過來讓 FAIL 被當成「還沒做」。
+- 不得為了讓某個 gate 變綠而放寬內容檢查。gate 的用途是擋下 E1 開跑，
+  放寬它等於取消這道關卡。
+- `--require G01:G12` 是 `experiment e1 --formal` 之前的最後一道閘門
+  （§32 CLI 契約），它現在會因為六個 NOT_PRODUCED 而擋下 —— **那是正確的**，
+  E1 確實還不能跑。
+
+相關：[NOTE-010]、[NOTE-011]、[NOTE-014]
+
+---
+
+## NOTE-021 Agent cache key 刻意與 case 身分和 checkpoint pair 無關
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/agents/cache.py` 的 `AgentCacheKey`、`PAIR_SPECIFIC_FIELDS`
+與 `assert_pair_independent()`；未來 `experiments/e2_formal.py` 消費 s_A 之處。
+
+**決策**：
+1. cache key 只由 §48 的七個要素組成（evidence_hash、representation_mode、
+   provider_model_id、provider_revision、prompt_hashes、schema_hash、
+   runtime_config_hash），**不含** case id、opaque_case_id 或 training_pair_id。
+2. 寫入快取的 payload 遞迴檢查，含 p_T/p_V/r_T/r_V/D/U/Q/g/F/predicted_class/
+   training_pair_id 任一者即拒絕。
+3. `resolve(key, producer)` 是唯一會呼叫 provider 的路徑，且只在未命中時呼叫。
+
+**原因**：SRC-SAI §48 指出 Formal E2 有多組 frozen checkpoint pair，而 Agent 路徑
+只看同一 scenario 的 raw evidence 加 frozen Agent config，不依賴 p_T/p_V 或
+training_pair_id。若把 pair 身分放進 key，同一份 evidence 會在每組 pair 各問一次，
+s_A 因此變成 pair 的函數 —— 而 PC-MEF 的 F=(1-g)p_rel+g·s_A 之所以能把
+G5 相對 G4 的差異歸因到 Agent，前提正是 s_A 在各 pair 之間相同。這不只是省錢，
+是可比較性本身。
+
+反向的錯誤同樣嚴重：把 pair 專屬的量（Appendix J2 右欄）寫進共用快取，
+第二組 pair 會讀到第一組的數字，而且**不會有任何症狀** ——
+數值都在合理範圍、沒有 NaN、沒有缺值。因此以遞迴欄位檢查在寫入當下攔截，
+而不是靠日後對帳。
+
+把「查快取」與「有能力發問」綁在同一個方法上，是為了讓 LLM-CACHE-01 與
+LLM-RESUME-01 成為結構性保證而非紀律要求：呼叫端拿不到繞過快取的入口。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/cache/test_agent_cache.py -v
+```
+涵蓋三組 pair 只 1 次 provider call、七個要素逐一變動皆 miss、
+resume 時 producer 被呼叫即失敗、pair 專屬欄位被拒、半套目錄不算命中。
+
+**呼叫次數的正確說法**：一個 scenario 有 **4 個 logical Agent invocations**
+（Observation → Physics ∥ Visual-Semantic → Arbitration）。**實際的 HTTP/API
+call 次數不等於 4**，三種情況都會偏離：
+
+| 情況 | 實際呼叫數 |
+|---|---|
+| 首次執行且四步都一次成功 | 4 |
+| 遇 timeout 或 schema invalid 而進 frozen retry policy | **> 4** |
+| content-addressed cache 命中 | **0**（完全不呼叫 provider） |
+
+因此描述成本或重現性時要說「4 個 logical invocations」，
+不要說「4 次 provider call」—— 後者在 retry 與 resume 兩種情況下都是錯的，
+而 LLM-RESUME-01 要驗的正是「resume 時新增呼叫數為 0」。
+
+跨 checkpoint pairs 共用的是 Observation / Physics / Visual / Arbitration 的
+raw+validated artifacts 與 s_A；`p_T / p_V / r_T / r_V / D / U / Q / g / F`
+一律逐 pair 重算（Appendix J2）。
+
+**維護邊界**：`combine_hashes` 的參數順序即 §48 的串接順序，不得重排；
+兩個不同的 key 若只是欄位換位置就得到相同雜湊，會造成 cache 誤命中。
+
+相關：[NOTE-004]、[NOTE-020]
+
+---
+
+## NOTE-020 llm snapshot 產生 lock candidate，凍結是另一個動作
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/llm/snapshot.py` 全檔；`pcmef/cli.py` 的
+`cmd_llm_snapshot()`；`pcmef/admin/services.py` 的 `snapshot_view()`。
+
+**決策**：`pcmef llm snapshot` 解析 draft binding 成 lock candidate、算出
+candidate hash、寫出 `outputs/llm/runtime_snapshot_<hash>.json`，並列出所有
+尚未滿足的前提。只有加上 `--freeze` 且 blocking 清單為空時，才寫入
+`freeze/llm_runtime.lock.json`。仍有 blocking 時 `--freeze` 以 exit code 2 中斷。
+
+**原因**：SRC-SAI 兩處對本指令的描述不一致。§32 的 CLI 草稿寫
+`pcmef llm snapshot --out freeze/llm_runtime.lock.json`，看起來是直接產 lock；
+§50 Admin API Contract 則明訂這個動作是「resolve draft -> lock candidate；
+returns hash；does not auto-start Formal」。採 §50，理由有二。
+
+其一，§52 結語的核心裁決是「UI 永遠不能成為繞過 freeze 的第二條設定通道」。
+這條規則的實質內容是「freeze 需要前提齊備」，而不是「freeze 只能從 CLI 按」——
+若 CLI 可以在前提未齊時直接產 lock，那條紅線就只是換個地方被跨過去。
+
+其二，實際跑過就會看到前提真的不齊：目前 blocking 清單有十項，其中
+`agents.representation_mode` 與 `agents.retry.max_attempts` 是教授未裁決值
+（NOTE-005），四份 agent prompt 屬 M6 尚未撰寫。一個會在這種狀態下寫出 lock
+的指令，等於把「還沒決定」凍結成「已經決定」。
+
+candidate hash 對未決項以 `{"__required__": key}` 顯式標記入雜湊，而非略過。
+這與 `ResolvedConfig.config_hash()` 的處理一致：一份帶缺口的快照，
+不應該和補齊之後的快照得到相同雜湊。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/llm_admin/test_snapshot.py -v
+py -3.10 -m pytest tests/llm_admin/test_cli_llm_flow.py -k snapshot -v
+```
+`test_shipped_config_blocks_the_snapshot` 鎖住「shipped config 仍 formal-blocking」；
+`test_snapshot_freeze_exits_two_when_blocked` 鎖住 `--freeze` 的拒絕行為；
+`test_freezing_cannot_skip_the_prerequisite_locks` 鎖住 §23 的相依鏈。
+
+**維護邊界**：
+- `llm_runtime` 的前置 lock 是 `agent_schema`，其上游一路到 `real_split_policy`。
+  因此在 E1 與 M3 完成之前，`llm_runtime.lock` **本來就不可能**被凍結。
+  這不是缺陷，是 state machine 的正確結果；Part VI 的完成度不以能否凍結衡量。
+- `resolve_formal_agent_binding()` 刻意不接受 registry 參數。Appendix J1 把
+  `db.query("SELECT * FROM llm_task_bindings ...")` 明列為 formal 禁止行為，
+  而沒有可用的 DB 控制代碼比一句註解可靠。
+
+相關：[NOTE-005]、[NOTE-019]、[NOTE-021]
+
+---
+
+## NOTE-019 Admin 頁面的網路邊界與寫入邊界
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/admin/auth.py`、`pcmef/admin/app.py`、
+`pcmef/admin/routes_llm.py`、`pcmef/admin/services.py`；
+`pcmef/cli.py` 的 `cmd_llm_connection_add()` 與 `cmd_admin_serve()`。
+
+**決策**：
+1. 預設 bind `127.0.0.1`。非 loopback 位址必須同時具備 `PCMEF_ADMIN_TOKEN`
+   與 `PCMEF_ADMIN_TLS=1`，否則 `assert_network_policy()` 直接拒絕啟動。
+2. 無法解析成 IP 的主機名一律視為**非**本機。
+3. 所有寫入端點強制 CSRF；帶有效 admin token 標頭的請求例外。
+4. UI 與 CLI 共用同一個 `AdminService`，UI 不得自行操作 registry。
+5. **CLI 的 `llm connection add` 不接受 API key 明文**，只收 `--secret-ref`。
+6. UI 的 Bind 由 `bind_enabled` 旗標控制，預設關閉。
+
+**原因**：這個頁面可以寫入 provider 憑證，因此曝露範圍不是樣式問題。§46 的
+Fail Behavior 明訂「不符合即拒絕非-loopback 啟動」，而非警告後照樣啟動。
+
+主機名判定選擇「未知即非本機」而非相反：反過來寫的話，一個打錯的主機名
+（例如 `127.0.0.l`，尾字是小寫 L）會被當成本機而繞過整套檢查。
+
+CLI 不收明文 key 是與 UI 刻意不對稱的設計。命令列參數會留在 shell history
+與作業系統的 process list，兩者都不是本系統能遮蔽的範圍；而 UI 的密碼欄位
+提交後立刻轉成 secret_ref，明文只存在於一次 request 的生命週期內。
+需要輸入 key 本身時走 UI，需要無人值守時走 `env:` 參考。
+
+UI 與 CLI 共用服務層而非各寫一份：兩套寫入路徑必然行為分歧，
+而分歧的那一套通常是忘了做能力檢查的那一套。
+
+`bind_enabled` 預設關閉且在畫面上顯示原因，而不是直接把按鈕拿掉 ——
+§52 步驟 5 要求先讓 CLI 走完全流程再接 UI Bind，把這個狀態顯示出來，
+比讓功能靜靜消失更容易在交接時被理解。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/llm_admin/test_admin_security.py -v
+py -3.10 -m pytest tests/llm_admin/test_admin_page.py -v
+py -3.10 -m pytest tests/llm_admin/test_admin_services.py -v
+```
+`test_serve_refuses_non_loopback_without_controls` 鎖住啟動閘門；
+`test_csrf_is_required_on_every_write_endpoint` 逐端點驗證；
+`test_connection_add_takes_no_plaintext_key_option` 鎖住 CLI 的不對稱設計。
+
+**維護邊界**：session 簽章金鑰每個行程重新產生，不得持久化。代價只是重啟後
+需要重新載入頁面取得 CSRF 權杖，而一把寫死或存檔的金鑰是永久性的風險。
+
+相關：[NOTE-016]、[NOTE-020]
+
+---
+
+## NOTE-018 verified 能力由 probe log 推導，且 probe 失敗不牽連 connection
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/llm/registry.py` 的 `record_verification()`、
+`_derive_verified()` 與 `ConnectionRow.bindable`；`pcmef/llm/capabilities.py`；
+`pcmef/llm/verification.py`；`pcmef/admin/services.py` 的 `fetch_models()`。
+
+**決策**：
+1. `llm_models.verified_caps_json` 只由 `record_verification()` 依 probe log 推導，
+   並與 log 寫入同一個交易；不提供手動設定的路徑。
+2. 判定採「每個能力**最近一次** probe 的結果」，不是「曾經成功過」。
+3. **單一 capability probe 失敗不改變 connection 狀態。** 連線層級的故障只由
+   `fetch_models()` 的 `list_models` 失敗標記為 `error`。
+4. task binding 只認 probe-verified 能力，provider metadata 宣稱的
+   declared 能力僅作提示。
+
+**原因**：SRC-SAI §44 明訂「能力狀態必須分成 provider-declared 與 probe-verified；
+Task Binding 只允許使用 verified capability」。把 verified 做成可手填的欄位，
+等於留一條「宣稱驗證過但沒有 log 佐證」的路。
+
+採最近一次而非歷史最佳：模型被下架、方案降級或配額用盡時 probe 會開始失敗，
+若沿用歷史成功結果，binding 會繼續指著一個已經不能用的能力，
+而問題會在 formal run 中段才爆。
+
+第 3 點是實作過程中由驗收測試逼出來的修正。初版讓任何失敗的 probe 把
+connection 標成 `degraded`，於是 LLM-UI-03（structured-json probe FAIL 時
+Bind 應被拒）確實被拒了，但**拒絕的理由是連線狀態而不是能力不足**。
+理由錯了就是錯的：操作者會照著訊息去檢查憑證與端點，而真正的問題是
+這個模型不支援結構化輸出。一個模型缺某項能力，與憑證或端點故障，
+是兩個不同的事實，不該共用同一個狀態欄位。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/llm_admin/test_registry.py -v
+py -3.10 -m pytest tests/llm_admin/test_capabilities.py -v
+py -3.10 -m pytest tests/llm_admin/test_verification.py -v
+```
+`test_verified_capabilities_follow_the_latest_probe` 鎖住第 2 點；
+`test_a_failed_probe_does_not_condemn_the_whole_connection` 與
+`test_fetch_models_marks_the_connection_error_when_the_provider_fails`
+成對鎖住第 3 點的兩半。
+
+**維護邊界**：`CapabilityVerifier.verify()` 不得新增「自訂 probe 內容」的參數。
+§44 要求 verification payload 最小化且不得使用真實 formal evidence；
+沒有這個參數，就沒有人能在趕時間時順手拿一筆 case 來測。
+
+相關：[NOTE-017]、[NOTE-019]
+
+---
+
+## NOTE-017 Provider 錯誤訊息不得夾帶 request URL，且離線 stub 排除於 formal
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/agents/provider.py` 全檔，特別是
+`HTTPProviderAdapter._request()`、`FORMAL_ELIGIBLE_PROVIDERS` 與
+`StubOfflineAdapter`；`pcmef/core/logging_setup.py` 的 `redact()`。
+
+**決策**：
+1. 不呼叫 `raise_for_status()`，改為自行檢查狀態碼。
+2. **例外訊息一律不含 request URL**，只帶 provider 名稱、HTTP 狀態碼與
+   已遮蔽的回應片段；連線層例外只保留例外**類別名稱**。
+3. provider 回應片段在組成訊息時就以 `redact()` 清洗，不等 log filter。
+4. `StubOfflineAdapter` 顯式登記為 provider，但**不在** `FORMAL_ELIGIBLE_PROVIDERS`。
+
+**原因**：第 1 點承自 [NOTE-007]。第 2 點是它的延伸：NOTE-007 的做法是
+「把 key 從 query string 移到 header，所以 URL 進訊息也無妨」，但那讓安全性
+依賴於兩處程式**同時**維持正確。只要日後有人為了除錯把 key 加回 query，
+訊息就會再度外洩，而那次改動看起來完全無害。訊息裡本來就不需要 URL —— 
+provider 名稱加狀態碼足以定位問題 —— 因此直接移除這個依賴。
+
+第 3 點的必要性在於落盤時機：provider 的回應內容由對方決定，可能原樣回吐
+我們送出的憑證，而該訊息會被寫進 `llm_verification_logs.error_sanitized`，
+屬於 LLM-SEC-01 的掃描範圍。log filter 只在寫 log 時生效，救不了寫進 DB 的那份。
+
+第 4 點讓「離線也能把整條 admin 流程走完」與「假 provider 絕不進 formal」
+同時成立。沒有 stub，離線環境無法驗證 admin 流程，測試只能改用 mock 去繞過
+真實程式路徑 —— 那會讓被測的東西不是被用的東西。有了 stub 而不設邊界，
+則會有一天在 `llm_runtime.lock` 裡看到 `stub_offline`。兩者都不可接受。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/llm_admin/test_provider_contract.py -v
+```
+`test_no_module_calls_raise_for_status` 以 AST 掃描全樹（比對呼叫節點而非
+字串，否則檔頭寫下這條禁令本身就會觸發它）；
+`test_http_error_message_contains_neither_url_nor_key` 與
+`test_error_body_excerpt_is_redacted` 分別鎖住第 2、3 點；
+`test_stub_provider_is_excluded_from_formal` 鎖住第 4 點。
+
+**維護邊界**：`ProbeResult.artifact_hash()` 刻意排除 `probed_at` 與 `latency_ms`。
+同一個結論在不同時間 probe 應得到相同 hash，否則
+`capability_probe_artifact_hashes` 每跑一次就變，`llm_runtime.lock` 會被迫
+跟著變而失去「identity 沒變」的意義。
+
+相關：[NOTE-007]、[NOTE-018]
+
+---
+
+## NOTE-016 secret 只以參考流動，且缺加密後端時 fail-closed
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/secrets/vault.py` 與 `pcmef/secrets/crypto.py` 全檔；
+`pcmef/llm/registry.py` 的 `_check_secret_ref()`；`.gitignore` 第 6 行。
+
+**決策**：
+1. 系統各層一律只傳遞 `env:<VARNAME>` / `vault:<uuid>` / `session:<token>`
+   三種參考；解析出明文只發生在 `SecretVault.resolve()`，且該處同時把值
+   註冊進 log 遮蔽清單。
+2. 本機加密 vault 使用 `cryptography` 的 Fernet。**缺這個套件時拒絕保存
+   持久化 secret**，不退回自製加密。
+3. UI 顯示的指紋為 `HMAC-SHA256(vault 專屬 salt, secret)` 前四個 hex，
+   不是 key 的任何字元。
+4. `rotate()` 保持 vault entry 的 uuid 不變，只換密文並遞增 `secret_version`。
+5. `session:` 參考只存在於行程記憶體，且被 registry 與 snapshot 明文拒絕。
+
+**原因**：第 2 點是本則的核心取捨。缺 `cryptography` 時有兩條路：
+以標準函式庫自己組一個 HMAC-CTR 加 encrypt-then-MAC 的構造，或直接拒絕。
+選後者，因為前者的成本不對稱 —— 自製構造即使當下寫對，也沒有第二個人審查過，
+而它保護的是可以直接花錢的 API 憑證；而拒絕的代價只是一行
+`pip install`，或改用 `env:` 讓 key 留在環境變數裡完全不落盤。
+「無 master key 時禁止 save persistent secret，可允許 ephemeral session verify」
+本來就是 §46 寫明的行為，把「無加密後端」歸入同一條路徑是自然的延伸。
+
+第 3 點：§46 只要求「不顯示 key prefix/full value」，因此常見的「顯示後四碼」
+在字面上並不違規。仍然不採用，是因為指紋的用途只是「分辨裝的是哪一把」，
+而雜湊完全能做到，多洩漏四個字元換不到任何東西。salt 是必要的 ——
+沒有 salt 的四字元雜湊會變成離線驗證預言機：任何人拿一把候選 key
+算一次雜湊就能確認是否命中。
+
+第 4 點對應 §46 的 Secret rotation 規則：只換 credential 而
+provider/model/base_url/runtime identity 不變時，不必 invalidate scientific lock。
+而 lock 內存的正是這個 uuid —— 換掉它會讓一次單純的換 key 看起來像
+binding identity 變更，逼出一次不必要的重新 freeze。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/llm_admin/test_secret_vault.py -v
+py -3.10 -m pytest tests/secret/test_global_secret_scan.py -v
+```
+`test_fingerprint_has_the_masked_shape_and_leaks_no_key_material` 斷言指紋
+不是 key 的任何子字串；`test_llm_sec_01_no_artifact_contains_the_secret`
+在跑完整條 admin 流程後，逐位元組掃描每一個落盤檔案的任意 8 字元片段。
+
+**維護邊界**：`.gitignore` 的 vault 排除規則必須寫成 `/secrets/` 而非
+`secrets/`。後者會連 `pcmef/secrets/`（本抽象層的原始碼）一起吞掉，
+而那份程式碼必須進版控 —— 這個坑在 2026-08-27 已經踩過一次。
+
+相關：[NOTE-007]、[NOTE-017]、[NOTE-019]
+
+---
+
 ## NOTE-015 兩組 bootstrap 參數的教授核定
 
 **決策日期**：2026-08-26

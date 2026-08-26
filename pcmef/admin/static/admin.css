@@ -1,0 +1,143 @@
+/* PC-MEF Research System source maintenance contract
+ * 上下游: 由 pcmef/admin/templates/llm_setup.html 以 <link> 載入；
+ *         不被任何 Python 模組讀取，也不產生任何 artifact。
+ * 檔案路徑: pcmef/admin/static/admin.css
+ * 產生時間: 2026-08-27 00:30 +08:00
+ * 版本: v0.1.0
+ * 功能說明: 管理頁面的版面與配色。白底、內容置中、最大寬度 1160px，
+ *           狀態與能力用小徽章，危險操作紅色、主要操作深藍青色。
+ * 模組定位: §42 視覺規則的實作。它「不是」元件庫，也不引入任何前端框架。
+ * 主要責任:
+ *   1. .page 固定內容最大寬度在 §42 要求的 1000-1200px 區間
+ *   2. .card 讓四張卡片垂直排列並具一致的內距與邊框
+ *   3. .badge 系列提供 status 與 capability 的 compact 呈現
+ *   4. .btn 系列以顏色區分主要操作與危險操作
+ *   5. .grid / .field 提供表單欄位的兩欄排版
+ * 維護提醒:
+ *   - 不得引入 Tailwind/Bootstrap 等外部樣式表或 CDN 連結；§42 明訂第一版
+ *     採 server-rendered HTML + minimal JavaScript，不引入大型前端依賴，
+ *     而 CDN 連結同時也是一個對外的網路依賴。
+ *   - 不得把 .page 的 max-width 改到 1000-1200px 區間之外。
+ *   - 不得以顏色作為唯一的狀態訊號；每個徽章都必須同時有文字。
+ *   - v0.1.0 新增：首版樣式。
+ * 驗證方式:
+ *   - py -3.10 -m pytest tests/llm_admin/test_admin_page.py -k layout
+ * ------------------------------------------------------------ */
+
+:root {
+  --ink: #1c2530;
+  --muted: #5b6b7c;
+  --line: #dde3ea;
+  --bg: #ffffff;
+  --panel: #f6f8fa;
+  --primary: #0f4c81;
+  --accent: #0d7a8a;
+  --danger: #b3261e;
+  --ok: #1a7f47;
+  --warn: #9a6700;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 "Segoe UI", "Noto Sans TC", system-ui, sans-serif;
+}
+
+.page {
+  /* §42：內容最大寬度約 1000-1200 px。 */
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+
+header.masthead { border-bottom: 2px solid var(--line); padding-bottom: 14px; margin-bottom: 8px; }
+header.masthead h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: .2px; }
+header.masthead p { margin: 0; color: var(--muted); font-size: 13px; }
+
+/* 四張 card 垂直排列 */
+.card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-top: 20px;
+  background: var(--bg);
+}
+.card > h2 {
+  font-size: 15px;
+  margin: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 8px 8px 0 0;
+}
+.card > h2 .hint { float: right; font-weight: 400; color: var(--muted); font-size: 12px; }
+.card .body { padding: 18px; }
+
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.field input, .field select, .field textarea {
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px;
+  font: inherit; color: var(--ink); background: var(--bg);
+}
+.field .note { font-size: 11.5px; color: var(--muted); }
+.field.wide { grid-column: 1 / -1; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+tr:last-child td { border-bottom: none; }
+td.actions { white-space: nowrap; }
+
+.badge {
+  display: inline-block; padding: 1px 7px; margin: 1px 3px 1px 0;
+  border-radius: 10px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+}
+.badge.ok { color: var(--ok); border-color: #b7e0c6; background: #eef8f2; }
+.badge.warn { color: var(--warn); border-color: #e8d59a; background: #fdf7e6; }
+.badge.bad { color: var(--danger); border-color: #f0c0bc; background: #fdefee; }
+.badge.declared { border-style: dashed; }
+
+/* LAVA 一行一線路：所有控制項擠在同一列，狀態一眼可見（NOTE-023）。 */
+.conn-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg);
+}
+.conn-row.locked { background: #f3faf6; border-color: #b7e0c6; }
+.conn-row + .conn-detail { padding: 4px 14px 12px; }
+.conn-row .conn-id { background: var(--ink); color: #fff; border-color: var(--ink); }
+.conn-row .conn-name { font-weight: 600; min-width: 110px; }
+.conn-row select, .conn-row input { padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 13px; }
+.conn-row .btn { padding: 4px 10px; font-size: 12.5px; }
+.conn-detail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.conn-detail .err { color: var(--danger); }
+
+.mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+.fingerprint { font-family: "Cascadia Mono", Consolas, monospace; letter-spacing: .5px; }
+
+.btn {
+  display: inline-block; padding: 6px 12px; border-radius: 5px; border: 1px solid transparent;
+  font: inherit; font-size: 13px; cursor: pointer; background: var(--panel); color: var(--ink);
+  border-color: var(--line);
+}
+.btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn.accent { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.danger { background: #fff; color: var(--danger); border-color: var(--danger); }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+.inline { display: inline; margin: 0; }
+.empty { color: var(--muted); font-style: italic; padding: 6px 0; }
+
+.flash { padding: 10px 14px; border-radius: 6px; margin-top: 14px; font-size: 13px; }
+.flash.ok { background: #eef8f2; border: 1px solid #b7e0c6; color: var(--ok); }
+.flash.error { background: #fdefee; border: 1px solid #f0c0bc; color: var(--danger); }
+
+.snapshot dl { display: grid; grid-template-columns: 210px 1fr; gap: 6px 16px; margin: 0; }
+.snapshot dt { color: var(--muted); font-size: 12px; }
+.snapshot dd { margin: 0; }
+
+.footnote { margin-top: 26px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); padding-top: 12px; }

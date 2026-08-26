@@ -3,7 +3,7 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-08-26
+最後更新：2026-08-27
 
 ---
 
@@ -32,15 +32,48 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 ### 常用指令
 
 ```powershell
-py -3.10 -m pytest                                   # 全部測試（約 80 秒）
+py -3.10 -m pytest                                   # 全部測試（約 130 秒，975 passed）
 py -3.10 -m pcmef.cli config check                   # 待教授裁決的 10 項
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
 py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
 py -3.10 -m pcmef.cli surrogate smoke                # E1-G04 四特徵無 NaN 驗證
 py -3.10 -m pcmef.cli split plan-real --source data/raw_real/edge_impulse_export
-py -3.10 -m pcmef.cli provenance resolve-sigma       # SRC-D01/D02 證據
+py -3.10 -m pcmef.cli provenance resolve-sigma `
+    --paired-source data/raw_real/edge_impulse_export --export-decimals 4
+py -3.10 -m pcmef.cli audit e1-gates                 # Batch 7：十二個 gate
+py -3.10 -m pcmef.cli audit heldout-firewall         # Appendix B 洩漏防線
+py -3.10 -m pcmef.cli audit real-split-policy        # Appendix H1 政策契約
 py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inventory
 ```
+
+LLM Admin（Part VI，全部只寫 draft registry）：
+
+```powershell
+py -3.10 -m pcmef.cli llm connection add --provider google --name "Gemini Formal" `
+    --secret-ref env:GEMINI_API_KEY          # 只收參考，不收 key 明文（NOTE-019）
+py -3.10 -m pcmef.cli llm connection fetch-models --connection <id>
+py -3.10 -m pcmef.cli llm connection select-model --connection <id> --model <model_id>
+py -3.10 -m pcmef.cli llm connection test --connection <id>   # 三項 probe 全過才算
+py -3.10 -m pcmef.cli llm connection lock --connection <id>   # 鎖定後才能綁定
+py -3.10 -m pcmef.cli llm binding set arbitration_agent --connection <id> --model <model_id>
+py -3.10 -m pcmef.cli llm binding lock arbitration_agent      # draft 層確認鎖
+py -3.10 -m pcmef.cli llm binding audit
+py -3.10 -m pcmef.cli llm snapshot                   # 算 candidate hash 並列出未達前提
+py -3.10 -m pcmef.cli llm snapshot --freeze          # 前提齊備才寫 lock，否則 exit 2
+py -3.10 -m pcmef.cli llm cache audit --formal
+py -3.10 -m pcmef.cli admin serve                    # 127.0.0.1:8787/admin/llm-setup
+```
+
+**無憑證也能把整條流程走完**（供交接驗證）：
+
+```powershell
+$env:PCMEF_STUB_MODELS = "m1:chat+vision+structured_json,m2:chat"
+$env:MY_FAKE = "sk-notARealKey000000000"
+py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --secret-ref env:MY_FAKE
+```
+
+`stub_offline` 刻意**不在** `FORMAL_ELIGIBLE_PROVIDERS` 內：流程走得完，
+但 snapshot 會拒絕把它凍進 formal identity（NOTE-017）。
 
 ### 目前卡在哪
 
@@ -79,7 +112,7 @@ py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inve
 | M3 Post-E1 Split | 未開始 | 依賴 E1 outcome（synthetic split 不得早於此） |
 | M4 Perception | 未開始 | 需先安裝 tensorflow / scikit-learn |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
-| M6 Multi-Agent | 未開始 | 依賴 M3 |
+| M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
 | M8 Formal E2 | 未開始 | 依賴全部 |
 
@@ -92,9 +125,21 @@ Batch 進度依 SRC-SAI Appendix D「Recommended First Sprint」：
 | Batch 3 | Sigma/timing provenance resolver | **完成** |
 | Batch 4 | Mitsuba/mitransient optical transient smoke adapter | **完成** |
 | Batch 5 | single-acquisition surrogate + 500-point temporal model | **完成** |
-| Batch 6 | E1 metrics + dual-lock + scientific rule state machine | 未開始 |
-| Batch 7 | E1-G01..G12 audit + heldout firewall + real split policy audit | 未開始 |
+| Batch 6 | E1 metrics + dual-lock + scientific rule state machine | 未開始（刻意暫緩） |
+| Batch 7 | E1-G01..G12 audit + heldout firewall + real split policy audit | **完成** |
 | Batch 8 | post-E1 split generators + parent-family checks | 未開始 |
+
+Part VI 依 SRC-SAI §52 的七步順序：
+
+| 序 | 內容 | 狀態 |
+|---|---|---|
+| 1 | ProviderAdapter normalized contract + secret_ref 抽象 | **完成** |
+| 2 | 五張表 + migration（另加 llm_cache_index） | **完成** |
+| 3 | capability probes（chat + structured_json + vision；embedding optional） | **完成** |
+| 4 | Flask local admin page（§42 圖 8 四張 card） | **完成** |
+| 5 | llm_runtime snapshot + hash + state invalidation | **完成**（CLI 先行） |
+| 6 | Agent artifact cache | **完成** |
+| 7 | §51 十條 security/leakage/cache/resume 驗收 | **完成，10/10 PASS** |
 
 ---
 
@@ -275,13 +320,170 @@ formal 模式會直接拒絕載入。
 
 ---
 
+## Part VI 已完成內容（2026-08-27）
+
+測試：**1013 passed**（先前 617）。依 §52 七步順序實作，未跳步。
+§51 的十條驗收全部 PASS，且由 `tests/llm_admin/test_acceptance_matrix.py`
+自動確認每一條都有**會失敗的**對應測試 —— 少寫一條、或用 skip 蒙混，都會被擋。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `secrets/crypto.py` | §46 | Fernet + PBKDF2；缺 cryptography 時 fail-closed 不自製加密 |
+| `secrets/vault.py` | §43、§46 | `env:` / `vault:` / `session:` 三種參考；HMAC 指紋 `****abcd` |
+| `agents/provider.py` | §43 介面草案 4、§44 | normalized 契約 + Google/OpenAI 相容 + 離線 stub |
+| `agents/cache.py` | §48、Appendix J2 | content-addressed cache；pair 專屬量寫入即拒 |
+| `llm/registry.py` | §49 | 六張表 + migration；明文 key 與 session ref 進不去 |
+| `llm/capabilities.py` | §44、§45 | 四個 task 的能力矩陣；declared 與 verified 分離 |
+| `llm/verification.py` | §44 | probe 執行與不可覆寫的證據 artifact |
+| `llm/snapshot.py` | §47、Appendix J1 | lock candidate + state invalidation + formal 解析 |
+| `admin/{auth,services,routes_llm,app}.py` | §46、§50 | 網路邊界、共用服務層、八個端點 |
+| `admin/templates/llm_setup.html` + `static/admin.css` | §42 圖 8 | 四張 card、1160 px、零 script |
+| `cli.py llm * / admin serve` | §32 | 連線／模型／綁定／快照／快取／啟動頁面 |
+
+**§51 驗收對照**（`tests/llm_admin/`、`tests/secret/`、`tests/cache/`）：
+
+| ID | 落在 | 結果 |
+|---|---|---|
+| LLM-UI-01 | `test_admin_page.py` | PASS（response / HTML / log 三處掃 8 字元片段） |
+| LLM-UI-02 | `test_admin_page.py` | PASS（embedding-only 不進 dropdown） |
+| LLM-UI-03 | `test_admin_page.py` | PASS（structured-json FAIL → Bind 400） |
+| LLM-UI-04 | `test_admin_page.py` | PASS（409 + dependency 清單） |
+| LLM-UI-05 | `test_snapshot.py` | PASS（改 draft 後 lock hash 不動） |
+| LLM-UI-06 | `test_snapshot.py` | PASS（手改 SQLite 後仍解析 lock 內身分） |
+| LLM-SEC-01 | `test_global_secret_scan.py` | PASS（跑完整流程後逐位元組掃全部產物） |
+| LLM-CACHE-01 | `test_agent_cache.py` | PASS（3 次查詢 → 1 次 provider call） |
+| LLM-CACHE-02 | `test_agent_cache.py` | PASS（七個要素逐一變動皆 miss） |
+| LLM-RESUME-01 | `test_agent_cache.py` | PASS（resume 呼叫 provider 即測試失敗） |
+
+**實機驗證**（隔離的 scratch registry，離線 stub provider）：
+CLI 五步全走通；瀏覽器開啟 `/admin/llm-setup` 後確認四張 card 齊全、
+內容寬度 1160 px、`document.scripts.length === 0`、憑證顯示為 `****d1ff`、
+四個角色的 dropdown 都只列出唯一能力相容的模型（embedding-only 與
+chat-only 被正確排除）、Formal Snapshot 卡片顯示 `no active snapshot`
+並列出 10 項未達前提。頁面 HTML 內找不到 key，也找不到 `env:` 參考。
+
+**三個實作過程中被規格逼出來的修正**：
+
+| 發現 | 事實 | 處置 |
+|---|---|---|
+| Bind 拒絕理由指錯地方 | 初版讓任一 probe 失敗就把 connection 標成 degraded；LLM-UI-03 確實被拒，但理由是「連線異常」而非「缺 structured_json」 | probe 失敗不再動 connection 狀態；連線層故障只由 `fetch_models` 判定（NOTE-018） |
+| 原始碼被 .gitignore 吞掉 | `secrets/` 這條規則同時命中 `pcmef/secrets/`，secret_ref 抽象層整包不會進版控 | 改為 `/secrets/`，只排除 repo 根目錄的 vault |
+| LLM-SEC-01 只有局部掃描 | 原本只在 registry 與 verification 各掃自己那一份，不是規格要求的「全域掃描」 | 新增 `test_global_secret_scan.py`，跑完整流程後掃描該次產生的每一個檔案 |
+
+### 設定流程與版型對齊 LAVA setup（NOTE-023）
+
+§42 規定了四張 card 與欄位，但沒規定**操作者要照什麼順序把一條線路設定好**。
+roothinks（主要參考）與 rootmedicals-a 兩套系統在真實使用中收斂到同一個流程，
+使用者也是同一個人，因此 PC-MEF 直接沿用而不自創第三種：
+
+```
+draft ──Fetch──► fetched ──Test──► connected ──Connect──► locked
+                    ▲                   │                    │
+                    └──── 換模型 ────────┘         只有 locked 能綁定
+```
+
+| 狀態 | 可做 | 不可做 |
+|---|---|---|
+| draft | Fetch、選模型 | Test、Connect |
+| fetched | Test、換模型、重新 Fetch | Connect |
+| connected | Connect、Test、換模型 | — |
+| locked | Unlock、Delete | 換 vendor/key/模型、Fetch、Test |
+
+衍生的三條規則：**只有 locked 的線路出現在綁定選單**（LAVA 的「僅顯示 Locked」）；
+**一條 locked 的線路只提供它被檢查過的那一個模型**；**換模型會退回 fetched**
+（先前的 Test 對新模型無效）。`llm_task_bindings.is_locked` 是 **draft 層的確認鎖**，
+與 formal 的 `llm_runtime.lock` 是兩件事。
+
+**與 roothinks 的三處刻意差異**：
+
+| 項目 | roothinks | PC-MEF | 理由 |
+|---|---|---|---|
+| Test 內容 | 送一句話看回不回 OK | 跑 chat + structured_json + vision 三項 probe | §44 要求的能力只有實際 probe 才知道；回一句 OK 什麼都證明不了 |
+| 憑證遮蔽 | key 後四碼 | HMAC 指紋 `****abcd` | §46 不准顯示 key prefix（NOTE-016） |
+| 前端 | JS 驅動逐列更新 | server-rendered 表單，零 script | §42 明訂 minimal JS；狀態機與資訊架構完全相同，只是每個按鈕改為 POST + redirect |
+
+CLI 有完整對等指令：`llm connection select-model / test / lock`、`llm binding lock`。
+
+**實機驗證**：locked 那一列的 Fetch/Set/Test 皆 disabled 且只剩 Unlock/Delete；
+draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitration_agent
+不顯示 dropdown 而顯示「已鎖定，解鎖後才能更換」；`document.scripts.length === 0`。
+
+**與 §31 目錄樹的兩處刻意差異**：`llm/bindings.py` 與 `llm/cost_ledger.py`
+未建成獨立檔案。binding 的寫入與能力檢查已在 `registry.set_binding()` 與
+`capabilities.py`，另開一個只做轉呼叫的模組會讓同一條規則有兩個入口；
+費用帳由 `llm_cache_index` 這張表承擔，§49 本來就把它列為該表的用途
+（"content-addressed lookup / cost audit"）。
+
+**目前無法凍結 `llm_runtime.lock`，這是正確結果而非缺陷。**
+`llm snapshot` 實測列出 10 項未達前提：四個角色的 prompt 檔屬 M6 尚未撰寫、
+`agents.representation_mode` 與 `agents.retry.max_attempts` 仍待教授裁決、
+且 lock 相依鏈要求 `agent_schema` → `synthetic_split_policy` → `e1_outcome`，
+亦即必須先跑完 E1 與 M3。Part VI 的完成度不以能否凍結衡量（NOTE-020）。
+
+---
+
+## Batch 7 已完成內容（2026-08-27）
+
+測試：**1099 passed**。稽核器先於 Batch 6 建立是刻意的 —— 它就不會在事後
+被寫成剛好符合已產出的結果。
+
+| 模組 | 對應規格 | 內容 |
+|---|---|---|
+| `audit/result.py` | — | 四種狀態；NOT_PRODUCED 與 FAIL 分開 |
+| `audit/e1_gates.py` | §12 E1 Experiment-Ready Gate | 十二個 gate 逐項判定 |
+| `audit/firewall.py` | Appendix B、Appendix H1 | FW-01..05 洩漏防線 + SP-01..06 政策契約 |
+| `cli.py audit e1-gates / heldout-firewall / real-split-policy` | §32 | 三個指令，可落 JSON 報告 |
+
+**目前實測結果**：
+
+```
+e1_gates            PASS 6  FAIL 0  NOT_PRODUCED 6
+heldout_firewall    PASS 4  FAIL 0  NOT_PRODUCED 1
+real_split_policy   PASS 6  FAIL 0  NOT_PRODUCED 0
+```
+
+六個 NOT_PRODUCED 是 G05（Batch 8）與 G06/G07/G10/G11/G12（Batch 6）；
+FW-03 的 NOT_PRODUCED 是「尚無 calibration artifact，時序無從比較」。
+**這些都是正確輸出，不是失敗**（NOTE-022）。不帶 `--require` 時 exit code 為 0；
+`--require G01:G12` 會如實擋下 —— E1 確實還不能跑。
+
+**稽核器上線第一次跑就抓到一個真實不一致**：
+
+`provenance/sigma_resolution.json` 說 `status=UNRESOLVED`、`register=null`，
+但 `configs/base.yaml` 與本檔都宣稱 sigma 已解出 `0x18`。追查後確認
+**結論是對的，證據是舊的** —— NOTE-010 v2 的排除法當時以臨時腳本完成，
+而產生 E1-G08 證據的 `provenance resolve-sigma` 從未實作那條路徑：
+它只讀彙總格式的 55,440 筆 sigma 值，沒呼叫 `rule_out_range_register()`，
+也沒傳 `export_decimals`。
+
+修正後重跑，獨立重現了 NOTE-010 v2 記載的數字：
+
+```
+py -3.10 -m pcmef.cli provenance resolve-sigma \
+    --paired-source data/raw_real/edge_impulse_export --export-decimals 4
+→ n=280000  /128 殘差 0.4992 > 容差 0.0064（排除）  register 0x18  status RESOLVED
+```
+
+排除法需要**同一列**的 sigma 與 distance 配對，彙總格式已把時間軸摺成窗口
+統計量做不到，因此新增 `EdgeImpulseAdapter.stacked_values()`。
+
+**另一個順帶修掉的缺陷**：稽核報告用了 `∅` `−` `≥` 三個不在 cp950 裡的符號，
+在繁中 Windows console 上會讓整份報告印到一半崩潰。已換成 ASCII，
+並讓 CLI 對無法編碼的字元退化成替代字元而非崩潰 —— 一份跑到一半才掛掉的
+報告，比一份有幾個問號的報告糟得多。
+
+---
+
 ## 規格對照稽核（2026-08-26）
 
 以 SAI §31 目錄樹、E1-G01..G12、Appendix D Batch exit criteria 逐項盤點。
 
+> 本節為 8/26 的稽核。**8/27 Part VI 落地後，§31 目錄樹由 17/62 升至 31/62**
+> （新增 agents 2、llm 4、admin 6、secrets 2）；其餘欄位未變。
+
 | 面向 | 現況 | 說明 |
 |---|---|---|
-| §31 目錄樹 | **17/62 檔** | 缺的全在 Batch 6-8 與 M4-M8 範圍（`core/splits.py` 已於 8/26 補上） |
+| §31 目錄樹 | **17/62 檔** → 8/27 為 **31/62** | 缺的全在 Batch 6-8 與 M4-M8 範圍（`core/splits.py` 已於 8/26 補上） |
 | E1 gates | **6/12 有證據** | G01/G02/G03/G04/G08/G09 |
 | Batch exit | **1-5 完成**，6-8 未開始 | |
 | 22 formal locks | 全數登錄；**1 個已寫** | `real_split_policy`（`186d307571b39ce3`）；其餘 21 個仍 pending |
@@ -451,7 +653,8 @@ Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的�
 | 逐 recording 的原始 ToF CSV | **未取得**；最可能在樹莓派 `/home/pi/` | E1 的 500 點契約 |
 | `mitsuba` / `drjit` / `mitransient` | 已安裝（另需 LLVM toolchain 提供 LLVM-C.dll） | — |
 | `tensorflow` / `scikit-learn` | 未安裝 | M4、M5 |
-| `jsonschema` | 未安裝 | M6 agent schema 驗證 |
+| ~~`jsonschema`~~ | **已安裝 4.26.0**（2026-08-27） | structured_json probe 需要它才能真的驗證 |
+| `Flask` / `httpx` / `cryptography` | 已安裝（3.0.3 / 0.28.1 / 43.0.3） | Part VI |
 
 Python 執行環境：`py -3.10`（3.10.11，numpy 2.2.6 / scipy 1.15.3 / pandas 2.3.3
 / PyYAML 6.0.3 / pytest 9.0.3 已就緒）。
@@ -509,13 +712,30 @@ E1 可依原規格在 500 點序列上進行，`e1_scientific_rule.lock` 沿用�
 
 ---
 
-## 下一步（2026-08-26 調整方向：先做 Part VI Admin UI 與稽核系統）
+## 下一步（2026-08-27 更新）
 
 外部阻塞已全部解除：資料齊備、sigma 解出、real split 凍結、E1/E2 bootstrap 核定。
+**Part VI 已完成（§52 七步 + §51 十條驗收）**，見上方「Part VI 已完成內容」。
 
-**Batch 6（E1 metrics + dual-lock）刻意暫緩**，改先做兩件事：
+**Batch 7 已完成**，見上方「Batch 7 已完成內容」。剩下的順序：
 
-### 1. Part VI —— Admin LLM Setup UI（SAI §38、§42、§46、§50、§51、§52）
+1. **Batch 6** —— E1 metrics + dual-lock + scientific rule state machine。
+   它會補上 G06/G07/G10/G11/G12 五個目前 NOT_PRODUCED 的 gate。
+2. **Batch 8** —— post-E1 split generators，補上 G05。
+3. 仍待核定的 10 項（見下）。
+4. 採集腳本仍未取得（見下）。
+
+判定 E1 可否開跑，一律以 `audit e1-gates --require G01:G12` 的 exit code 為準，
+不以任何文件敘述為準。
+
+---
+
+## 附：2026-08-26 版的「下一步」（第 1 項已完成，其餘仍有效）
+
+保留原文供對照 —— 特別是 §52 的七步表與 §51 的十條驗收條件，
+它們是 Part VI 完成與否的判準，不該因為做完了就從檔案裡消失。
+
+### 1. Part VI —— Admin LLM Setup UI（SAI §38、§42、§46、§50、§51、§52）→ **已完成**
 
 `pyproject.toml` 的 `admin = ["Flask>=3.0"]` 就是為此預留。
 **§52 明訂實作順序，不得跳步**：

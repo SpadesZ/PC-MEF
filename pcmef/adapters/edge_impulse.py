@@ -341,6 +341,22 @@ class EdgeImpulseAdapter:
 
     # -- 載入 --------------------------------------------------------------
 
+    def stacked_values(self, inventory: tuple[SourceFile, ...]) -> np.ndarray:
+        """把所有樣本的 (500,4) 疊成單一 (N*500, 4) 陣列。
+
+        Sigma 的排除檢驗需要**同一列**的 sigma 與 distance 配對
+        （NOTE-010 v2），彙總格式的 per-metric 矩陣做不到這件事 ——
+        它已經把時間軸摺成窗口統計量，兩個 metric 的列不再對應同一個時刻。
+        """
+        blocks = [
+            self._samples[item.original_path].values
+            for item in inventory
+            if item.original_path in self._samples
+        ]
+        if not blocks:
+            raise EdgeImpulseError("inventory yielded no loadable samples")
+        return np.concatenate(blocks, axis=0)
+
     def load_recording(
         self,
         measurement: AlignedMeasurement,
