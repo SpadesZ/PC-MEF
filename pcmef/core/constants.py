@@ -4,7 +4,7 @@
 #         常數直接流向各模組的 array index、驗證條件與 formal freeze payload。
 # 檔案路徑: pcmef/core/constants.py
 # 產生時間: 2026-08-25 20:10 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 存放全系統共用且不可變的常數 —— 四類液態狀態的順序、ToF 四特徵的欄位
 #           順序、三個數值 epsilon、前研究標籤對照表、七類資料角色，以及 E2 的四個
 #           condition 與五個比較組名稱。
@@ -23,6 +23,8 @@
 #     ambient 靜默對調，且因兩者皆為 rate、量級相近而不會觸發任何 range 檢查。
 #   - 任何常數變更等同 formal scientific identity 變更，必須先立 NOTE 並重新 freeze
 #     所有下游 lock。
+#   - v0.2.0 新增 provenance facet 詞彙、SRC-HANDOFF §8 證據位階與 E1-G08
+#     契約版本常數（NOTE-028 / AMD-001）。
 #   - v0.1.0 新增：首版常數，決策見 NOTE-001（canonical 順序）與 NOTE-002（顯示順序分離）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/schema/test_canonical_case_and_ids.py -k "canonical_order or display_order or legacy_label or class_order"
@@ -127,6 +129,40 @@ SIGMA_STATUS_VALUES: tuple[str, ...] = (
     SIGMA_STATUS_RESOLVED,
     SIGMA_STATUS_UNRESOLVED,
 )
+
+# NOTE(NOTE-028): provenance facet 的證據等級詞彙。
+# 每個 facet 各自持有一個等級，不再讓數個彼此獨立的事實共用一個
+# RESOLVED/UNRESOLVED 旗標 —— 那會讓「可由資料驗證的事」被
+# 「原理上無法由資料觀測的事」綁死。
+PROVENANCE_CONFIRMED: str = "CONFIRMED"
+PROVENANCE_CONFLICT: str = "CONFLICT"
+PROVENANCE_RECONSTRUCTED: str = "RECONSTRUCTED"
+PROVENANCE_UNKNOWN: str = "UNKNOWN"
+PROVENANCE_STATUS_VALUES: tuple[str, ...] = (
+    PROVENANCE_CONFIRMED,
+    PROVENANCE_CONFLICT,
+    PROVENANCE_RECONSTRUCTED,
+    PROVENANCE_UNKNOWN,
+)
+
+#: 只有 CONFIRMED 能滿足 gate 要求。RECONSTRUCTED 是「推得出來但沒有證據」，
+#: 讓它通過等於允許推論冒充證據；要放寬必須是另一次明示的 protocol amendment。
+PROVENANCE_GATE_SATISFYING: tuple[str, ...] = (PROVENANCE_CONFIRMED,)
+
+#: SRC-HANDOFF §8 的證據位階。數字越小越強，低位階不得覆寫高位階。
+EVIDENCE_RANK_RAW_DATASET: int = 1
+EVIDENCE_RANK_ACQUISITION_CODE: int = 2
+EVIDENCE_RANK_THESIS_DOC: int = 3
+EVIDENCE_RANK_LEGACY_POSTPROCESS: int = 4
+EVIDENCE_RANK_LEGACY_INFERENCE_4F: int = 5
+EVIDENCE_RANK_LEGACY_INFERENCE_1F2F: int = 6
+EVIDENCE_RANK_FILENAME_HINT: int = 7
+EVIDENCE_RANK_GUESS: int = 8
+
+#: E1-G08 契約版本。v1 要求 register 位址一併 RESOLVED；
+#: v2（AMD-001）拆成 channel semantics + numeric scale，位址允許 CONFLICT/UNKNOWN。
+E1_G08_CONTRACT_VERSION: str = "v2"
+PROTOCOL_AMENDMENT_ID: str = "AMD-001"
 
 
 def tof_index(feature_name: str) -> int:

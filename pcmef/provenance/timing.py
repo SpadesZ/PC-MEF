@@ -4,7 +4,7 @@
 #         供 E1 的 temporal 指標與 measurement_time 契約引用。
 # 檔案路徑: pcmef/provenance/timing.py
 # 產生時間: 2026-08-26 03:50 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 把「一筆 recording 的取樣間隔到底是多少」這件事變成有證據的結論。
 #           它並列記錄文件記載值、腳本設定值與實測值三者，指出彼此差多少，
 #           並強制區分光子飛行時間軸與量測時間軸這兩條不同的時間軸。
@@ -14,14 +14,19 @@
 #   1. TimeAxis 列舉兩條互不換算的時間軸及其允許用途
 #   2. IntervalEvidence 描述單一來源的間隔值與其證據等級
 #   3. measure_interval() 從真實時間欄推導間隔與穩定度
-#   4. audit_timing() 併陳三個來源並計算彼此偏差
+#   4. audit_timing() 併陳各來源並計算相對於 baseline 的偏差
 #   5. TimingProvenance.to_artifact() 產生雙時間軸 provenance artifact
 # 維護提醒:
 #   - 不得把文件記載的 0.082 或腳本的 0.02 當成任何 recording 的實際間隔；
-#     兩者都不是實測值，實測中位數為 0.0624 s（NOTE-011）。
+#     兩者都不是該筆 recording 的實測值。
+#   - 不得以 0.0624 s 描述 Edge Impulse 那 560 筆。那個值來自偏移測試副產物
+#     CSV，是**另一次採集**；560 筆的 rank-1 provenance 是資料集自帶的
+#     interval_ms = 82.00001312 ms（NOTE-028）。
 #   - 不得把 optical transient bins 當成 measurement-time 取樣點；
 #     兩條時間軸物理意義不同，禁止互相換算（SRC-D03）。
 #   - 不得在時間軸不穩定時仍回報一個「代表間隔」；不穩定就是結論本身。
+#   - v0.2.0 新增 EvidenceLevel.DATASET_PRIMARY（rank-1）並改以它為偏差 baseline；
+#     先前以偏移測試的實測值為 baseline，會把 rank-1 證據寫成偏差方（NOTE-028）。
 #   - v0.1.0 新增：首版雙時間軸 provenance，對應 NOTE-011。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/provenance/test_sigma_and_timing.py -k "interval or timing or axis" -v
@@ -59,8 +64,17 @@ class TimeAxis(str, Enum):
 
 
 class EvidenceLevel(str, Enum):
-    """間隔值的證據等級。只有 MEASURED 可用於任何 recording 的實際契約。"""
+    """間隔值的證據等級，由強到弱（SRC-HANDOFF §8）。
 
+    NOTE(NOTE-028): `DATASET_PRIMARY` 是 rank-1 —— 資料集自帶的 `interval_ms`。
+    它由產生資料的那次採集寫入，是唯一能回答「這 560 筆是以什麼間隔錄的」的來源。
+
+    `MEASURED` 是「從某個時間欄實測而得」，強度取決於**量的是哪一批資料**。
+    偏移測試副產物 CSV 的實測值不能拿來描述 Edge Impulse 那 560 筆，
+    兩者是不同次採集。分成兩級就是為了讓這件事無法被混淆。
+    """
+
+    DATASET_PRIMARY = "dataset_primary"
     MEASURED = "measured"
     SCRIPT_NOMINAL = "script_nominal"
     DOCUMENTED = "documented"
@@ -92,6 +106,7 @@ class TimingProvenance:
     measured: IntervalEvidence | None
     axis_separation_note: str
     discrepancies: dict[str, float]
+    baseline: IntervalEvidence | None = None
 
     def to_artifact(self) -> dict[str, Any]:
         return {
@@ -110,7 +125,8 @@ class TimingProvenance:
             "axis_separation_note": self.axis_separation_note,
             "evidence": [e.to_dict() for e in self.evidence],
             "measured": self.measured.to_dict() if self.measured else None,
-            "discrepancies_vs_measured": {
+            "baseline": self.baseline.to_dict() if self.baseline else None,
+            "discrepancies_vs_baseline": {
                 k: round(v, 4) for k, v in sorted(self.discrepancies.items())
             },
         }
@@ -156,13 +172,32 @@ def audit_timing(
     script_nominal_s: float | None = None,
     documented_source: str = "SRC-PLAN §2.1",
     script_source: str = "SRC-NOTION SAMPLE_INTERVAL",
+    dataset_primary_s: float | None = None,
+    dataset_primary_source: str = "edge_impulse_export:payload.interval_ms",
+    dataset_primary_detail: dict[str, Any] | None = None,
 ) -> TimingProvenance:
-    """併陳三個來源的間隔值，並計算文件值與實測值的偏差。
+    """併陳各來源的間隔值，並計算其餘來源相對於 **baseline** 的偏差。
 
-    偏差以相對百分比表示，因為「差幾毫秒」在不同量級下意義差很多；
-    31% 的偏差會讓所有 temporal 統計失真，而這正是 0.082 與實測 0.0624 的差距。
+    NOTE(NOTE-028): baseline 為 `dataset_primary`（若提供），否則才退回 `measured`。
+    先前一律以 `measured` 當 baseline，而那個 measured 來自偏移測試副產物 CSV
+    （0.0624 s），於是報告會把 dataset 自帶的 0.082 描述成「偏離 31%」——
+    把 rank-1 證據寫成偏差方。偏差以相對百分比表示，因為「差幾毫秒」
+    在不同量級下意義差很多。
     """
     evidence: list[IntervalEvidence] = []
+    if dataset_primary_s is not None:
+        evidence.append(
+            IntervalEvidence(
+                level=EvidenceLevel.DATASET_PRIMARY,
+                value_s=float(dataset_primary_s),
+                source=dataset_primary_source,
+                detail=dataset_primary_detail
+                or {
+                    "note": "資料集自帶的 interval_ms，由產生這批資料的採集寫入；"
+                    "rank-1，不得被 deployment 設定值或他次採集的實測值覆蓋"
+                },
+            )
+        )
     if documented_s is not None:
         evidence.append(
             IntervalEvidence(
@@ -187,13 +222,16 @@ def audit_timing(
     if measured is not None:
         evidence.append(measured)
 
+    baseline = next(
+        (e for e in evidence if e.level is EvidenceLevel.DATASET_PRIMARY), measured
+    )
     discrepancies: dict[str, float] = {}
-    if measured is not None and measured.value_s > 0:
+    if baseline is not None and baseline.value_s > 0:
         for item in evidence:
-            if item.level is EvidenceLevel.MEASURED:
+            if item.level is baseline.level:
                 continue
             discrepancies[item.level.value] = (
-                (item.value_s - measured.value_s) / measured.value_s * 100.0
+                (item.value_s - baseline.value_s) / baseline.value_s * 100.0
             )
 
     return TimingProvenance(
@@ -204,4 +242,5 @@ def audit_timing(
             "不得互相換算；temporal E1 僅在 measurement_time 上計算。"
         ),
         discrepancies=discrepancies,
+        baseline=baseline,
     )

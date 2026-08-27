@@ -96,10 +96,39 @@ def _healthy_g04(paths: AuditPaths, all_finite: str = "True") -> None:
     )
 
 
-def _healthy_g08(paths: AuditPaths, status: str = "RESOLVED") -> None:
+def _healthy_g08(
+    paths: AuditPaths,
+    status: str = "RESOLVED",
+    channel: str = "CONFIRMED",
+    scale: str = "CONFIRMED",
+    register: str = "CONFLICT",
+    contract_version: str = "v2",
+) -> None:
+    """AMD-001 v2 的 artifact 形狀。register 預設 CONFLICT —— 那是正常狀態。"""
     _write(paths.provenance / "sigma_resolution.json", {
         "status": status, "blocking_reasons": [],
-        "register": {"resolved": "0x18"}, "scaling": {"resolved_divisor": 65536.0},
+        "contract_version": contract_version,
+        "amendment": "AMD-001",
+        "required_facets": ["channel_semantics", "numeric_scale"],
+        "facets": {
+            "channel_semantics": {
+                "status": channel, "value": "dispersion_channel_not_range",
+                "evidence_rank": 1, "basis": "test fixture",
+            },
+            "numeric_scale": {
+                "status": scale, "value": 65536.0,
+                "evidence_rank": 1, "basis": "test fixture",
+            },
+            "register_address": {
+                "status": register, "value": None,
+                "evidence_rank": 5, "basis": "test fixture",
+            },
+            "original_acquisition_method": {
+                "status": "UNKNOWN", "value": None,
+                "evidence_rank": 2, "basis": "test fixture",
+            },
+        },
+        "scaling": {"resolved_divisor": 65536.0},
     })
 
 
@@ -251,6 +280,69 @@ def test_broken_g08_unresolved_sigma(paths):
     result = audit_e1_gates(paths).get("E1-G08")
     assert result.status is CheckStatus.FAIL
     assert any("RESOLVED" in f for f in result.findings)
+
+
+# --- AMD-001：G08 v2 的通過與不通過條件 -----------------------------------
+# 這一組必須成對存在。只留「位址 CONFLICT 仍 PASS」而沒有下面幾條，
+# 這次修訂就只是把 gate 變成橡皮圖章（NOTE-028 維護邊界）。
+
+
+def test_g08_passes_while_register_address_is_in_conflict(paths):
+    """AMD-001 的核心行為：歷史暫存器位址未定不得擋下 E1-G08。"""
+    _healthy_g08(paths, register="CONFLICT")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.PASS
+    assert "register=CONFLICT" in result.detail
+
+
+def test_g08_passes_while_register_address_is_unknown(paths):
+    _healthy_g08(paths, register="UNKNOWN")
+    assert audit_e1_gates(paths).get("E1-G08").status is CheckStatus.PASS
+
+
+def test_g08_fails_when_channel_semantics_not_confirmed(paths):
+    _healthy_g08(paths, channel="UNKNOWN")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("channel_semantics" in f for f in result.findings)
+
+
+def test_g08_fails_when_numeric_scale_not_confirmed(paths):
+    _healthy_g08(paths, scale="CONFLICT")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("numeric_scale" in f for f in result.findings)
+
+
+def test_g08_fails_when_a_required_facet_is_reconstructed(paths):
+    """RECONSTRUCTED 是推論不是證據，不得讓 gate 通過。"""
+    _healthy_g08(paths, scale="RECONSTRUCTED")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+
+
+def test_g08_fails_on_stale_v1_artifact(paths):
+    """v1 artifact 沒有 facets，必須被要求重產而不是靜默當成通過。"""
+    _write(paths.provenance / "sigma_resolution.json", {
+        "status": "RESOLVED", "blocking_reasons": [],
+        "register": {"resolved": "0x18"}, "scaling": {"resolved_divisor": 65536.0},
+    })
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("contract_version" in f for f in result.findings)
+
+
+def test_g08_fails_when_a_required_facet_is_missing(paths):
+    _healthy_g08(paths)
+    import json as _json
+
+    path = paths.provenance / "sigma_resolution.json"
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    del payload["facets"]["numeric_scale"]
+    path.write_text(_json.dumps(payload), encoding="utf-8")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("numeric_scale" in f for f in result.findings)
 
 
 def test_broken_g09_heldout_already_accessed(paths):

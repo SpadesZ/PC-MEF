@@ -3,7 +3,7 @@
 #         寫出人類可讀報告到 stdout 與選用的 log 檔；exit code 供 CI 判定。
 # 檔案路徑: pcmef/cli.py
 # 產生時間: 2026-08-26 09:50 +08:00
-# 版本: v0.6.0
+# 版本: v0.7.0
 # 功能說明: 系統的命令列入口。提供查版本、檢視設定、列出所有待教授裁決的數值、
 #           顯示每個凍結點的狀態、執行 M0 前研究資料盤點、判定 Sigma scaling 與
 #           取樣間隔這兩處來源歧異，以及管理 LLM 連線／模型驗證／角色綁定與快照。
@@ -705,18 +705,13 @@ def cmd_provenance_resolve_sigma(args: argparse.Namespace) -> int:
         values = stacked[:, tof_index("sigma_like")]
         distances = stacked[:, tof_index("distance_mm")]
 
+        # NOTE(NOTE-028): 這個檢定證成的是 **channel semantics**
+        # 「sigma 欄不是測距值」，而不是任何暫存器位址。AMD-001 之前它被錯用來
+        # 「排除 0x1E 進而推得 0x18」—— 但排除「欄位等於測距值」不等於指認位址，
+        # 且候選集並不窮盡。位址一律留給 rank-2 的採集程式碼。
         exclusion = rule_out_range_register(
             values, distances, SIGMA_RAW_SCALE_DIVISOR
         )
-        if exclusion["ruled_out"]:
-            # 0x1E 是 VL53L0X result 區塊的 final range。既然 sigma 欄不是
-            # 從存放測距值的暫存器讀來的，這個候選就被刪掉了。
-            ruled_out[0x1E] = (
-                "sigma column is not read from the range register: "
-                f"match_ratio={exclusion['match_ratio']}, "
-                f"correlation={exclusion['correlation']}, "
-                f"magnitude_ratio={exclusion['magnitude_ratio']}"
-            )
     else:
         from pcmef.adapters.legacy_kg import LegacyKGAdapter
 
@@ -736,6 +731,7 @@ def cmd_provenance_resolve_sigma(args: argparse.Namespace) -> int:
         acquisition_evidence=args.acquisition_evidence or "",
         ruled_out_registers=ruled_out or None,
         export_decimals=args.export_decimals,
+        range_register_test=exclusion,
     )
 
     out_dir = Path(args.out)
@@ -745,7 +741,6 @@ def cmd_provenance_resolve_sigma(args: argparse.Namespace) -> int:
         condition: int(v.size) for condition, v in per_condition.items()
     }
     if exclusion is not None:
-        artifact["range_register_exclusion"] = exclusion
         artifact["paired_source"] = str(args.paired_source)
     (out_dir / "sigma_resolution.json").write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True),
@@ -766,11 +761,12 @@ def cmd_provenance_resolve_sigma(args: argparse.Namespace) -> int:
             f"= {hypothesis.range_fraction:.2%} of full scale"
         )
         print(f"        {hypothesis.note}")
-    print(f"\nresolved divisor : {resolution.resolved_divisor}")
-    print(
-        "resolved register: "
-        + (hex(resolution.resolved_register) if resolution.resolved_register else "—")
-    )
+    print(f"\nfacets (E1-G08 {resolution.to_artifact()['contract_version']}):")
+    required = set(resolution.to_artifact()["required_facets"])
+    for name, facet in sorted(resolution.facets.items()):
+        need = "required" if name in required else "informational"
+        value = "" if facet.value is None else f" = {facet.value}"
+        print(f"  [{facet.status:14}] {name:28}{value}   ({need}, rank {facet.evidence_rank})")
     if resolution.blocking_reasons:
         print("\nblocking (E1-G08):")
         for reason in resolution.blocking_reasons:
@@ -795,12 +791,27 @@ def cmd_provenance_audit_timing(args: argparse.Namespace) -> int:
             source=f"{Path(args.recording).name}:{column}",
         )
 
+    # NOTE(NOTE-028): dataset 自帶的 interval_ms 是 rank-1 provenance，
+    # 也是偏差計算的 baseline。--dataset-interval-ms 未給時退回 config 的
+    # edge_impulse_frequency_hz，兩者皆無才沒有 rank-1 證據。
+    dataset_primary_s = None
+    dataset_source = "edge_impulse_export:payload.interval_ms"
+    if getattr(args, "dataset_interval_ms", None) is not None:
+        dataset_primary_s = float(args.dataset_interval_ms) / 1000.0
+    else:
+        hz = config.get("real_anchors.edge_impulse_frequency_hz", None)
+        if hz:
+            dataset_primary_s = 1.0 / float(hz)
+            dataset_source = "configs/base.yaml:real_anchors.edge_impulse_frequency_hz"
+
     provenance = audit_timing(
         measured,
         documented_s=config.get("real_anchors.historical_sample_interval_s", None),
         script_nominal_s=config.get(
             "real_anchors.deployment_script_sample_interval_s", None
         ),
+        dataset_primary_s=dataset_primary_s,
+        dataset_primary_source=dataset_source,
     )
 
     out_dir = Path(args.out)
@@ -810,15 +821,17 @@ def cmd_provenance_audit_timing(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
 
-    print("interval evidence (only 'measured' may be used for a recording contract):")
+    baseline_level = provenance.baseline.level.value if provenance.baseline else "—"
+    print(f"interval evidence (baseline = {baseline_level}):")
     for item in provenance.evidence:
-        print(f"  {item.level.value:<16} {item.value_s:<10.5f} {item.source}")
+        mark = "*" if provenance.baseline and item.level is provenance.baseline.level else " "
+        print(f" {mark}{item.level.value:<16} {item.value_s:<12.8f} {item.source}")
     if provenance.discrepancies:
-        print("\ndiscrepancy vs measured:")
+        print(f"\ndiscrepancy vs {baseline_level}:")
         for level, delta in sorted(provenance.discrepancies.items()):
             print(f"  {level:<16} {delta:+.1f}%")
     else:
-        print("\nno measured evidence supplied; discrepancies cannot be computed")
+        print("\nno baseline evidence supplied; discrepancies cannot be computed")
     print(f"\nartifact: {(out_dir / 'timing_provenance.json').resolve()}")
     return 0
 
@@ -1420,6 +1433,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--recording", help="含時間欄的原始 recording CSV；缺此參數則無實測值"
     )
     timing_cmd.add_argument("--time-column", help="時間欄名稱（預設取最後一欄）")
+    timing_cmd.add_argument(
+        "--dataset-interval-ms", type=float, default=None,
+        help="dataset 自帶的 interval_ms（rank-1 provenance，偏差 baseline）",
+    )
     timing_cmd.add_argument("--out", default="provenance", help="artifact 輸出目錄")
     timing_cmd.set_defaults(func=cmd_provenance_audit_timing)
 

@@ -70,6 +70,7 @@ py -3.10 -m pcmef.cli provenance resolve-sigma `
 py -3.10 -m pcmef.cli audit e1-gates                 # Batch 7：十二個 gate
 py -3.10 -m pcmef.cli audit heldout-firewall         # Appendix B 洩漏防線
 py -3.10 -m pcmef.cli audit real-split-policy        # Appendix H1 政策契約
+py -3.10 -m pytest tests/unit/test_amendments.py     # 協定修訂記錄（AMD-001）
 py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inventory
 ```
 
@@ -110,6 +111,7 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~Sigma register 未定~~ | — | **已解出 0x18**（排除檢驗，NOTE-010）；採集腳本仍未取得，取得後須複核 |
 | ~~Real split 三值未裁決~~ | — | **已裁決並凍結** 392/168（NOTE-014） |
 | ~~E1/E2 bootstrap 四值~~ | — | **已核定** 10000 / 20260826 / 20260827（NOTE-015） |
+| ~~Sigma register 未定阻擋 E1-G08~~ | — | **已由 AMD-001 拆解**：channel/scale 為 CONFIRMED，位址獨立為 CONFLICT 且不再擋 gate（NOTE-028） |
 | 10 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
 | **M2 場景保真度** | `initial_simulation.lock`，其下游 19 個 lock | **關鍵路徑。** 見下方「M2 場景保真度」一節 |
 
@@ -451,6 +453,95 @@ draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitra
 `agents.representation_mode` 與 `agents.retry.max_attempts` 仍待教授裁決、
 且 lock 相依鏈要求 `agent_schema` → `synthetic_split_policy` → `e1_outcome`，
 亦即必須先跑完 E1 與 M3。Part VI 的完成度不以能否凍結衡量（NOTE-020）。
+
+---
+
+## AMD-001：E1-G08 協定修訂（2026-08-27 深夜，NOTE-028）
+
+**這是本專案第一次修改 gate 判準本身。** 記錄凍結於
+`freeze/amendments/AMD-001.amendment.json`（payload_hash
+`553e2dfa2eb1fcc5…`），不可覆寫。
+
+### 起因
+
+取得 rank-1 raw dataset evidence（560 筆 Edge Impulse export，280,000 列）後
+發現原 E1-G08 存在**範疇錯誤**：它把三件可觀測性根本不同的事綁成同一個
+`RESOLVED` 旗標。
+
+| 事實 | 可否由資料驗證 |
+|---|---|
+| Sigma channel 語意（非測距值） | **可** —— 280,000 列直接檢定 |
+| Sigma numeric scale（/65536） | **可** —— 量化關係檢定 |
+| 歷史暫存器位址（0x18 / 0x1E） | **原理上不可** —— 匯出的是浮點數，看不到 I²C 位址 |
+
+原 v1 的推論「0x1E 是 final range → sigma 不是 range → 排除 0x1E →
+故為 0x18」有三個問題：排除檢定證成的是 channel semantics 而非位址身分；
+候選集不窮盡（產生本 dataset 的採集腳本不在已知三份之中）；
+且它把 rank-6 的死常數（0x18 只出現在**不使用 sigma** 的單參數程式）
+升格為結論，正是 SRC-HANDOFF §8 禁止的低位階覆寫高位階。
+
+原結論還與系統自己的紅線矛盾：NOTE-001 早就規定第四欄不得被稱為
+「真實 VL53L0X internal Sigma」——既然不能這樣宣稱，把 E1 資格綁在
+「知道它讀自哪個暫存器」上，從一開始就內部不一致。
+
+### 修訂內容
+
+Sigma provenance 由單一旗標改為**四個獨立 facet**：
+
+| facet | 狀態 | 位階 | E1-G08 要求 |
+|---|---|---|---|
+| `channel_semantics` | **CONFIRMED** | 1 | **是** |
+| `numeric_scale` = /65536 | **CONFIRMED** | 1 | **是** |
+| `register_address` | **CONFLICT** | 5 | 否 |
+| `original_acquisition_method` | **UNKNOWN** | 2 | 否 |
+
+E1-G08 契約升至 **v2**：只要求前兩者 CONFIRMED。位址為 CONFLICT/UNKNOWN
+**不影響判定，也不使 dataset 失效**。只有 `CONFIRMED` 能滿足 gate，
+`RECONSTRUCTED` 刻意排除。
+
+### 為什麼這不是「看到結果後改判準」
+
+凍結時的前提證據是**當下實測**而非引述，且已寫進 amendment：
+
+```
+FW-02 PASS   heldout_access_count = 0
+freeze/e1_outcome.lock.json 不存在
+```
+
+held-out 從未開啟、E1 沒有任何結果 —— 沒有可以被回頭迎合的數字。
+這是預註冊修訂。**E1_four_feature_primary_ready 仍為 false，
+held-out E1 仍 FORBIDDEN**，理由是 M2 場景保真度未完（見下節），
+與 Sigma 無關。
+
+### 順帶修掉的 timing 證據位階倒置
+
+`timing_provenance.json` 原本**完全沒有收錄** dataset 自帶的
+`interval_ms = 82.00001312`（rank-1），卻以偏移測試副產物 CSV 的
+0.0624 s 當 baseline，於是把 rank-1 證據寫成「偏離 31%」。改正後：
+
+| 值 | 定位 | 相對 baseline |
+|---|---|---|
+| **82.00001312 ms** | **rank-1 dataset provenance（baseline）** | — |
+| 0.082 s | SRC-PLAN 記載值 | **−0.0%**（幾乎完全吻合） |
+| 0.0624 s | 偏移測試副產物，**另一次採集** | −23.9% |
+| 0.02 s | deployment 迴圈 sleep 設定 | −75.6% |
+
+### 防止橡皮圖章
+
+放寬 gate 最大的風險是它從此不會再擋下任何東西。
+`tests/audit/test_e1_gates.py` 有一組成對的 `test_g08_fails_when_*`：
+channel 非 CONFIRMED、scale 非 CONFIRMED、required facet 為 RECONSTRUCTED、
+required facet 缺漏、以及**沒有 facets 的 v1 舊 artifact** ——
+五種情況都必須 FAIL。少了它們這次修訂就只是把關卡拆掉。
+
+### 重跑
+
+```powershell
+py -3.10 -m pcmef.cli provenance resolve-sigma `
+    --paired-source data/raw_real/edge_impulse_export --export-decimals 4
+py -3.10 -m pcmef.cli audit e1-gates
+py -3.10 -m pytest tests/unit/test_amendments.py tests/provenance tests/audit -q
+```
 
 ---
 

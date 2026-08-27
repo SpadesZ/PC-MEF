@@ -5,7 +5,7 @@
 #         本檔只讀不寫被稽核的產物。
 # 檔案路徑: pcmef/audit/e1_gates.py
 # 產生時間: 2026-08-27 08:20 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 逐項檢查 E1 開跑前必須具備的十二個條件，並明確區分「檢查不通過」
 #           與「證據還沒產出」。目前只有六個 gate 有產物，其餘六個回報為
 #           尚未產出 —— 那是正確結果，不是失敗。
@@ -31,6 +31,9 @@
 #     「稽核先於產物」這個設計就失去意義。
 #   - 新增 gate 必須同時補上 GATE_SPECS 條目與檢查函式，
 #     否則會出現一個永遠 NOT_PRODUCED 的空殼。
+#   - v0.2.0 E1-G08 升至契約 v2：改判 sigma_resolution 的 facets，要求
+#     channel_semantics 與 numeric_scale 為 CONFIRMED，歷史暫存器位址允許
+#     CONFLICT/UNKNOWN；並拒絕沒有 facets 的 v1 舊 artifact（NOTE-028 / AMD-001）。
 #   - v0.1.0 新增：首版十二 gate 稽核，決策見 NOTE-022。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/audit/test_e1_gates.py -v
@@ -46,8 +49,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pcmef.audit.result import AuditReport, CheckResult, CheckStatus
-from pcmef.core.constants import SIGMA_STATUS_RESOLVED
+from pcmef.core.constants import (
+    E1_G08_CONTRACT_VERSION,
+    PROTOCOL_AMENDMENT_ID,
+    PROVENANCE_GATE_SATISFYING,
+    SIGMA_STATUS_RESOLVED,
+)
 from pcmef.core.locks import LockError, LockStore
+from pcmef.provenance.sigma import E1_G08_REQUIRED_FACETS
 
 __all__ = [
     "GateSpec",
@@ -103,7 +112,9 @@ GATE_SPECS: dict[str, GateSpec] = {
         GateSpec("E1-G07",
                  "initial_simulation + calibrated_simulation + metric_config 已鎖",
                  ("freeze/e1_candidates.lock.json",), "Batch 6"),
-        GateSpec("E1-G08", "四特徵 Primary 時 Sigma provenance status=RESOLVED",
+        GateSpec("E1-G08",
+                 "四特徵 Primary 時 Sigma channel semantics + numeric scale 皆 "
+                 "CONFIRMED（AMD-001 v2；歷史暫存器位址允許 CONFLICT/UNKNOWN）",
                  ("provenance/sigma_resolution.json",), "Batch 3"),
         GateSpec("E1-G09",
                  "real_split_policy.lock 已存在且早於 calibration；heldout access_count=0",
@@ -288,24 +299,59 @@ def _check_g04(paths: AuditPaths) -> tuple[CheckStatus, str, list[str]]:
 
 
 def _check_g08(paths: AuditPaths) -> tuple[CheckStatus, str, list[str]]:
-    """Sigma register/scale provenance 必須為 RESOLVED（NOTE-010）。"""
+    """Sigma channel semantics + numeric scale 必須 CONFIRMED（AMD-001 / NOTE-028）。
+
+    契約 v2。**歷史暫存器位址刻意不在要求內** —— 它無法由匯出的浮點數反推，
+    綁進來等於讓一個可驗證的資料事實被一個不可觀測的事實擋死。
+    位址為 CONFLICT/UNKNOWN 不影響本 gate，也不使 dataset 失效。
+    """
     path = paths.provenance / "sigma_resolution.json"
     if not path.exists():
         return CheckStatus.NOT_PRODUCED, "", []
 
     resolution = _read_json(path)
-    status = str(resolution.get("status", ""))
     findings: list[str] = []
-    if status != SIGMA_STATUS_RESOLVED:
+
+    version = str(resolution.get("contract_version", "v1"))
+    if version != E1_G08_CONTRACT_VERSION:
         findings.append(
-            f"status={status!r}，四特徵 E1 primary 需要 {SIGMA_STATUS_RESOLVED}"
+            f"contract_version={version!r}，本稽核器實作的是 "
+            f"{E1_G08_CONTRACT_VERSION!r}；artifact 需以 provenance resolve-sigma 重產"
+        )
+
+    facets = resolution.get("facets") or {}
+    if not facets:
+        findings.append(
+            "artifact 沒有 facets 區塊；AMD-001 之後 Sigma provenance 必須逐 facet 判定"
+        )
+
+    for name in E1_G08_REQUIRED_FACETS:
+        facet = facets.get(name)
+        if facet is None:
+            findings.append(f"缺少必要 facet {name!r}")
+            continue
+        status = str(facet.get("status", ""))
+        if status not in PROVENANCE_GATE_SATISFYING:
+            findings.append(
+                f"facet {name} = {status!r}，E1-G08 {E1_G08_CONTRACT_VERSION} 要求 "
+                f"{list(PROVENANCE_GATE_SATISFYING)}"
+            )
+
+    if str(resolution.get("status", "")) != SIGMA_STATUS_RESOLVED:
+        findings.append(
+            f"status={resolution.get('status')!r}，四特徵 E1 primary 需要 "
+            f"{SIGMA_STATUS_RESOLVED}"
         )
     for reason in resolution.get("blocking_reasons", []):
         findings.append(str(reason))
 
-    register = (resolution.get("register") or {}).get("resolved")
-    divisor = (resolution.get("scaling") or {}).get("resolved_divisor")
-    detail = f"register={register} divisor=/{divisor}"
+    scale = (facets.get("numeric_scale") or {}).get("value")
+    channel = (facets.get("channel_semantics") or {}).get("status")
+    register = (facets.get("register_address") or {}).get("status")
+    detail = (
+        f"channel={channel} scale=/{scale} register={register}"
+        f" [{E1_G08_CONTRACT_VERSION}/{PROTOCOL_AMENDMENT_ID}]"
+    )
     return (CheckStatus.FAIL if findings else CheckStatus.PASS), detail, findings
 
 

@@ -324,6 +324,104 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-028 E1-G08 拆分：可驗證的 Sigma channel/scale 與不可觀測的暫存器位址（AMD-001）
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/core/constants.py` 的 provenance facet 詞彙與
+`E1_G08_CONTRACT_VERSION`；`pcmef/provenance/sigma.py` 的 `ProvenanceFacet`／
+`SigmaResolution`／`resolve_sigma()`；`pcmef/audit/e1_gates.py` 的 `_check_g08()`；
+`pcmef/provenance/timing.py` 的 `EvidenceLevel.DATASET_PRIMARY`；
+`pcmef/core/amendments.py`；`freeze/amendments/AMD-001.amendment.json`。
+
+**決策**：
+
+1. Sigma provenance 由**單一 RESOLVED 旗標**改為**四個獨立 facet**，
+   各自持有 `CONFIRMED / CONFLICT / RECONSTRUCTED / UNKNOWN` 之一：
+
+   | facet | 狀態 | 證據位階 |
+   |---|---|---|
+   | `channel_semantics` | **CONFIRMED**（非測距值） | rank 1 |
+   | `numeric_scale` | **CONFIRMED**（/65536） | rank 1 |
+   | `register_address` | **CONFLICT** | rank 5 |
+   | `original_acquisition_method` | **UNKNOWN** | rank 2（未取得） |
+
+2. **E1-G08 契約升至 v2**：只要求 `channel_semantics` 與 `numeric_scale`
+   為 CONFIRMED。`register_address` 為 CONFLICT/UNKNOWN **不影響判定，
+   也不使 dataset 失效**。
+3. 只有 `CONFIRMED` 能滿足 gate。`RECONSTRUCTED` 刻意不列入
+   （`PROVENANCE_GATE_SATISFYING`）。
+4. 新增 `EvidenceLevel.DATASET_PRIMARY`（rank 1），timing 偏差改以它為 baseline。
+5. 新增 amendment 凍結機制，本次記錄為 **AMD-001**。
+
+**原因**：
+
+**其一，原契約是範疇錯誤，不是門檻設太嚴。** 取得 560 筆 raw dataset
+（rank-1，280,000 列）後才看清楚：`channel_semantics` 與 `numeric_scale`
+可由資料驗證，而 exact historical register address **原理上無法**由匯出的
+浮點數反推 —— 你看不到當初讀了哪個 I²C 位址。把三者綁成同一個旗標，
+等於讓兩個可驗證的事實被一個不可觀測的事實永久扣住。
+
+**其二，原本的「刪到剩一個」推論不成立。** v1 的論證是：
+「0x1E 是 final range → sigma 欄不是 range → 0x1E 排除 → 候選只剩 0x18」。
+三個問題：
+
+- 排除「sigma 欄等於測距值」證成的是 **channel semantics**，不是位址身分。
+  `rule_out_range_register()` 的 docstring 本來就寫著「無論那個暫存器叫什麼
+  位址」—— 它從一開始就是與位址無關的檢定，v1 把它的結論用錯了地方。
+- 候選集 `{0x18, 0x1E}` 來自 legacy 腳本出現過的常數，但產生這 560 筆的
+  採集腳本不在其中任何一份。刪掉一個得到的是「未知」，不是「必為另一個」。
+- 它把最弱的證據升格為結論：0x18 只出現在**不使用 sigma** 的單參數程式
+  （rank 6，很可能是沒清乾淨的死常數），卻被判成 RESOLVED。
+  這正是 SRC-HANDOFF §8 禁止的「低位階 evidence 覆寫高位階」。
+
+而且 v1 的結論與系統自己的紅線互相矛盾：NOTE-001 的維護邊界早就規定
+第四欄**不得**被稱為「真實 VL53L0X internal Sigma」。既然不能這樣宣稱，
+把 E1 資格綁在「知道它讀自哪個暫存器」上，一開始就是內部不一致。
+
+**其三，為什麼這不是「看到結果後改判準」。** 凍結時的前提證據已寫進
+`AMD-001.amendment.json` 並經實測而非引述：`FW-02 PASS`、
+`heldout_access_count = 0`、`e1_outcome.lock` 不存在。
+held-out 從未開啟、E1 沒有任何結果 —— 沒有可以被回頭迎合的數字。
+這是預註冊修訂。
+
+**其四，timing 的 baseline 錯了。** `timing_provenance.json` 原本完全沒有
+收錄 dataset 自帶的 `interval_ms = 82.00001312`（rank-1），
+卻以偏移測試副產物 CSV 的 0.0624 s 當 baseline，於是報告把
+rank-1 證據寫成「偏離 31%」。三者的正確定位是：
+
+| 值 | 定位 |
+|---|---|
+| **82.00001312 ms** | **rank-1 dataset provenance**，baseline |
+| 0.0624 s | 另一次採集（偏移測試副產物）的實測值，**不描述這 560 筆** |
+| 0.02 s | 後期 deployment 迴圈的 sleep 設定值 |
+
+**驗證**：
+```
+py -3.10 -m pcmef.cli provenance resolve-sigma \
+    --paired-source data/raw_real/edge_impulse_export --export-decimals 4
+py -3.10 -m pcmef.cli audit e1-gates
+py -3.10 -m pytest tests/provenance tests/audit tests/unit/test_amendments.py -q
+```
+結果：四個 facet 如上表；`E1-G08 PASS  channel=CONFIRMED scale=/65536.0
+register=CONFLICT [v2/AMD-001]`；`canonical/valid/e1_eligible` 維持 560/560/560。
+
+**維護邊界**：
+- 不得因 `register_address` 為 CONFLICT/UNKNOWN 而判定 dataset 無效，
+  或把 `e1_eligible_recordings` 歸零。
+- 不得將任一 register 位址宣告為 CONFIRMED，除非取得 rank-2 採集程式碼；
+  取得後須依本條與 NOTE-010 複核，並開立新的 amendment。
+- 不得把 `RECONSTRUCTED` 加進 `PROVENANCE_GATE_SATISFYING`。
+  要放寬必須是另一次明示的 amendment，不能改一個常數就過。
+- 不得覆寫已凍結的 amendment；判準改兩次就要有兩份記錄。
+- G08 仍必須有能力 FAIL。
+  `tests/audit/test_e1_gates.py` 的 `test_g08_fails_when_*` 系列守住這一條 ——
+  沒有它們，這次修訂就只是把 gate 變成橡皮圖章。
+
+相關：[NOTE-010]、[NOTE-001]、[NOTE-005]、[NOTE-022]
+
+---
+
 ## NOTE-027 瓶壁必須是 roughdielectric，時間窗前緣餘裕以 bin 數表示
 
 **決策日期**：2026-08-27

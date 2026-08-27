@@ -19,6 +19,13 @@ outputs/
 freeze/*.lock.json
 registry/*.db
 
+# 但 freeze/amendments/ 必須進版控，且上面那條不得被擴大成 freeze/ 而吞掉它。
+# lock 記錄「這次 run 用了什麼參數」，可以重產；
+# amendment 記錄「判準本身被改過」，重產不出來 —— 它是協定的歷史。
+# 判準改過幾次、每次凍結時的前提證據是什麼，只有版控留得住（NOTE-028）。
+!freeze/amendments/
+!freeze/amendments/*.amendment.json
+
 # Python
 __pycache__/
 *.py[cod]

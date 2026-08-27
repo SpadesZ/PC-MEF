@@ -4,28 +4,34 @@
 #         provenance/sigma_resolution.json，供 E1-G08 判定與 e1_candidates.lock 引用。
 # 檔案路徑: pcmef/provenance/sigma.py
 # 產生時間: 2026-08-26 03:35 +08:00
-# 版本: v0.2.0
-# 功能說明: 判斷前研究的 Sigma 數值到底是怎麼算出來的 —— 用觀測到的數值範圍
-#           反推它除以了多少（scaling），並記錄它讀自哪個暫存器仍未確定；
-#           兩者都確定才允許四特徵 E1 把 Sigma 當 primary 證據。
+# 版本: v0.3.0
+# 功能說明: 判斷前研究的 Sigma 數值到底是怎麼算出來的 —— 把它拆成四個可以各自
+#           證成或證否的事實（channel 語意、數值縮放、歷史暫存器位址、採集方式），
+#           逐一標記證據等級，其中前兩者確定才允許四特徵 E1 把 Sigma 當 primary。
 # 模組定位: SRC-D01/D02 的證據產生器。它「不會」替未決的事項挑一個答案 ——
-#           暫存器身分無法從數值反推，缺採集程式碼時一律回報 UNRESOLVED。
+#           暫存器位址無法從數值反推，缺 rank-2 採集程式碼時一律 CONFLICT/UNKNOWN。
 # 主要責任:
 #   1. ScalingHypothesis 描述單一 scaling 候選及其相容性判定
 #   2. evaluate_scaling_hypotheses() 以觀測值域反推各候選除數的隱含原始碼值
 #      （刻意不以 test_ 開頭命名：pytest 會把任何 test_ 開頭的可呼叫物件
 #      當成測試案例收集，即使它是從產品模組 import 進來的）
-#   3. resolve_sigma() 綜合 scaling 與暫存器證據產生 SigmaResolution
-#   4. SigmaResolution.to_artifact() 產生 E1-G08 的證據 artifact
+#   3. ProvenanceFacet 持有單一事實的狀態、證據等級與依據
+#   4. resolve_sigma() 把觀測與程式碼證據分派到四個 facet
+#   5. SigmaResolution.to_artifact() 產生 E1-G08 的證據 artifact
 # 維護提醒:
-#   - 不得因為「四參數腳本用 0x1E」就把 register 判為 RESOLVED；
+#   - 不得因為「四參數腳本用 0x1E」就把 register 判為 CONFIRMED；
 #     資料集由當時的採集腳本產生，那份腳本不在已知的三份之中（NOTE-010）。
-#   - 不得在 scaling 相容但 register 未定時回傳 RESOLVED；E1-G08 要求兩者皆定。
+#   - 不得把 register_address 加回 E1_G08_REQUIRED_FACETS。位址原理上無法由
+#     匯出的浮點數反推，綁進來等於讓可驗證的事實被不可觀測的事實擋死
+#     （NOTE-028 / AMD-001）。
+#   - 不得把 RECONSTRUCTED 加進 PROVENANCE_GATE_SATISFYING；推論不是證據。
 #   - 不得用整數性檢定判斷 scaling；來源 CSV 是四捨五入後的窗口平均值，
 #     小數位已被截斷，整數性檢定必然失敗且會給出錯誤結論。
+#   - v0.3.0 依 AMD-001 改為 facet 制：channel semantics 與 numeric scale 各自
+#     判定，歷史暫存器位址獨立為 CONFLICT/UNKNOWN 且不再擋下 E1-G08（NOTE-028）。
 #   - v0.2.0 新增 rule_out_range_register()：以資料檢驗「sigma 欄是否讀自存放
-#     測距值的暫存器」。排除到只剩一個候選時允許解析——那是刪到剩一個，
-#     不是挑一個（NOTE-010 v2）。
+#     測距值的暫存器」。**注意**：它證成的是 channel semantics，不是位址身分；
+#     v0.2.0 曾用它「排除 0x1E 進而推得 0x18」，該推論已由 AMD-001 撤銷。
 #   - v0.1.0 新增：首版 Sigma provenance resolver，對應 NOTE-011。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/provenance/test_sigma_and_timing.py -k sigma -v
@@ -40,9 +46,19 @@ from typing import Any
 import numpy as np
 
 from pcmef.core.constants import (
+    E1_G08_CONTRACT_VERSION,
+    EVIDENCE_RANK_ACQUISITION_CODE,
+    EVIDENCE_RANK_GUESS,
+    EVIDENCE_RANK_LEGACY_INFERENCE_4F,
+    EVIDENCE_RANK_RAW_DATASET,
+    PROTOCOL_AMENDMENT_ID,
+    PROVENANCE_CONFIRMED,
+    PROVENANCE_CONFLICT,
+    PROVENANCE_GATE_SATISFYING,
+    PROVENANCE_STATUS_VALUES,
+    PROVENANCE_UNKNOWN,
     RATE_RAW_SCALE_DIVISOR,
     SIGMA_RAW_SCALE_DIVISOR,
-    SIGMA_REGISTER_CANDIDATES,
     SIGMA_STATUS_RESOLVED,
     SIGMA_STATUS_UNRESOLVED,
 )
@@ -50,7 +66,9 @@ from pcmef.core.constants import (
 __all__ = [
     "SigmaProvenanceError",
     "ScalingHypothesis",
+    "ProvenanceFacet",
     "SigmaResolution",
+    "E1_G08_REQUIRED_FACETS",
     "evaluate_scaling_hypotheses",
     "quantization_verdict",
     "rule_out_range_register",
@@ -95,26 +113,91 @@ class ScalingHypothesis:
 
 
 @dataclass(frozen=True)
-class SigmaResolution:
-    """Sigma provenance 的完整判定。"""
+class ProvenanceFacet:
+    """單一 provenance 事實及其證據等級（NOTE-028）。
 
+    facet 是「一個可以被獨立證成或證否的事實」。把它們分開持有，
+    是因為它們的可觀測性根本不同 —— numeric scale 可由 280,000 列量化關係
+    驗證，historical register address 則**原理上**無法由匯出的浮點數反推。
+    """
+
+    name: str
     status: str
+    value: Any
+    evidence_rank: int
+    basis: str
+    alternatives: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.status not in PROVENANCE_STATUS_VALUES:
+            raise SigmaProvenanceError(
+                f"facet {self.name!r} has status {self.status!r}; "
+                f"allowed: {list(PROVENANCE_STATUS_VALUES)}"
+            )
+
+    @property
+    def satisfies_gate(self) -> bool:
+        return self.status in PROVENANCE_GATE_SATISFYING
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "status": self.status,
+            "value": self.value,
+            "evidence_rank": self.evidence_rank,
+            "basis": self.basis,
+        }
+        if self.alternatives:
+            out["alternatives"] = dict(sorted(self.alternatives.items()))
+        return out
+
+
+#: E1-G08 v2 要求為 CONFIRMED 的 facet。register_address 刻意不在其中。
+E1_G08_REQUIRED_FACETS: tuple[str, ...] = ("channel_semantics", "numeric_scale")
+
+
+@dataclass(frozen=True)
+class SigmaResolution:
+    """Sigma provenance 的完整判定，以 facet 為單位（NOTE-028）。"""
+
     observed_min: float
     observed_max: float
     observed_median: float
     n_observations: int
     scaling_hypotheses: tuple[ScalingHypothesis, ...]
-    resolved_divisor: float | None
-    register_candidates: tuple[int, ...]
-    resolved_register: int | None
-    eliminated: dict[int, str] = field(default_factory=dict)
+    facets: dict[str, ProvenanceFacet]
+    range_register_test: dict[str, Any] = field(default_factory=dict)
     blocking_reasons: tuple[str, ...] = field(default=())
+
+    @property
+    def resolved_divisor(self) -> float | None:
+        return self.facets["numeric_scale"].value
+
+    @property
+    def status(self) -> str:
+        """E1-G08 v2 的整體判定：required facet 全為 CONFIRMED 才 RESOLVED。
+
+        register_address 為 CONFLICT/UNKNOWN **不影響**這個結果 ——
+        那正是 AMD-001 的重點。
+        """
+        if self.blocking_reasons:
+            return SIGMA_STATUS_UNRESOLVED
+        ok = all(
+            name in self.facets and self.facets[name].satisfies_gate
+            for name in E1_G08_REQUIRED_FACETS
+        )
+        return SIGMA_STATUS_RESOLVED if ok else SIGMA_STATUS_UNRESOLVED
 
     def to_artifact(self) -> dict[str, Any]:
         """產生 provenance/sigma_resolution.json 的內容（E1-G08 證據）。"""
         return {
             "status": self.status,
             "gate": "E1-G08",
+            "contract_version": E1_G08_CONTRACT_VERSION,
+            "amendment": PROTOCOL_AMENDMENT_ID,
+            "required_facets": list(E1_G08_REQUIRED_FACETS),
+            "facets": {
+                name: facet.to_dict() for name, facet in sorted(self.facets.items())
+            },
             "observation": {
                 "n": self.n_observations,
                 "min": round(self.observed_min, 6),
@@ -125,15 +208,7 @@ class SigmaResolution:
                 "resolved_divisor": self.resolved_divisor,
                 "hypotheses": [h.to_dict() for h in self.scaling_hypotheses],
             },
-            "register": {
-                "candidates": [hex(c) for c in self.register_candidates],
-                "eliminated": {
-                    hex(reg): why for reg, why in sorted(self.eliminated.items())
-                },
-                "resolved": hex(self.resolved_register)
-                if self.resolved_register is not None
-                else None,
-            },
+            "range_register_exclusion": dict(self.range_register_test),
             "blocking_reasons": list(self.blocking_reasons),
         }
 
@@ -293,12 +368,22 @@ def resolve_sigma(
     acquisition_evidence: str = "",
     ruled_out_registers: dict[int, str] | None = None,
     export_decimals: int | None = None,
+    range_register_test: dict[str, Any] | None = None,
 ) -> SigmaResolution:
-    """綜合觀測值與採集程式碼證據，判定 Sigma provenance 狀態。
+    """把觀測與程式碼證據拆成獨立 facet，各自判定證據等級（NOTE-028）。
 
-    acquisition_register 必須來自**產生這批資料的採集腳本**，
-    不能拿三份推論腳本中的任一份代替（NOTE-010）。缺此證據時
-    register 保持未決，整體狀態為 UNRESOLVED，四特徵 E1 primary 被 E1-G08 擋下。
+    AMD-001 之後不再回傳單一 RESOLVED/UNRESOLVED 旗標。四個 facet 各自判定：
+
+    - ``numeric_scale``：可由量化關係驗證 → CONFIRMED
+    - ``channel_semantics``：可由「sigma 欄是否等於測距值」驗證 → CONFIRMED
+    - ``register_address``：**原理上無法**由匯出浮點數反推 → CONFLICT/UNKNOWN
+    - ``original_acquisition_method``：採集腳本未取得 → UNKNOWN
+
+    E1-G08 v2 只要求前兩者為 CONFIRMED。後兩者維持 CONFLICT/UNKNOWN
+    **不會**使 dataset 失效，也不會擋下四特徵 E1 primary。
+
+    acquisition_register 仍必須來自**產生這批資料的採集腳本**，
+    不能拿三份推論腳本中的任一份代替（NOTE-010）。
     """
     finite = np.asarray(values, dtype=np.float64).ravel()
     finite = finite[np.isfinite(finite)]
@@ -321,52 +406,131 @@ def resolve_sigma(
                 + ", ".join(str(h.divisor) for h in plausible)
             )
 
-    eliminated = dict(ruled_out_registers or {})
-    remaining = [c for c in SIGMA_REGISTER_CANDIDATES if c not in eliminated]
+    facets: dict[str, ProvenanceFacet] = {}
 
-    resolved_register: int | None = None
-    if acquisition_register is None and len(remaining) == 1 and eliminated:
-        # 以證據排除到只剩一個候選。這不是「挑一個」而是「刪到剩一個」，
-        # 兩者的差別在於前者需要理由、後者需要反證，而反證已經有了。
-        resolved_register = remaining[0]
-    elif acquisition_register is None:
-        blocking.append(
-            "the Sigma register is not determinable from values alone; "
-            f"candidates {[hex(c) for c in remaining]} are 16-bit reads sharing "
-            "the same divisor. Either evidence from the acquisition script that "
-            "produced this dataset, or an elimination test that leaves exactly one "
-            "candidate, is required."
+    # --- facet 1: numeric scale ------------------------------------------
+    # 由 280,000 列的量化關係驗證：/128 與 /1 被排除，/65536 是唯一相容者，
+    # 且三份 legacy 腳本（rank 5-6）獨立地都寫 /65536 —— 兩條線收斂。
+    if resolved_divisor is not None:
+        facets["numeric_scale"] = ProvenanceFacet(
+            name="numeric_scale",
+            status=PROVENANCE_CONFIRMED,
+            value=resolved_divisor,
+            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            basis=(
+                f"quantization test over n={finite.size} observations: "
+                + "; ".join(
+                    f"/{h.divisor:g} {'consistent' if h.plausible else 'excluded'}"
+                    for h in hypotheses
+                )
+                + "; corroborated independently by all legacy scripts (rank 5-6)"
+            ),
         )
-    elif acquisition_register not in SIGMA_REGISTER_CANDIDATES:
-        blocking.append(
-            f"acquisition register {hex(acquisition_register)} is not among the "
-            f"observed candidates {[hex(c) for c in SIGMA_REGISTER_CANDIDATES]}; "
-            "record the discrepancy before proceeding"
+    else:
+        facets["numeric_scale"] = ProvenanceFacet(
+            name="numeric_scale",
+            status=PROVENANCE_UNKNOWN,
+            value=None,
+            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            basis="no single divisor survives the quantization test",
         )
-    elif not acquisition_evidence:
+
+    # --- facet 2: channel semantics --------------------------------------
+    # 「sigma 欄不是測距值」是純資料檢驗，**不依賴任何暫存器位址知識**。
+    # 這正是 AMD-001 拆分的依據：它可證，位址不可證。
+    ruled = dict(ruled_out_registers or {})
+    if range_register_test and range_register_test.get("ruled_out"):
+        facets["channel_semantics"] = ProvenanceFacet(
+            name="channel_semantics",
+            status=PROVENANCE_CONFIRMED,
+            value="dispersion_channel_not_range",
+            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            basis=(
+                "the sigma column is not the ranging result: match_ratio="
+                f"{range_register_test.get('match_ratio')}, correlation="
+                f"{range_register_test.get('correlation')}, magnitude_ratio="
+                f"{range_register_test.get('magnitude_ratio')}. This test is "
+                "independent of any register-address knowledge."
+            ),
+        )
+    else:
+        facets["channel_semantics"] = ProvenanceFacet(
+            name="channel_semantics",
+            status=PROVENANCE_UNKNOWN,
+            value=None,
+            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            basis=(
+                "the range-register exclusion test was not supplied or did not "
+                "rule out the hypothesis that the sigma column holds the range"
+            ),
+        )
+
+    # --- facet 3: historical register address -----------------------------
+    # 原理上無法由匯出的浮點數反推。只有 rank-2 的採集程式碼能定案。
+    if acquisition_register is not None and acquisition_evidence:
+        facets["register_address"] = ProvenanceFacet(
+            name="register_address",
+            status=PROVENANCE_CONFIRMED,
+            value=hex(acquisition_register),
+            evidence_rank=EVIDENCE_RANK_ACQUISITION_CODE,
+            basis=acquisition_evidence,
+        )
+    elif acquisition_register is not None:
         blocking.append(
             "acquisition_register was supplied without evidence; record the source "
             "file and line that establishes it"
         )
+        facets["register_address"] = ProvenanceFacet(
+            name="register_address",
+            status=PROVENANCE_UNKNOWN,
+            value=None,
+            evidence_rank=EVIDENCE_RANK_GUESS,
+            basis="register supplied without a citable source",
+        )
     else:
-        resolved_register = acquisition_register
+        facets["register_address"] = ProvenanceFacet(
+            name="register_address",
+            status=PROVENANCE_CONFLICT,
+            value=None,
+            evidence_rank=EVIDENCE_RANK_LEGACY_INFERENCE_4F,
+            basis=(
+                "legacy sources disagree and the acquisition script that produced "
+                "this dataset is not recovered. The address is not observable from "
+                "exported float values, so no data test can settle it. Recorded as "
+                "CONFLICT rather than eliminated-to-one: excluding "
+                "'sigma column == range value' does not identify an address, and "
+                "the candidate set is not exhaustive."
+            ),
+            alternatives={
+                hex(reg): why
+                for reg, why in sorted(ruled.items())
+            }
+            or {
+                "0x18": "single-feature script; does not consume sigma (rank 6)",
+                "0x1e": "two- and four-feature scripts (rank 5-6)",
+            },
+        )
 
-    status = (
-        SIGMA_STATUS_RESOLVED
-        if resolved_divisor is not None and resolved_register is not None
-        else SIGMA_STATUS_UNRESOLVED
+    # --- facet 4: original acquisition method ------------------------------
+    facets["original_acquisition_method"] = ProvenanceFacet(
+        name="original_acquisition_method",
+        status=PROVENANCE_UNKNOWN,
+        value=None,
+        evidence_rank=EVIDENCE_RANK_ACQUISITION_CODE,
+        basis=(
+            "the script that generated the 560 recordings is not recovered; the "
+            "known four-feature script has SAVE_RAW_SENSOR_DATA=False and is "
+            "therefore not evidence that it produced this dataset"
+        ),
     )
 
     return SigmaResolution(
-        status=status,
         observed_min=float(finite.min()),
         observed_max=float(finite.max()),
         observed_median=float(np.median(finite)),
         n_observations=int(finite.size),
         scaling_hypotheses=hypotheses,
-        resolved_divisor=resolved_divisor,
-        register_candidates=tuple(SIGMA_REGISTER_CANDIDATES),
-        resolved_register=resolved_register,
-        eliminated=eliminated,
+        facets=facets,
+        range_register_test=dict(range_register_test or {}),
         blocking_reasons=tuple(blocking),
     )

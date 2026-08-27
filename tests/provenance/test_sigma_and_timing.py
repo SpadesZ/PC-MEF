@@ -82,49 +82,109 @@ def test_empty_observations_are_rejected():
 # ---------------------------------------------------------------------------
 
 
-def test_without_acquisition_evidence_status_is_unresolved():
-    """SRC-D01：暫存器身分無法從數值反推，缺採集腳本即 UNRESOLVED。"""
+#: 已排除「sigma 欄即測距值」的檢定結果，對應 channel_semantics CONFIRMED。
+RULED_OUT_TEST = {
+    "hypothesis": "sigma column was read from the register holding the range",
+    "match_ratio": 0.0,
+    "correlation": -0.476,
+    "magnitude_ratio": 298.5,
+    "ruled_out": True,
+}
+
+
+def test_register_address_stays_conflict_without_acquisition_code():
+    """AMD-001：位址無法由數值反推，缺 rank-2 採集程式碼即 CONFLICT。"""
+    resolution = resolve_sigma(REAL_LIKE_SIGMA, range_register_test=RULED_OUT_TEST)
+    assert resolution.facets["register_address"].status == "CONFLICT"
+    assert resolution.facets["original_acquisition_method"].status == "UNKNOWN"
+
+
+def test_channel_and_scale_confirmed_resolve_the_gate_despite_register_conflict():
+    """AMD-001 的核心行為：位址 CONFLICT **不得**擋下 E1-G08。"""
+    resolution = resolve_sigma(REAL_LIKE_SIGMA, range_register_test=RULED_OUT_TEST)
+    assert resolution.facets["channel_semantics"].status == "CONFIRMED"
+    assert resolution.facets["numeric_scale"].status == "CONFIRMED"
+    assert resolution.facets["register_address"].status == "CONFLICT"
+    assert resolution.status == "RESOLVED"
+    assert resolution.blocking_reasons == ()
+
+
+def test_channel_semantics_unknown_blocks_the_gate():
+    """沒有排除檢定就沒有 channel semantics —— 這時 G08 必須擋下。
+
+    這條與上一條成對存在。少了它，AMD-001 就只是把 gate 變成橡皮圖章。
+    """
     resolution = resolve_sigma(REAL_LIKE_SIGMA)
+    assert resolution.facets["channel_semantics"].status == "UNKNOWN"
     assert resolution.status == "UNRESOLVED"
-    assert resolution.resolved_divisor == SIGMA_RAW_SCALE_DIVISOR
-    assert resolution.resolved_register is None
-    assert any("acquisition script" in r for r in resolution.blocking_reasons)
 
 
-def test_acquisition_register_without_evidence_is_still_unresolved():
+def test_channel_semantics_unknown_when_range_hypothesis_survives():
+    """排除檢定跑了但沒排除掉，等同未證成，不得算 CONFIRMED。"""
+    survived = {**RULED_OUT_TEST, "ruled_out": False, "match_ratio": 0.99}
+    resolution = resolve_sigma(REAL_LIKE_SIGMA, range_register_test=survived)
+    assert resolution.facets["channel_semantics"].status == "UNKNOWN"
+    assert resolution.status == "UNRESOLVED"
+
+
+def test_unresolvable_scale_blocks_the_gate():
+    """沒有任何除數與觀測相容時，numeric_scale 不得為 CONFIRMED。
+
+    值為非整數（排除 /1），且 x128 後已超出 16-bit（連帶排除 /65536），
+    三個候選全滅 —— 此時必須誠實回報 UNKNOWN 並擋下 gate。
+    """
+    impossible = np.linspace(0.5, 600.0, 500)
+    resolution = resolve_sigma(impossible, range_register_test=RULED_OUT_TEST)
+    assert resolution.facets["numeric_scale"].status == "UNKNOWN"
+    assert resolution.resolved_divisor is None
+    assert resolution.status == "UNRESOLVED"
+    assert any("no scaling hypothesis" in r for r in resolution.blocking_reasons)
+
+
+def test_acquisition_register_without_evidence_is_still_blocked():
     """只填一個數字不算證據；必須記錄它出自哪份檔案哪一行。"""
-    resolution = resolve_sigma(REAL_LIKE_SIGMA, acquisition_register=0x1E)
+    resolution = resolve_sigma(
+        REAL_LIKE_SIGMA, acquisition_register=0x1E, range_register_test=RULED_OUT_TEST
+    )
     assert resolution.status == "UNRESOLVED"
     assert any("without evidence" in r for r in resolution.blocking_reasons)
 
 
-def test_full_evidence_resolves_sigma():
+def test_acquisition_code_confirms_the_register_at_rank_two():
+    """取得 rank-2 採集程式碼後，位址才可能 CONFIRMED。"""
     resolution = resolve_sigma(
         REAL_LIKE_SIGMA,
         acquisition_register=0x1E,
         acquisition_evidence="collect_dataset.py:31 REG_RESULT_SIGMA_MM = 0x1E",
+        range_register_test=RULED_OUT_TEST,
     )
+    facet = resolution.facets["register_address"]
+    assert facet.status == "CONFIRMED"
+    assert facet.value == "0x1e"
+    assert facet.evidence_rank == 2
     assert resolution.status == "RESOLVED"
-    assert resolution.resolved_register == 0x1E
-    assert resolution.blocking_reasons == ()
 
 
-def test_register_outside_known_candidates_is_flagged():
-    resolution = resolve_sigma(
-        REAL_LIKE_SIGMA, acquisition_register=0x20, acquisition_evidence="somewhere"
-    )
-    assert resolution.status == "UNRESOLVED"
-    assert any("not among the observed candidates" in r for r in resolution.blocking_reasons)
-
-
-def test_artifact_records_both_candidates_and_the_gate():
-    artifact = resolve_sigma(REAL_LIKE_SIGMA).to_artifact()
+def test_artifact_carries_facets_contract_version_and_amendment():
+    artifact = resolve_sigma(
+        REAL_LIKE_SIGMA, range_register_test=RULED_OUT_TEST
+    ).to_artifact()
     assert artifact["gate"] == "E1-G08"
-    assert artifact["register"]["candidates"] == [
-        hex(c) for c in SIGMA_REGISTER_CANDIDATES
-    ]
-    assert artifact["register"]["resolved"] is None
-    assert artifact["scaling"]["resolved_divisor"] == SIGMA_RAW_SCALE_DIVISOR
+    assert artifact["contract_version"] == "v2"
+    assert artifact["amendment"] == "AMD-001"
+    assert artifact["required_facets"] == ["channel_semantics", "numeric_scale"]
+    assert artifact["facets"]["numeric_scale"]["value"] == SIGMA_RAW_SCALE_DIVISOR
+    assert artifact["facets"]["register_address"]["status"] == "CONFLICT"
+    # 位址不在 required 內 —— 這是 AMD-001 的重點，寫成斷言以免日後被悄悄加回去。
+    assert "register_address" not in artifact["required_facets"]
+
+
+def test_reconstructed_does_not_satisfy_the_gate():
+    """RECONSTRUCTED 是推論不是證據，不得滿足 gate（NOTE-028 維護邊界）。"""
+    from pcmef.core.constants import PROVENANCE_GATE_SATISFYING
+
+    assert "RECONSTRUCTED" not in PROVENANCE_GATE_SATISFYING
+    assert PROVENANCE_GATE_SATISFYING == ("CONFIRMED",)
 
 
 # ---------------------------------------------------------------------------
