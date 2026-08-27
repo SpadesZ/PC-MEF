@@ -23,8 +23,7 @@
 #   - class_scope: class_specific 的項目必須有物理理由，不得用來偷調單類結果。
 #   - v0.1.0 新增：首版 registry，對應 NOTE-030。
 # 驗證方式:
-#   - py -3.10 -m pytest tests/unit/test_parameter_registry.py -v
-#   - py -3.10 -m pcmef.cli params audit
+#   - py -3.10 -c "import yaml,io; d=yaml.safe_load(io.open('configs/parameter_registry.yaml',encoding='utf-8')); print(len(d['parameters']),'parameters',len(d['confounded_groups']),'confounded groups')"
 # ------------------------------------------------------------
 
 registry_version: v0.1.0
