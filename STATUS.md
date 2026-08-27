@@ -42,8 +42,12 @@ winget install --id LLVM.LLVM          # drjit 的 LLVM 後端需要
 $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 ```
 
-**三個不查會踩到的坑：**
+**四個不查會踩到的坑：**
 
+0. **本機跑 pytest 不會印結尾摘要行。** 跑完只看得到最後一行 `[100%]`，
+   `1302 passed in Xs` 那行**不會出現** —— NOTE-012 的 drjit DLL-detach
+   在 teardown 把它吃掉了。**判斷成敗一律看 exit code**（`$?` / `$LASTEXITCODE`），
+   不要去找摘要行，也不要因為找不到就以為跑掛了。
 1. **一律用 `py -3.10`。** PATH 上的 `python` 是 3.12 且沒裝相依。
 2. **`LLVM-C.dll` 必須存在且在 PATH 上。** drjit 執行期動態載入它，
    但套件**不內含**（只有 `drjit-core.dll`）。缺了會看到
@@ -55,7 +59,7 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 ### 常用指令
 
 ```powershell
-py -3.10 -m pytest                                   # 全部測試（約 130 秒，975 passed）
+py -3.10 -m pytest                                   # 全部測試（1302 條，約 6 分鐘）
 py -3.10 -m pcmef.cli config check                   # 待教授裁決的 10 項
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
 py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
@@ -107,6 +111,11 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~Real split 三值未裁決~~ | — | **已裁決並凍結** 392/168（NOTE-014） |
 | ~~E1/E2 bootstrap 四值~~ | — | **已核定** 10000 / 20260826 / 20260827（NOTE-015） |
 | 10 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
+| **M2 場景保真度** | `initial_simulation.lock`，其下游 19 個 lock | **關鍵路徑。** 見下方「M2 場景保真度」一節 |
+
+**唯一的關鍵路徑是 M2。** `locks status` 的鏈頭是 `initial_simulation`（pending），
+22 個 lock 只凍了 1 個、19 個 BLOCKED。繞過 M2 去做 M4/M5 只會得到一堆
+跑得動但一個 lock 都凍不了的模組，與「lock 不可跳步」的紅線方向相反。
 
 ### 動手前必讀
 
@@ -131,7 +140,7 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 |---|---|---|
 | M0 Data Audit | **資料齊備** | 560 筆 500×4 原始序列已復原；Vision 1200 張完整（NOTE-011） |
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
-| M2 Surrogate + E1 | **surrogate 完成、split 已凍結** | E1 metrics 待 Batch 6 |
+| M2 Surrogate + E1 | **引擎完成，場景保真度未完** | signal/ambient/sigma 已有鑑別力；**distance 只修到一半**，見「M2 場景保真度」 |
 | M3 Post-E1 Split | 未開始 | 依賴 E1 outcome（synthetic split 不得早於此） |
 | M4 Perception | 未開始 | 需先安裝 tensorflow / scikit-learn |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
@@ -442,6 +451,88 @@ draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitra
 `agents.representation_mode` 與 `agents.retry.max_attempts` 仍待教授裁決、
 且 lock 相依鏈要求 `agent_schema` → `synthetic_split_policy` → `e1_outcome`，
 亦即必須先跑完 E1 與 M3。Part VI 的完成度不以能否凍結衡量（NOTE-020）。
+
+---
+
+## M2 場景保真度（2026-08-27 晚間，NOTE-026 / NOTE-027）
+
+**這是目前唯一的關鍵路徑。** 交接時請從這一節開始看。
+
+### 一句話狀態
+
+場景原本**結構上無法讓瓶子回光**，根因已定位並修掉兩層；四類的
+signal / ambient / sigma 都恢復了鑑別力，**distance 只修到一半**。
+
+### 已修
+
+| # | 問題 | 根因 | 處置 |
+|---|---|---|---|
+| 1 | 加介質前後總能量到小數點都相同 | `transient_path` **靜默忽略** interior medium | 有介質時自動改用 `transient_prbvolpath`（NOTE-026） |
+| 2 | `optical_path_to_distance = 0.5` 無物理依據 | 光源離軸，光程不是單程的兩倍 | 光源與相機共置（monostatic spot），係數由幾何成立（NOTE-026） |
+| 3 | `ambient` 欄恆為 0 | 共置後場景只剩感測器發光 | 另加 `constant` 室內光（NOTE-026） |
+| 4 | **瓶子完全不回光** | **SDS**：delta 光源配 delta BSDF，鏡面路徑採樣機率為零 | 瓶壁改 `roughdielectric`（NOTE-027） |
+| 5 | FWHM 恆為 0，Sigma 映射整條路不可用 | 前緣餘裕是相對比例，在 5 cm 場景只有 **0.73 個 bin** | 餘裕改以 bin 數表示，可解析（NOTE-027） |
+| 6 | 三分之二解析度落在沒有能量的區間 | `bounce_budget = 7` 是在舊場景量的 | 改 3.0，對實測末端仍有 31% 餘裕（NOTE-027） |
+
+第 4 項是整串的核心。實測證據：有能量的像素只有 **234/4096（5.7%）**，
+全部在畫面最左右兩條窄邊；中央 16×16（瓶身正中）能量佔比 **0.02%**。
+唯一回到感測器的是背景板，所以四類 distance 全等於 261.28 mm。
+
+### 修完的數字
+
+| 量 | 修前 | 修後 |
+|---|---|---|
+| 四類總能量 | 325 / 294 / 283 / 298（落差 0.8%→13%） | **37,248 / 346,095 / 119,154 / 56,049** |
+| `nonzero_bin_ratio` | 0.086（低於 0.1 守衛） | **0.21 – 0.375** |
+| distance | 四類全為 261.28 mm | 45.35（Empty、Misty）／285.6（Water、Bubbly） |
+| FWHM | 0（surrogate 直接拒絕輸出） | 可計算 |
+
+### 還沒解決的那一半
+
+distance 已經會隨內容物變化，但仍是**雙峰**，而真實是連續分佈：
+
+| | Empty | Water | Bubbly | Misty |
+|---|---|---|---|---|
+| 模擬 | 45.35 | 285.6 | 285.6 | 45.35 |
+| **真實** | **100.91** | **113.87** | **105.57** | **79.51** |
+
+真實四類落在 79–114 mm，對應瓶子**遠壁**（幾何 107 mm），不是前緣（50 mm）
+也不是背景板（249.5 mm）。也就是說真實 VL53L0X 取的**不是全域峰值**，
+而模擬取的是。這一步屬於峰值判定策略，**尚未裁決**。
+
+`surrogate/distance.py` 已有 `PEAK` 與 `ENERGY_CENTROID` 兩種模式；
+第三種可能是「首個超過閾值的回波」或感測器 FOV 加權。三者都是建模決策，
+不是可調係數 —— 不得為了讓數字對上真實均值而挑其中一個（SRC-SAI §10）。
+
+### 一個尚未處理的守衛缺口
+
+`_BOTTLE_SURFACE_ALPHA`、`_LEADING_MARGIN_BINS`、`bounce_budget`、
+`_ROOM_LIGHT_RATIO`、`_SIGMA_T_REFERENCE_PER_M`、`_ALBEDO_BY_PRESET`
+全都是**未校準的建模常數**，但它們不在 `surrogate/calibration.py` 的
+placeholder 清單內，因此 **formal 模式的自動防線攔不到**。
+凍結 `initial_simulation.lock` 前必須一併納入防線。
+
+### 重跑指令
+
+```powershell
+$env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"   # 少了會看到 LLVM-C.dll 錯誤
+py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml `
+    --out outputs/rough_win_2140
+py -3.10 -m pcmef.cli surrogate smoke `
+    --simulation-out outputs/rough_win_2140 --out outputs/rough_win_2140_surrogate
+py -3.10 -m pytest tests/simulation tests/surrogate -q
+```
+
+`outputs/` 底下的對照組（**不要刪，是上述數字的出處**）：
+`baseline_2116`（修前）、`rough_2130`（只改 BSDF）、`rough_win_2140`（現況）。
+
+### 交接注意
+
+- 2026-08-27 早上有一份 WIP 斷在額度上限，**只存在工作區、沒有 commit**。
+  已備份為 tag `wip-backup-20260827-2116`（`git show` 可取回）。
+  本節的第 1–3 項就是那份 WIP 的內容，已驗證並保留。
+- 上一棒的 `mitsuba_adapter.py` 最後編輯於 09:03，但最後一次模擬跑於 09:00 ——
+  **那次編輯從未被跑過**。接手時不要相信任何沒有對應 artifact 的數字。
 
 ---
 
@@ -811,21 +902,31 @@ E1 可依原規格在 500 點序列上進行，`e1_scientific_rule.lock` 沿用�
 
 ---
 
-## 下一步（2026-08-27 更新）
+## 下一步（2026-08-27 晚間更新）
 
 外部阻塞已全部解除：資料齊備、sigma 解出、real split 凍結、E1/E2 bootstrap 核定。
-**Part VI 已完成（§52 七步 + §51 十條驗收）**，見上方「Part VI 已完成內容」。
+**Part VI、Batch 6、Batch 7 皆已完成**。
 
-**Batch 7 已完成**，見上方「Batch 7 已完成內容」。剩下的順序：
+**接下來唯一的關鍵路徑是 M2 場景保真度**（見上方同名章節）。順序：
 
-1. **Batch 6** —— E1 metrics + dual-lock + scientific rule state machine。
-   它會補上 G06/G07/G10/G11/G12 五個目前 NOT_PRODUCED 的 gate。
-2. **Batch 8** —— post-E1 split generators，補上 G05。
-3. 仍待核定的 10 項（見下）。
-4. 採集腳本仍未取得（見下）。
+1. **裁決 distance 的峰值判定策略** —— 目前模擬取全域峰值得到雙峰
+   45.35／285.6 mm，真實是 79–114 mm 連續分佈、對應瓶子遠壁。
+   這是 M2 校準的最後一塊，也是九個 surrogate 校準常數能否離開
+   placeholder 的前提。
+2. **把建模常數納入 formal 防線** —— 六個未校準常數目前不在
+   `calibration.py` 的 placeholder 清單內，formal 模式攔不到。
+   凍 `initial_simulation.lock` 前必須處理。
+3. **Batch 8** —— post-E1 split generators，補上 G05。
+4. 仍待核定的 10 項（見下）。
+5. 採集腳本仍未取得（見下）。
 
 判定 E1 可否開跑，一律以 `audit e1-gates --require G01:G12` 的 exit code 為準，
 不以任何文件敘述為準。
+
+**為什麼不先做 M4/M5。** `locks status` 顯示 22 個 lock 只凍了 1 個、
+19 個 BLOCKED，鏈頭是 `initial_simulation`。M4 之後的模組即使寫完也
+一個 lock 都凍不了，且 `tensorflow` / `scikit-learn` 都還沒安裝。
+先做 M2 才會讓鏈條往前動。
 
 ---
 
