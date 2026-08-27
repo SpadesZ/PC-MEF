@@ -4,7 +4,7 @@
 #         mitransient_adapter 重用，確保 RGB 與 transient 來自同一場景。
 # 檔案路徑: pcmef/simulation/mitsuba_adapter.py
 # 產生時間: 2026-08-26 06:35 +08:00
-# 版本: v0.3.0
+# 版本: v0.4.0
 # 功能說明: 把場景設定翻成 Mitsuba 能懂的場景描述並算出一張 RGB 影像，
 #           同時記下算圖當下的所有版本與參數，讓同樣的輸入日後能算出同樣的結果。
 # 模組定位: Mitsuba 的封裝層。它「不是」物理校準器 —— 本批次只做 single-scenario
@@ -20,6 +20,9 @@
 #   - 不得在 retry 時更換 seed；SRC-SAI §28 規定 render 失敗只能以相同
 #     config/seed 重試，換 seed 等於偷換實驗條件。
 #   - 不得把本模組產出的影像當成 real-fidelity 證據；claim boundary 見 E1-G12。
+#   - 不得把純視覺需求的幾何放回 canonical physical scene。RGB 需要背景
+#     就用 environment emitter，不要用會進 ToF 光路的實體（NOTE-029）。
+#   - 不得因為「Empty 沒有介質」就省略內圓柱；那會讓空瓶變成實心玻璃柱。
 #   - 不得把 _BOTTLE_SURFACE_ALPHA 設為 0：會退回 delta BSDF，與 delta 光源
 #     之間的鏡面路徑採樣機率為零，瓶子完全不回光，且不會有任何錯誤訊息
 #     （NOTE-027）。
@@ -32,6 +35,9 @@
 #     共置幾何推導（NOTE-026）。
 #   - v0.3.0 瓶壁由 dielectric 改為 roughdielectric，解決 SDS 導致
 #     瓶子完全不回光（NOTE-027）。
+#   - v0.4.0 移除無 provenance 的 backdrop、改建 far-side 鋁箔反射體；
+#     內圓柱一律建立（修正 Empty 的實心玻璃柱拓樸錯誤）；
+#     內部基底折射率依類別語意決定（NOTE-029）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "rgb or variant or scale" -v
 # ------------------------------------------------------------
@@ -152,13 +158,14 @@ def scene_path_bounds(config: ScenarioConfig) -> tuple[float, float]:
     outer_r = geometry.outer_radius_mm / _MM_PER_M
     sensor_distance = geometry.sensor_to_bottle_mm / _MM_PER_M
     camera_z = -(sensor_distance + outer_r)
-    backdrop_z = outer_r * 6.0
 
     # NOTE(NOTE-026): 收發同軸（monostatic），光源與相機在同一點，
     # 因此最短光程就是「相機 -> 瓶面 -> 相機」的來回，恰為單程距離的兩倍。
     # 這正是 optical_path_to_distance = 0.5 成立的幾何前提。
     shortest = 2.0 * sensor_distance
-    extent = max(backdrop_z - camera_z, outer_r * 4.0)
+    # NOTE(NOTE-029): 場景跨距改由箔片位置推得。原本用的 backdrop 已移出
+    # canonical physical scene，時間窗不得再依賴一個不存在的物件。
+    extent = max(foil_center_z(outer_r) - camera_z, outer_r * 4.0)
     return float(shortest), float(extent)
 
 
@@ -173,6 +180,53 @@ _ROOM_LIGHT_RATIO = 0.02
 #: 0 會退化成 delta BSDF，與 delta 光源之間的鏡面路徑在 path tracing 中
 #: 機率為零，瓶子會完全不回光。
 _BOTTLE_SURFACE_ALPHA = 0.02
+
+# NOTE(NOTE-029): far-side aluminum foil reflector。
+# **結構已知、數值未知**，兩者必須分開對待：
+#   - 反射體存在、材質為鋁箔、位於瓶身另一側 —— SRC-HANDOFF §0 把它的
+#     offset/orientation/BRDF/940nm reflectance 列為「未回收」，
+#     反證該物件本身存在。這部分是 provenance-supported 的**結構**。
+#   - 下面四個數值全部 UNKNOWN，是 calibration-only nuisance parameters。
+#     取值一律不得依類別而異，也不得為了讓 distance 貼近真實均值而挑選。
+#: 箔片與瓶外壁的間距。**未校準**；取「一個瓶半徑」純粹是幾何慣例，
+#: 不是量出來的，也不是為了得到任何特定距離。
+_FOIL_GAP_TO_BOTTLE_RATIO = 1.0
+#: 箔片邊長相對瓶徑的倍數。取 4 是為了在感測器視角下完全覆蓋瓶身輪廓，
+#: 使遠側回波不會因箔片太小而被邊緣截斷。**未校準**。
+_FOIL_SIZE_TO_DIAMETER_RATIO = 4.0
+#: 鋁箔在 940 nm 的有效反射率。鋁在近紅外的鏡面反射率約 0.95－0.98，
+#: 但實際箔片有皺褶與氧化層，有效值必然更低。**未校準**。
+_FOIL_REFLECTANCE_940NM = 0.85
+#: 箔片表面的 GGX 粗糙度。家用鋁箔有明顯皺褶，不是光學鏡面。**未校準**。
+_FOIL_SURFACE_ALPHA = 0.15
+
+#: 瓶內基底介質的折射率名稱，依類別語意決定（SRC-SAI FR-002 標籤定義）。
+#: 這是**拓樸/材質類別**而非可調數值：霧是懸浮在空氣中的液滴，
+#: 氣泡是水中的氣體，因此兩者的基底本來就不同。
+#: 先前所有非 Empty 類一律用 water，對 Misty 是錯的。
+_INTERIOR_BASE_IOR: dict[str, str] = {
+    "empty": "air",
+    "water": "water",
+    "bubbly": "water",
+    "misty": "air",
+}
+
+
+def foil_center_z(outer_r_m: float) -> float:
+    """箔片中心的 z 座標（公尺）。單一來源，場景與時間窗共用。"""
+    return outer_r_m * (1.0 + _FOIL_GAP_TO_BOTTLE_RATIO)
+
+
+def _foil_transform(mi, outer_r_m: float):
+    """箔片面向相機，尺寸足以在感測器視角下覆蓋瓶身輪廓。"""
+    half = outer_r_m * _FOIL_SIZE_TO_DIAMETER_RATIO
+    transform = _look_at(
+        mi,
+        origin=[0.0, 0.0, foil_center_z(outer_r_m)],
+        target=[0.0, 0.0, 0.0],
+        up=[0.0, 1.0, 0.0],
+    )
+    return transform @ mi.ScalarTransform4f().scale([half, half, 1.0])
 
 
 def _look_at(mi, origin, target, up):
@@ -275,37 +329,58 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
                 "value": [config.lighting.irradiance * _ROOM_LIGHT_RATIO] * 3,
             },
         },
-        "backdrop": {
+        # NOTE(NOTE-029): far-side aluminum foil reflector。
+        # 這裡取代了原本的 `backdrop` —— 那是一塊 reflectance 0.5 的漫反射板，
+        # 純粹為了讓 RGB 有背景而加，**在 SRC-PLAN 與 SRC-HANDOFF 都找不到依據**，
+        # 卻在 ToF 通道佔掉 47–55% 的能量。canonical physical scene 只放
+        # 真實存在的物件；RGB 的背景改由 room_light（constant environment，
+        # 無幾何、不形成有限距離回波）提供。
+        "foil": {
             "type": "rectangle",
-            "to_world": _look_at(
-                mi,
-                origin=[0.0, 0.0, outer_r * 6.0],
-                target=[0.0, 0.0, 0.0],
-                up=[0.0, 1.0, 0.0],
-            ),
-            "bsdf": {"type": "diffuse", "reflectance": {"type": "rgb", "value": 0.5}},
+            "to_world": _foil_transform(mi, outer_r),
+            "bsdf": {
+                "type": "roughconductor",
+                "material": "Al",
+                "distribution": "ggx",
+                "alpha": _FOIL_SURFACE_ALPHA,
+                "specular_reflectance": {
+                    "type": "rgb",
+                    "value": [_FOIL_REFLECTANCE_940NM] * 3,
+                },
+            },
         },
     }
 
-    # 內部介質。Empty 代表空氣，不放額外幾何；其餘放一個內圓柱代表液體/氣霧，
-    # 並在其內部掛上參與介質（participating medium）。
+    # NOTE(NOTE-029): 內圓柱**一律建立，包括 Empty**。
+    # 先前 Empty 不建內圓柱，於是半徑 28.5 mm 的 bottle_wall 變成一根
+    # **實心 bk7 圓柱** —— 光要穿過 57 mm 玻璃，而不是「2 mm 殼 + 53 mm 空氣
+    # + 2 mm 殼」。實測 Empty 的遠側成分因此落在 142 mm（實心玻璃預期 136.5），
+    # 而正確殼結構應為 109.1 mm。
+    #
+    # 這是**幾何拓樸錯誤**，不是未校準參數：空瓶裡面是空氣這件事不需要校準。
+    # 修它與「調係數去貼真實均值」是兩回事。
     #
     # NOTE(NOTE-026): 沒有參與介質時，Water / Bubbly / Misty 會是三個
     # **完全相同**的場景 —— 同一個 dielectric 內圓柱，只有 seed 不同。
     # 那會讓四類在 distance 上得到同一個值，E1 要比較的分佈差異根本不存在。
     # 本研究要區分的正是散射行為，因此散射必須真的進場景。
-    if config.medium_preset.value != "empty":
-        interior: dict[str, Any] = {
-            "type": "cylinder",
-            "p0": [0.0, -height / 2 * 0.98, 0.0],
-            "p1": [0.0, height / 2 * 0.98, 0.0],
-            "radius": inner_r,
-            "bsdf": {"type": "dielectric", "int_ior": "water", "ext_ior": "bk7"},
-        }
-        medium = _medium_dict(config)
-        if medium is not None:
-            interior["interior"] = medium
-        scene["bottle_interior"] = interior
+    preset = config.medium_preset.value
+    interior: dict[str, Any] = {
+        "type": "cylinder",
+        "p0": [0.0, -height / 2 * 0.98, 0.0],
+        "p1": [0.0, height / 2 * 0.98, 0.0],
+        "radius": inner_r,
+        "bsdf": {
+            "type": "dielectric",
+            # 基底折射率依類別語意決定：霧是空氣中的液滴，氣泡是水中的氣體。
+            "int_ior": _INTERIOR_BASE_IOR.get(preset, "air"),
+            "ext_ior": "bk7",
+        },
+    }
+    medium = _medium_dict(config)
+    if medium is not None:
+        interior["interior"] = medium
+    scene["bottle_interior"] = interior
     return scene
 
 

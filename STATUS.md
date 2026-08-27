@@ -678,6 +678,49 @@ Water 的中段成分靠近**內側前介面**，離遠側差 65.8 mm。Empty �
 spot 的 `cutoff_angle` 與接收端 FoV 加權、以及該成分的 specular path lineage
 （單次反射 vs 多次）。目前只知道它與內容物無關且四類位置相同。
 
+### Scene correction 結果（2026-08-28，NOTE-029）
+
+三項修正皆已落地：backdrop 移出 canonical physical scene 並改建鋁箔反射體、
+Empty 改為殼結構、Misty 基底由水改為空氣。
+
+**bounce lineage（以 `max_depth` 遞增取得，非位置比對）**
+
+| 成分 | 首次出現 | 交互作用 | 身分 |
+|---|---|---|---|
+| 44.9 mm | **max_depth=2** | 1 | **前玻璃單次反射**（該深度佔 98%） |
+| 60.2 mm | max_depth=5 | ~4 | 內側介面（玻璃↔內容物） |
+| 146–162 mm | max_depth=12 | ~10 | **箔片**（穿過整個瓶子來回） |
+
+`max_depth=2` 只允許 sensor → 一個表面 → sensor，因此 45 mm 的 front-glass
+身分現在有 **tracing 證據**，可從 `front-surface-associated` 升級為
+front-glass single-bounce return。
+
+**修正前後對照**
+
+| 項目 | 修正前 | 修正後 |
+|---|---|---|
+| 主導回波 | 背景板（**無 provenance**）47–55% | 箔片（provenance-supported）27–89% |
+| Empty 的 45 mm 佔比 | 67.4% | **6.6%** |
+| 四類共同 far-side family | **不存在** | **存在**（147.4 / 162.6 / 162.6 / 145.7 mm） |
+| Empty 瓶身 | 實心玻璃柱（拓樸錯誤） | 殼＋空氣＋殼 |
+| 無 provenance 的 dominant return | **有** | **無** |
+
+**箔片 family 的類別相依性**（相對 Empty，單位 mm）
+
+| | 模擬 | 真實 |
+|---|---|---|
+| Water | **+15.20** | +12.96 |
+| Bubbly | +15.20 | +4.66 |
+| Misty | −1.70 | −21.40 |
+
+Water 的模擬位移 +15.20 落在真實 +12.96 與理想全水路徑
+`Δd=(n−1)L=17.65` 之間，方向與量級皆一致。
+Bubbly 與 Misty 的量級差距大，但**那是未校準的介質參數所致**，
+屬 calibration 範圍，不得在此以調參處理。
+
+**仍未處理**：`_FOIL_*` 四個常數加上 NOTE-026／027 的六個，
+共十個未校準建模常數仍在 formal firewall 之外。
+
 **下一棒的順序（不得跳過）**：
 1. 移除或隔離純 RGB 需求造成的 ToF background artifact
 2. 建立 provenance-supported 的 far-side aluminum-foil reflector，

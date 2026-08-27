@@ -324,6 +324,94 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-029 canonical physical scene 只放真實存在的物件；RGB 背景不得進 ToF 光路
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/simulation/mitsuba_adapter.py` 的 `build_scene_dict()`、
+`scene_path_bounds()`、`foil_center_z()`、`_foil_transform()`、
+`_FOIL_*` 與 `_INTERIOR_BASE_IOR`。
+
+**決策**：
+
+1. **移除 `backdrop`**（reflectance 0.5 的漫反射矩形），改建
+   **far-side aluminum foil reflector**（`roughconductor`, material Al）。
+2. **內圓柱一律建立，包含 Empty**。空瓶因此是「殼＋空氣＋殼」而非實心玻璃柱。
+3. 內部基底折射率依類別語意決定：`empty/misty → air`、`water/bubbly → water`。
+4. 時間窗的場景跨距改由箔片位置推得，不再依賴已移除的 backdrop。
+
+**原因**：
+
+**其一，把 backdrop 對 ToF 隱藏不是解法。** 若該物件不是實驗中的物理物件，
+它就不該存在於 canonical physical scene —— 否則會變成
+「RGB 看得到一個不存在的物體，ToF 看不到」，paired simulation 的物理一致性
+無法辯護。因此場景分成兩層：canonical physical scene（sensor / bottle shell /
+interior medium / far-side reflector）與 RGB presentation（環境照明）。
+RGB 的背景由 `room_light`（`constant` environment emitter）提供 ——
+它沒有幾何，不會形成有限距離的回波。
+
+原 backdrop 在 SRC-PLAN 與 SRC-HANDOFF 都找不到依據，卻在 ToF 通道
+佔掉 **47–55%** 的能量。
+
+**其二，箔片的「結構已知」與「數值未知」必須分開。**
+
+| 面向 | 狀態 |
+|---|---|
+| 反射體存在、材質為鋁箔、位於瓶身另一側 | **provenance-supported**（SRC-HANDOFF §0 把其光學參數列為「未回收」，反證物件存在） |
+| offset / orientation / roughness / BRDF / 940 nm 有效反射率 | **UNKNOWN，calibration-only nuisance** |
+
+`_FOIL_GAP_TO_BOTTLE_RATIO = 1.0` 是**幾何慣例**（一個瓶半徑），
+不是量出來的，也不是為了得到任何特定距離。四個 `_FOIL_*` 常數
+**一律不得依類別而異**。
+
+**其三，Empty 的實心玻璃柱是拓樸錯誤，不是未校準參數。**
+先前 `bottle_interior` 只在 `medium_preset != "empty"` 時建立，
+於是 Empty 的 `bottle_wall`（半徑 28.5 mm 的 bk7 圓柱）成為**實心玻璃**，
+光要穿過 57 mm 玻璃。空瓶裡面是空氣這件事不需要校準，因此直接修，
+與「調係數去貼真實均值」是兩回事。
+
+| Empty 遠側表觀距離 | 值 |
+|---|---|
+| 錯誤（實心玻璃 57 mm） | 136.46 mm |
+| 正確（2 mm 殼＋53 mm 空氣＋2 mm 殼） | 109.07 mm |
+
+**其四，Misty 的基底不該是水。** 霧是懸浮在空氣中的液滴，氣泡是水中的氣體。
+先前所有非 Empty 類一律用 `int_ior: water`，對 Misty 是錯的。
+這是類別語意（SRC-SAI FR-002）決定的**材質類別**，不是可調數值。
+
+**驗證** —— bounce lineage 以 `max_depth` 遞增取得，非位置比對：
+
+```
+export PATH="/c/Program Files/LLVM/bin:$PATH"
+py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml \
+    --out outputs/scene_v2
+```
+
+| 成分 | 首次出現的 max_depth | 交互作用次數 | 身分 |
+|---|---|---|---|
+| 44.9 mm | **2** | 1 | **前玻璃單次反射**（該深度佔 98%） |
+| 60.2 mm | 5 | ~4 | 內側介面（玻璃↔內容物） |
+| 146–162 mm | 12 | ~10 | **箔片**（穿過整個瓶子來回） |
+
+`max_depth=2` 只允許 sensor → 一個表面 → sensor，因此 45 mm 成分的
+front-glass 身分是 **tracing 證據**，不再是位置吻合的推測。
+
+**修正後四類都出現箔片回波**（Empty 147.4 / Water 162.6 / Bubbly 162.6 /
+Misty 145.7 mm），即存在**四類共同的 far-side return family** ——
+這是修正前不存在的。
+
+**維護邊界**：
+- 不得把任何純視覺需求的幾何放回 canonical physical scene。
+  RGB 需要背景就用 environment emitter，不要用會進光路的實體。
+- 四個 `_FOIL_*` 常數不得依類別而異，不得為了讓 distance 貼近真實均值而挑選；
+  它們與 NOTE-026／NOTE-027 的建模常數同屬 formal firewall 的已知缺口。
+- 不得因為「Empty 沒有介質」就省略內圓柱；那正是實心玻璃柱錯誤的來源。
+- 本節的峰值位置**不構成任何 fidelity 主張**：箔片位置與光學常數皆未校準。
+
+相關：[NOTE-026]、[NOTE-027]、[NOTE-013]
+
+---
+
 ## NOTE-028 E1-G08 拆分：可驗證的 Sigma channel/scale 與不可觀測的暫存器位址（AMD-001）
 
 **決策日期**：2026-08-27
