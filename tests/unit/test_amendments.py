@@ -110,3 +110,44 @@ def test_amd001_invariants_match_the_running_contract():
     # 位址不得混進 required facet —— amendment 說了不算，程式碼要真的這樣做。
     assert "register_address" not in E1_G08_REQUIRED_FACETS
     assert "RECONSTRUCTED" not in PROVENANCE_GATE_SATISFYING
+
+
+def test_amendment_provenance_block_has_the_required_keys(tmp_path):
+    from pcmef.core.amendments import AMENDMENT_PROVENANCE_KEYS, amendment_provenance
+
+    store = AmendmentStore(tmp_path)
+    store.freeze(_amendment("AMD-001"))
+    block = amendment_provenance(tmp_path)
+    assert set(block) == set(AMENDMENT_PROVENANCE_KEYS)
+    assert block["amendment_id"] == "AMD-001"
+    assert block["g08_contract_version"] == "v2"
+    assert len(block["amendment_payload_hash"]) == 64
+
+
+def test_amendment_provenance_recomputes_the_hash_rather_than_trusting_the_file(tmp_path):
+    """雜湊一律當下重算。被改過的記錄必須拋錯，不得安靜寫出過期雜湊。"""
+    import json as _json
+
+    from pcmef.core.amendments import amendment_provenance
+
+    store = AmendmentStore(tmp_path)
+    path = store.freeze(_amendment("AMD-001"))
+    document = _json.loads(path.read_text(encoding="utf-8"))
+    document["payload"]["authority"] = "tampered"
+    path.write_text(_json.dumps(document), encoding="utf-8")
+    with pytest.raises(AmendmentError, match="payload_hash mismatch"):
+        amendment_provenance(tmp_path)
+
+
+def test_formal_locks_require_amendment_provenance():
+    """e1_scientific_rule 與 formal_config 必須保存 amendment 追溯（NOTE-028）。
+
+    少了這條，formal run 事後無法證明自己依哪一版判準通過。
+    """
+    from pcmef.core.amendments import AMENDMENT_PROVENANCE_KEYS
+    from pcmef.core.locks import LOCK_SPECS
+
+    for name in ("e1_scientific_rule", "formal_config"):
+        keys = LOCK_SPECS[name].required_keys
+        for required in AMENDMENT_PROVENANCE_KEYS:
+            assert required in keys, f"{name} 缺 {required}"

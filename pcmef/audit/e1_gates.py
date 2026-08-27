@@ -49,6 +49,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pcmef.audit.result import AuditReport, CheckResult, CheckStatus
+from pcmef.core.amendments import (
+    AMENDMENT_PROVENANCE_KEYS,
+    AmendmentError,
+    amendment_provenance,
+)
 from pcmef.core.constants import (
     E1_G08_CONTRACT_VERSION,
     PROTOCOL_AMENDMENT_ID,
@@ -330,7 +335,16 @@ def _check_g08(paths: AuditPaths) -> tuple[CheckStatus, str, list[str]]:
         if facet is None:
             findings.append(f"缺少必要 facet {name!r}")
             continue
-        status = str(facet.get("status", ""))
+        # NOTE(NOTE-028): 讀 conclusion_status 而非 status —— 證據來源
+        # （source_evidence_rank）與推導方式（derivation）是另外兩個欄位，
+        # 三者刻意分開，不得再合併成一個含糊的 status。
+        if "conclusion_status" not in facet:
+            findings.append(
+                f"facet {name} 缺 conclusion_status；artifact 為舊格式，"
+                "需以 provenance resolve-sigma 重產"
+            )
+            continue
+        status = str(facet.get("conclusion_status", ""))
         if status not in PROVENANCE_GATE_SATISFYING:
             findings.append(
                 f"facet {name} = {status!r}，E1-G08 {E1_G08_CONTRACT_VERSION} 要求 "
@@ -345,9 +359,30 @@ def _check_g08(paths: AuditPaths) -> tuple[CheckStatus, str, list[str]]:
     for reason in resolution.get("blocking_reasons", []):
         findings.append(str(reason))
 
+    # amendment 追溯：formal run 必須能證明自己依哪一版契約通過（NOTE-028）。
+    provenance_block = resolution.get("protocol_amendment") or {}
+    for key in AMENDMENT_PROVENANCE_KEYS:
+        if not provenance_block.get(key):
+            findings.append(
+                f"protocol_amendment 缺 {key}；artifact 無法證明依哪一版 G08 通過"
+            )
+    if provenance_block.get("amendment_id"):
+        try:
+            expected = amendment_provenance(paths.freeze, provenance_block["amendment_id"])
+        except AmendmentError as error:
+            findings.append(f"amendment 追溯無法驗證：{error}")
+        else:
+            if provenance_block.get("amendment_payload_hash") != expected[
+                "amendment_payload_hash"
+            ]:
+                findings.append(
+                    "amendment_payload_hash 與 freeze/amendments/ 的實際記錄不符；"
+                    "artifact 或 amendment 其一已被改動"
+                )
+
     scale = (facets.get("numeric_scale") or {}).get("value")
-    channel = (facets.get("channel_semantics") or {}).get("status")
-    register = (facets.get("register_address") or {}).get("status")
+    channel = (facets.get("channel_semantics") or {}).get("conclusion_status")
+    register = (facets.get("register_address") or {}).get("conclusion_status")
     detail = (
         f"channel={channel} scale=/{scale} register={register}"
         f" [{E1_G08_CONTRACT_VERSION}/{PROTOCOL_AMENDMENT_ID}]"

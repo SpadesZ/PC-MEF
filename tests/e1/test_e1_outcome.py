@@ -68,6 +68,9 @@ def test_a_rule_lock_without_aggregation_is_refused(lock_chain):
         "improvement_threshold": 0.0, "regression_tolerance": 0.0,
         "trend_rule": "non_degraded", "bootstrap_replicates": 10,
         "bootstrap_seed": 1, "code_hash": "h",
+        "amendment_id": "AMD-001",
+        "amendment_payload_hash": "a" * 64,
+        "g08_contract_version": "v2",
     })
     with pytest.raises(OutcomeError, match="aggregation mapping"):
         ScientificRule.from_lock(lock_chain)
@@ -80,6 +83,9 @@ def test_a_rule_lock_missing_a_condition_is_refused(lock_chain):
         "improvement_threshold": 0.0, "regression_tolerance": 0.0,
         "trend_rule": "non_degraded", "bootstrap_replicates": 10,
         "bootstrap_seed": 1, "code_hash": "h",
+        "amendment_id": "AMD-001",
+        "amendment_payload_hash": "a" * 64,
+        "g08_contract_version": "v2",
     })
     with pytest.raises(OutcomeError, match="missing PASS condition"):
         ScientificRule.from_lock(lock_chain)

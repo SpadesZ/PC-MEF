@@ -37,6 +37,11 @@ from pcmef.audit.e1_gates import (
     parse_gate_range,
 )
 from pcmef.audit.result import CheckStatus
+from pcmef.core.amendments import (
+    AmendmentStore,
+    ProtocolAmendment,
+    amendment_provenance,
+)
 
 
 @pytest.fixture
@@ -96,6 +101,25 @@ def _healthy_g04(paths: AuditPaths, all_finite: str = "True") -> None:
     )
 
 
+def _freeze_test_amendment(paths: AuditPaths) -> None:
+    """在 tmp freeze/ 造一份 AMD-001。刻意不讀 repo 的真實 freeze/。"""
+    store = AmendmentStore(paths.freeze)
+    if store.exists("AMD-001"):
+        return
+    store.freeze(
+        ProtocolAmendment(
+            amendment_id="AMD-001",
+            title="test amendment",
+            supersedes="v1",
+            rationale="fixture",
+            changed_contracts={"E1-G08": {"contract_version": "v2"}},
+            precondition_evidence={"heldout_access_count": 0},
+            invariants_preserved={"e1_eligible_recordings": 560},
+            authority="fixture",
+        )
+    )
+
+
 def _healthy_g08(
     paths: AuditPaths,
     status: str = "RESOLVED",
@@ -105,6 +129,7 @@ def _healthy_g08(
     contract_version: str = "v2",
 ) -> None:
     """AMD-001 v2 的 artifact 形狀。register 預設 CONFLICT —— 那是正常狀態。"""
+    _freeze_test_amendment(paths)
     _write(paths.provenance / "sigma_resolution.json", {
         "status": status, "blocking_reasons": [],
         "contract_version": contract_version,
@@ -112,23 +137,31 @@ def _healthy_g08(
         "required_facets": ["channel_semantics", "numeric_scale"],
         "facets": {
             "channel_semantics": {
-                "status": channel, "value": "dispersion_channel_not_range",
-                "evidence_rank": 1, "basis": "test fixture",
+                "conclusion_status": channel, "value": "dispersion_channel_not_range",
+                "source_evidence_rank": 1,
+                "derivation": "range_correlation_exclusion_test",
+                "basis": "test fixture",
             },
             "numeric_scale": {
-                "status": scale, "value": 65536.0,
-                "evidence_rank": 1, "basis": "test fixture",
+                "conclusion_status": scale, "value": 65536.0,
+                "source_evidence_rank": 1,
+                "derivation": "quantization_residual_test",
+                "basis": "test fixture",
             },
             "register_address": {
-                "status": register, "value": None,
-                "evidence_rank": 5, "basis": "test fixture",
+                "conclusion_status": register, "value": None,
+                "source_evidence_rank": 5, "derivation": "legacy_code_survey",
+                "basis": "test fixture",
             },
             "original_acquisition_method": {
-                "status": "UNKNOWN", "value": None,
-                "evidence_rank": 2, "basis": "test fixture",
+                "conclusion_status": "UNKNOWN", "value": None,
+                "source_evidence_rank": 2,
+                "derivation": "not_derivable_from_available_evidence",
+                "basis": "test fixture",
             },
         },
         "scaling": {"resolved_divisor": 65536.0},
+        "protocol_amendment": amendment_provenance(paths.freeze),
     })
 
 
@@ -330,6 +363,50 @@ def test_g08_fails_on_stale_v1_artifact(paths):
     result = audit_e1_gates(paths).get("E1-G08")
     assert result.status is CheckStatus.FAIL
     assert any("contract_version" in f for f in result.findings)
+
+
+def test_g08_fails_without_amendment_provenance(paths):
+    """artifact 必須能證明自己依哪一版 G08 通過（NOTE-028）。"""
+    _healthy_g08(paths)
+    import json as _json
+
+    path = paths.provenance / "sigma_resolution.json"
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    del payload["protocol_amendment"]
+    path.write_text(_json.dumps(payload), encoding="utf-8")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("protocol_amendment" in f for f in result.findings)
+
+
+def test_g08_fails_when_amendment_hash_does_not_match_the_frozen_record(paths):
+    """artifact 引的雜湊與實際 amendment 不符 —— 其一被改過，不得放行。"""
+    _healthy_g08(paths)
+    import json as _json
+
+    path = paths.provenance / "sigma_resolution.json"
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    payload["protocol_amendment"]["amendment_payload_hash"] = "0" * 64
+    path.write_text(_json.dumps(payload), encoding="utf-8")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("amendment_payload_hash" in f for f in result.findings)
+
+
+def test_g08_fails_on_facet_without_conclusion_status(paths):
+    """舊格式把來源位階與結論混在 status 一欄；必須要求重產（NOTE-028 v2）。"""
+    _healthy_g08(paths)
+    import json as _json
+
+    path = paths.provenance / "sigma_resolution.json"
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    facet = payload["facets"]["numeric_scale"]
+    facet["status"] = facet.pop("conclusion_status")
+    facet["evidence_rank"] = facet.pop("source_evidence_rank")
+    path.write_text(_json.dumps(payload), encoding="utf-8")
+    result = audit_e1_gates(paths).get("E1-G08")
+    assert result.status is CheckStatus.FAIL
+    assert any("conclusion_status" in f for f in result.findings)
 
 
 def test_g08_fails_when_a_required_facet_is_missing(paths):

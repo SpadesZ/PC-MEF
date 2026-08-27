@@ -4,7 +4,7 @@
 #         被修訂的 gate 契約版本與已凍結的 amendment 一致。
 # 檔案路徑: pcmef/core/amendments.py
 # 產生時間: 2026-08-27 23:40 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 記錄「協定本身被修改過」這件事 —— 誰改了哪一條 gate、為什麼改、
 #           改之前 held-out 有沒有被動過，並把整份記錄雜湊後凍結成不可覆寫的檔案。
 # 模組定位: 預註冊修訂的證據層。它「不是」lock —— lock 凍結的是實驗參數，
@@ -15,6 +15,7 @@
 #   2. AmendmentStore.freeze() 寫入且拒絕覆寫
 #   3. AmendmentStore.load() / list_ids() 供稽核與 CLI 讀回
 #   4. payload_hash 讓事後可驗證這份記錄未被竄改
+#   5. amendment_provenance() 產生 lock/manifest 用的追溯區塊
 # 維護提醒:
 #   - 不得允許覆寫已凍結的 amendment。判準改了兩次就必須有兩份記錄，
 #     否則「後來又偷偷改回去」不會留下痕跡。
@@ -23,6 +24,8 @@
 #     那正是這份記錄唯一能證明「不是看到結果才改規則」的東西。
 #   - 不得把 amendment 當成補預設值的通道；它只描述判準結構的變更，
 #     未核定數值一律仍走 !required（NOTE-005）。
+#   - v0.2.0 新增 amendment_provenance()：產生可嵌入 lock/manifest/artifact 的
+#     追溯區塊，雜湊當下重算而非複製常數（NOTE-028 v2）。
 #   - v0.1.0 新增：首版 amendment 凍結機制，對應 AMD-001（NOTE-028）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_amendments.py -v
@@ -43,7 +46,39 @@ __all__ = [
     "AmendmentError",
     "ProtocolAmendment",
     "AmendmentStore",
+    "AMENDMENT_PROVENANCE_KEYS",
+    "amendment_provenance",
 ]
+
+#: formal artifact 必須保存的 amendment 追溯欄位。
+#: 少了它們，一次 formal run 事後無法證明自己是依哪一版判準通過的 ——
+#: amendment 進了版控不代表 run 知道自己用了哪一版（NOTE-028）。
+AMENDMENT_PROVENANCE_KEYS: tuple[str, ...] = (
+    "amendment_id",
+    "amendment_payload_hash",
+    "g08_contract_version",
+)
+
+
+def amendment_provenance(
+    freeze_dir: str | Path = "freeze",
+    amendment_id: str | None = None,
+) -> dict[str, str]:
+    """回傳可嵌入 lock / manifest / artifact 的 amendment 追溯區塊。
+
+    payload_hash 一律由**當下讀回的檔案**重算，不從常數複製 ——
+    若 amendment 記錄被改過，這裡就會拋錯而不是安靜地寫出一個過期雜湊。
+    """
+    from pcmef.core.constants import E1_G08_CONTRACT_VERSION, PROTOCOL_AMENDMENT_ID
+
+    resolved_id = amendment_id or PROTOCOL_AMENDMENT_ID
+    store = AmendmentStore(freeze_dir)
+    payload = store.load(resolved_id)
+    return {
+        "amendment_id": resolved_id,
+        "amendment_payload_hash": hash_object(payload),
+        "g08_contract_version": E1_G08_CONTRACT_VERSION,
+    }
 
 
 class AmendmentError(RuntimeError):

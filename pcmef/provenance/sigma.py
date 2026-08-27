@@ -112,19 +112,42 @@ class ScalingHypothesis:
         }
 
 
+#: facet 結論的推導方式。**證據來源與推導方式必須分開表示**（NOTE-028 v2）：
+#: raw dataset 是 rank-1 證據，但它**沒有任何欄位寫著 `/65536`** ——
+#: 那是對 280,000 列做量化殘差分析推得的結論。把兩者寫成同一個 `rank=1`
+#: 會讓人誤以為 dataset metadata 直接聲明了 scale。
+DERIVATION_DIRECT_METADATA: str = "direct_metadata"
+DERIVATION_QUANTIZATION_RESIDUAL: str = "quantization_residual_test"
+DERIVATION_RANGE_CORRELATION: str = "range_correlation_exclusion_test"
+DERIVATION_SOURCE_CODE_CITATION: str = "source_code_citation"
+DERIVATION_LEGACY_CODE_SURVEY: str = "legacy_code_survey"
+DERIVATION_NOT_DERIVABLE: str = "not_derivable_from_available_evidence"
+
+
 @dataclass(frozen=True)
 class ProvenanceFacet:
-    """單一 provenance 事實及其證據等級（NOTE-028）。
+    """單一 provenance 事實：證據來源、推導方式與結論三者分開（NOTE-028）。
 
     facet 是「一個可以被獨立證成或證否的事實」。把它們分開持有，
     是因為它們的可觀測性根本不同 —— numeric scale 可由 280,000 列量化關係
-    驗證，historical register address 則**原理上**無法由匯出的浮點數反推。
+    推導，historical register address 則**原理上**無法由匯出的浮點數反推。
+
+    三個欄位各自回答不同問題，不得合併：
+
+    - ``source_evidence_rank``：**證據出自哪裡**（SRC-HANDOFF §8 位階）
+    - ``derivation``：**怎麼從那份證據得到結論**
+    - ``conclusion_status``：**結論的強度**
+
+    `source_evidence_rank=1` + `derivation=quantization_residual_test`
+    讀起來是「以 rank-1 資料做量化殘差分析後推得」，
+    而不是「rank-1 資料直接寫了這個值」。
     """
 
     name: str
     status: str
     value: Any
-    evidence_rank: int
+    source_evidence_rank: int
+    derivation: str
     basis: str
     alternatives: dict[str, str] = field(default_factory=dict)
 
@@ -141,9 +164,10 @@ class ProvenanceFacet:
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
-            "status": self.status,
+            "conclusion_status": self.status,
             "value": self.value,
-            "evidence_rank": self.evidence_rank,
+            "source_evidence_rank": self.source_evidence_rank,
+            "derivation": self.derivation,
             "basis": self.basis,
         }
         if self.alternatives:
@@ -416,7 +440,8 @@ def resolve_sigma(
             name="numeric_scale",
             status=PROVENANCE_CONFIRMED,
             value=resolved_divisor,
-            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            source_evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            derivation=DERIVATION_QUANTIZATION_RESIDUAL,
             basis=(
                 f"quantization test over n={finite.size} observations: "
                 + "; ".join(
@@ -431,7 +456,8 @@ def resolve_sigma(
             name="numeric_scale",
             status=PROVENANCE_UNKNOWN,
             value=None,
-            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            source_evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            derivation=DERIVATION_QUANTIZATION_RESIDUAL,
             basis="no single divisor survives the quantization test",
         )
 
@@ -444,7 +470,8 @@ def resolve_sigma(
             name="channel_semantics",
             status=PROVENANCE_CONFIRMED,
             value="dispersion_channel_not_range",
-            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            source_evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            derivation=DERIVATION_RANGE_CORRELATION,
             basis=(
                 "the sigma column is not the ranging result: match_ratio="
                 f"{range_register_test.get('match_ratio')}, correlation="
@@ -458,7 +485,8 @@ def resolve_sigma(
             name="channel_semantics",
             status=PROVENANCE_UNKNOWN,
             value=None,
-            evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            source_evidence_rank=EVIDENCE_RANK_RAW_DATASET,
+            derivation=DERIVATION_RANGE_CORRELATION,
             basis=(
                 "the range-register exclusion test was not supplied or did not "
                 "rule out the hypothesis that the sigma column holds the range"
@@ -472,7 +500,8 @@ def resolve_sigma(
             name="register_address",
             status=PROVENANCE_CONFIRMED,
             value=hex(acquisition_register),
-            evidence_rank=EVIDENCE_RANK_ACQUISITION_CODE,
+            source_evidence_rank=EVIDENCE_RANK_ACQUISITION_CODE,
+            derivation=DERIVATION_SOURCE_CODE_CITATION,
             basis=acquisition_evidence,
         )
     elif acquisition_register is not None:
@@ -484,7 +513,8 @@ def resolve_sigma(
             name="register_address",
             status=PROVENANCE_UNKNOWN,
             value=None,
-            evidence_rank=EVIDENCE_RANK_GUESS,
+            source_evidence_rank=EVIDENCE_RANK_GUESS,
+            derivation=DERIVATION_NOT_DERIVABLE,
             basis="register supplied without a citable source",
         )
     else:
@@ -492,7 +522,8 @@ def resolve_sigma(
             name="register_address",
             status=PROVENANCE_CONFLICT,
             value=None,
-            evidence_rank=EVIDENCE_RANK_LEGACY_INFERENCE_4F,
+            source_evidence_rank=EVIDENCE_RANK_LEGACY_INFERENCE_4F,
+            derivation=DERIVATION_LEGACY_CODE_SURVEY,
             basis=(
                 "legacy sources disagree and the acquisition script that produced "
                 "this dataset is not recovered. The address is not observable from "
@@ -516,7 +547,8 @@ def resolve_sigma(
         name="original_acquisition_method",
         status=PROVENANCE_UNKNOWN,
         value=None,
-        evidence_rank=EVIDENCE_RANK_ACQUISITION_CODE,
+        source_evidence_rank=EVIDENCE_RANK_ACQUISITION_CODE,
+        derivation=DERIVATION_NOT_DERIVABLE,
         basis=(
             "the script that generated the 560 recordings is not recovered; the "
             "known four-feature script has SAVE_RAW_SENSOR_DATA=False and is "

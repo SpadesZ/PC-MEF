@@ -75,6 +75,11 @@ DEFAULT_RULE = {
     "bootstrap_replicates": 500,
     "bootstrap_seed": 20260826,
     "code_hash": "e1rule",
+    # NOTE(NOTE-028): e1_scientific_rule 必須保存 E1-G08 的 amendment 追溯，
+    # 否則 formal run 事後無法證明依哪一版判準通過。
+    "amendment_id": "AMD-001",
+    "amendment_payload_hash": "a" * 64,
+    "g08_contract_version": "v2",
 }
 
 

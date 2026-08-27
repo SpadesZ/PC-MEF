@@ -79,6 +79,8 @@ _PREREQUISITE_CHAIN: tuple[tuple[str, dict], ...] = (
         "improvement_threshold": 0.0, "regression_tolerance": 0.0,
         "trend_rule": "non_degraded", "bootstrap_replicates": 10000,
         "bootstrap_seed": 20260826, "code_hash": "x",
+        "amendment_id": "AMD-001", "amendment_payload_hash": "a" * 64,
+        "g08_contract_version": "v2",
     }),
     ("claim_boundary", {
         "e1_fidelity_scope": "tof_sensor_surrogate",

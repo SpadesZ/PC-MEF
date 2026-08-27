@@ -4,7 +4,7 @@
 #         各 lock 的 payload_hash 互相交叉引用，最終匯入 formal_config.lock。
 # 檔案路徑: pcmef/core/locks.py
 # 產生時間: 2026-08-25 22:05 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 管理 22 個「凍結點」—— 每個實驗階段做完後把當時的決策與雜湊寫成一個
 #           不可再改的檔案。它同時檢查該階段的前置階段是否真的完成，
 #           讓「先鎖 split 再校準」這類順序不是靠人記得，而是跳步就會失敗。
@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pcmef.core.amendments import AMENDMENT_PROVENANCE_KEYS
 from pcmef.core.hash import hash_object
 
 __all__ = [
@@ -158,11 +159,16 @@ LOCK_SPECS: dict[str, LockSpec] = {
                 "bootstrap_replicates",
                 "bootstrap_seed",
                 "code_hash",
+                # NOTE(NOTE-028): E1 的科學判準依賴 Sigma 是否可作 primary 證據，
+                # 而那由 E1-G08 決定。不記下依哪一版 G08 通過，事後就無法
+                # 證明這次 run 用的是哪一套判準。
+                *AMENDMENT_PROVENANCE_KEYS,
             ),
             requires=("e1_evaluation_design",),
             description=(
                 "必須在 Held-out 開啟前鎖定。SRC-SAI Appendix H2："
                 "scale 與 pass/degraded 決策規則皆 calibration-only。"
+                "另須保存 E1-G08 的 amendment 追溯（NOTE-028）。"
             ),
         ),
         LockSpec(
@@ -322,6 +328,10 @@ LOCK_SPECS: dict[str, LockSpec] = {
                 "claim_boundary_hash",
                 "agent",
                 "statistics_config_hash",
+                # NOTE(NOTE-028): formal run 的最終憑證必須能回答
+                # 「這次 run 依哪一版判準通過」。amendment 進了版控不代表
+                # run 知道自己用了哪一版。
+                *AMENDMENT_PROVENANCE_KEYS,
             ),
             requires=(
                 "e2_sample_size",
@@ -329,7 +339,10 @@ LOCK_SPECS: dict[str, LockSpec] = {
                 "llm_runtime",
                 "inference_firewall",
             ),
-            description="最後一道 freeze；鎖定後任何 config 變動都必須開新 run_id。",
+            description=(
+                "最後一道 freeze；鎖定後任何 config 變動都必須開新 run_id。"
+                "另須保存所有已生效 protocol amendment 的追溯（NOTE-028）。"
+            ),
         ),
     )
 }

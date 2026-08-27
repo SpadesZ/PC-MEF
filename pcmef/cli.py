@@ -742,6 +742,11 @@ def cmd_provenance_resolve_sigma(args: argparse.Namespace) -> int:
     }
     if exclusion is not None:
         artifact["paired_source"] = str(args.paired_source)
+    # NOTE(NOTE-028): G08 artifact 必須自帶 amendment 追溯，否則 formal run
+    # 事後無法證明自己是依哪一版判準通過的。
+    from pcmef.core.amendments import amendment_provenance
+
+    artifact["protocol_amendment"] = amendment_provenance(args.freeze_dir)
     (out_dir / "sigma_resolution.json").write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -1403,6 +1408,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="含 KG_<class>_<Metric>_<Stat>.csv 的目錄",
     )
     sigma_cmd.add_argument("--out", default="provenance", help="artifact 輸出目錄")
+    sigma_cmd.add_argument(
+        "--freeze-dir", default="freeze",
+        help="amendment 記錄所在目錄；artifact 需嵌入 amendment 追溯（NOTE-028）",
+    )
     sigma_cmd.add_argument(
         "--acquisition-register",
         help="產生此資料集的採集腳本所用的暫存器（十六進位，例如 0x1E）；"

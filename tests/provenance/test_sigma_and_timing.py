@@ -161,7 +161,8 @@ def test_acquisition_code_confirms_the_register_at_rank_two():
     facet = resolution.facets["register_address"]
     assert facet.status == "CONFIRMED"
     assert facet.value == "0x1e"
-    assert facet.evidence_rank == 2
+    assert facet.source_evidence_rank == 2
+    assert facet.derivation == "source_code_citation"
     assert resolution.status == "RESOLVED"
 
 
@@ -173,8 +174,18 @@ def test_artifact_carries_facets_contract_version_and_amendment():
     assert artifact["contract_version"] == "v2"
     assert artifact["amendment"] == "AMD-001"
     assert artifact["required_facets"] == ["channel_semantics", "numeric_scale"]
-    assert artifact["facets"]["numeric_scale"]["value"] == SIGMA_RAW_SCALE_DIVISOR
-    assert artifact["facets"]["register_address"]["status"] == "CONFLICT"
+    scale_facet = artifact["facets"]["numeric_scale"]
+    assert scale_facet["value"] == SIGMA_RAW_SCALE_DIVISOR
+    assert scale_facet["conclusion_status"] == "CONFIRMED"
+    # 證據來源與推導方式必須分開：dataset 是 rank-1，但它沒有任何欄位寫著
+    # /65536 —— 那是量化殘差分析推得的結論（NOTE-028 v2）。
+    assert scale_facet["source_evidence_rank"] == 1
+    assert scale_facet["derivation"] == "quantization_residual_test"
+    assert "status" not in scale_facet
+    assert "evidence_rank" not in scale_facet
+    assert (
+        artifact["facets"]["register_address"]["conclusion_status"] == "CONFLICT"
+    )
     # 位址不在 required 內 —— 這是 AMD-001 的重點，寫成斷言以免日後被悄悄加回去。
     assert "register_address" not in artifact["required_facets"]
 

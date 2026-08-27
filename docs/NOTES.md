@@ -406,9 +406,42 @@ py -3.10 -m pytest tests/provenance tests/audit tests/unit/test_amendments.py -q
 結果：四個 facet 如上表；`E1-G08 PASS  channel=CONFIRMED scale=/65536.0
 register=CONFLICT [v2/AMD-001]`；`canonical/valid/e1_eligible` 維持 560/560/560。
 
+**其五（v2 補強），證據來源與推導方式必須分開表示。** 初版把
+`numeric_scale` 記成 `evidence_rank=1`，讀起來像「rank-1 dataset 直接寫了
+/65536」—— 但 dataset **沒有任何欄位**寫著這個數字，它是對 280,000 列
+做量化殘差分析推得的。三個欄位因此拆開，各自回答不同問題：
+
+| 欄位 | 回答 | numeric_scale 的值 |
+|---|---|---|
+| `source_evidence_rank` | 證據出自哪裡 | **1**（raw dataset） |
+| `derivation` | 怎麼從那份證據得到結論 | **quantization_residual_test** |
+| `conclusion_status` | 結論的強度 | **CONFIRMED** |
+
+`channel_semantics` 同理為 `range_correlation_exclusion_test`；
+取得採集程式碼後的 `register_address` 會是
+`source_evidence_rank=2` + `derivation=source_code_citation`。
+舊格式（只有 `status` / `evidence_rank`）會被 G08 判 FAIL 並要求重產。
+
+**其六（v2 補強），formal run 必須能證明自己依哪一版判準通過。**
+amendment 進了版控，不代表某次 run 知道自己用了哪一版。因此
+`AMENDMENT_PROVENANCE_KEYS`（`amendment_id` / `amendment_payload_hash` /
+`g08_contract_version`）同時成為：
+
+- `sigma_resolution.json` 的 `protocol_amendment` 區塊（G08 會驗雜湊是否與
+  `freeze/amendments/` 的實際記錄相符，不符即 FAIL）
+- `e1_scientific_rule.lock` 與 `formal_config.lock` 的必要 key
+  —— 沒帶追溯就凍不了
+
+`amendment_provenance()` 的雜湊一律**當下重算**而非從常數複製：
+記錄被改過時它會拋錯，而不是安靜寫出一個過期雜湊。
+
 **維護邊界**：
 - 不得因 `register_address` 為 CONFLICT/UNKNOWN 而判定 dataset 無效，
   或把 `e1_eligible_recordings` 歸零。
+- 不得把 `source_evidence_rank`、`derivation`、`conclusion_status`
+  合併回單一欄位。合併就會再次出現「rank-1 說了算」的誤讀。
+- 不得從 `e1_scientific_rule` / `formal_config` 的 required_keys
+  移除 amendment 追溯。
 - 不得將任一 register 位址宣告為 CONFIRMED，除非取得 rank-2 採集程式碼；
   取得後須依本條與 NOTE-010 複核，並開立新的 amendment。
 - 不得把 `RECONSTRUCTED` 加進 `PROVENANCE_GATE_SATISFYING`。
