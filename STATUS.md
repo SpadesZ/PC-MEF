@@ -456,6 +456,55 @@ draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitra
 
 ---
 
+## Phase A：Parameter registry（2026-08-28，configs/parameter_registry.yaml）
+
+**先前人工數的「10 個未校準常數」嚴重低估。實際掃描結果是 38 個參數，
+其中 29 個未解決。**
+
+| 分類 | 數量 |
+|---|---|
+| **總參數** | **38** |
+| fixed（物理常數／SRC-PLAN 錨點／rank-1 dataset） | 7 |
+| topology（類別語意決定，非可調） | 1 |
+| derived（由幾何決定） | 1 |
+| **calibration_only** | **29** |
+| **unresolved（PLACEHOLDER/UNKNOWN/RECONSTRUCTED）** | **29** |
+| formal_blocking | 30 |
+| class_specific | 5 |
+
+### 三個參數重複控制同一物理量（confounded groups）
+
+這是掃描才發現的問題 —— 同組內只有**組合**可辨識，分別校準會得到無限多組
+等價解，且結果無法解釋：
+
+| 組 | 物理量 | 成員 | 關係 |
+|---|---|---|---|
+| CG-1 | 介質消光係數 σt | `_SIGMA_T_REFERENCE_PER_M` + 三個密度 | `σt = density × reference` |
+| CG-2 | 回到感測器的絕對能量 | `irradiance` + `signal_energy_to_mcps` + `_FOIL_REFLECTANCE_940NM` | 三者相乘 |
+| CG-3 | Ambient Rate | `irradiance` + `_ROOM_LIGHT_RATIO` + `ambient_energy_to_mcps` | 三者相乘 |
+
+**每組必須先固定其中一個再校準其餘**，否則 calibration 不可解釋。
+固定哪一個尚未裁決。
+
+### 三個硬編、尚未參數化的量（掃描才發現）
+
+| 量 | 現值 | 問題 |
+|---|---|---|
+| `sensor.fov_deg` | **45.0** | **VL53L0X 實際約 25°**；此值直接決定哪些回波被收集 |
+| `light.cutoff_angle_deg` | 25.0 | VCSEL 發散角，硬編在 `build_scene_dict()` |
+| `foil_orientation` | facing_camera | SRC-HANDOFF 明列未回收，卻硬編為正對相機 |
+
+三者都不是具名參數，因此**任何 placeholder 防線都攔不到**。
+`sensor.fov_deg = 45` 與真實感測器差近一倍，是下一棒應優先確認的項目。
+
+### 已更正的 provenance 標記
+
+`_FOIL_GAP_TO_BOTTLE_RATIO = 1.0` 標為 **RECONSTRUCTED / calibration-only
+nuisance**，**不是** provenance-supported —— 箔片「存在」有依據，
+它「在哪」沒有。
+
+---
+
 ## AMD-001：E1-G08 協定修訂（2026-08-27 深夜，NOTE-028）
 
 **這是本專案第一次修改 gate 判準本身。** 記錄凍結於
