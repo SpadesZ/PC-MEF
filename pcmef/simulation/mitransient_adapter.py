@@ -4,7 +4,7 @@
 #         到 artifact 目錄，後者即 CanonicalCase 的 optical_transient_time_axis。
 # 檔案路徑: pcmef/simulation/mitransient_adapter.py
 # 產生時間: 2026-08-26 07:20 +08:00
-# 版本: v0.2.0
+# 版本: v0.4.0
 # 功能說明: 算出光在場景裡隨時間傳播的過程 —— 不是一張靜態影像，而是每個時間
 #           切片各一張，合起來就是單次 acquisition 內部的光飛行歷程。
 #           同時把 mitransient 用的光程長換算成秒，存成獨立的時間軸檔。
@@ -22,9 +22,16 @@
 #     一律 FAIL_FAST，因為它代表積分器參數已經不合理。
 #   - 不得沿用 cornell_box 的 start_opl=3.5 / bin_width=0.02；那是房間尺度的
 #     設定，本場景只有 5 公分，時間軸會整段落在有效範圍之外。
+#   - 不得把前緣餘裕改回相對比例（如 shortest * 0.9）：在 5 公分場景那只有
+#     0.73 個 bin，峰值會落在 bin 0 而量不到左側半高點（NOTE-027）。
+#   - 積分器不得改由呼叫端指定：帶介質卻用 transient_path 會靜默忽略介質，
+#     算得出圖但四類散射差異完全消失（NOTE-026）。
 #   - v0.2.0 修正：時間窗初版在峰值抵達前就關窗（實測峰值 OPL 0.465 m，
 #     初版窗尾僅 0.442 m），導致 FWHM 恆為 0；改由 scene_path_bounds 推導，
 #     並新增截斷偵測，讓這類錯誤在產出當下就中斷而非等下游發現。
+#   - v0.3.0 場景含參與介質時自動改用 transient_prbvolpath（NOTE-026）。
+#   - v0.4.0 前緣餘裕改以 bin 數表示並解出上界 m < shortest*N/end，
+#     bounce_budget 預設 7.0 → 3.0（NOTE-027）。
 #   - v0.1.0 新增：首版 transient smoke adapter。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "transient or reproducible" -v
@@ -126,8 +133,17 @@ def build_transient_scene_dict(
     RGB 與 transient 必須來自同一個場景，各建一份場景會讓兩者悄悄分歧。
     """
     scene = build_scene_dict(mi, config)
+    # NOTE(NOTE-026): 帶參與介質的場景必須用 volumetric 積分器。
+    # transient_path 會**靜默忽略** interior medium —— 算得出圖、能量也正常，
+    # 但四類的散射差異完全不見（實測：加介質前後總能量到小數點都相同）。
+    # 這種「看起來成功的錯」比崩潰危險，因此依場景內容自動選擇積分器。
+    has_medium = any(
+        isinstance(node, dict) and "interior" in node
+        for node in scene.values()
+        if isinstance(node, dict)
+    )
     scene["integrator"] = {
-        "type": "transient_path",
+        "type": "transient_prbvolpath" if has_medium else "transient_path",
         "max_depth": int(max_depth),
         "camera_unwarp": False,
         "temporal_filter": "box",
@@ -144,10 +160,17 @@ def build_transient_scene_dict(
     return scene
 
 
+#: 時間窗起點保留給首個回波前緣的 bin 數（NOTE-027）。
+#: 峰值落在 bin 0 時量不到左側半高點，FWHM 恆為 0，Sigma 映射整條路不可用 ——
+#: 這與 NOTE-013 的窗尾截斷是同一種病，只是發生在另一端。
+#: 8 個 bin 是「足以解析上升緣」的下界，不是校準值。
+_LEADING_MARGIN_BINS = 8
+
+
 class MiTransientAdapter:
     """optical transient 算圖的封裝。"""
 
-    def __init__(self, variant: str = DEFAULT_VARIANT, bounce_budget: float = 7.0) -> None:
+    def __init__(self, variant: str = DEFAULT_VARIANT, bounce_budget: float = 3.0) -> None:
         self.variant = variant
         self.bounce_budget = float(bounce_budget)
 
@@ -167,11 +190,31 @@ class MiTransientAdapter:
         改以 scene_path_bounds() 的直達路徑與場景跨距推導，並乘上反射次數預算。
         """
         shortest, extent = scene_path_bounds(config)
-        # 起點略早於直達路徑，避免因幾何近似而截掉首個回波。
-        start = shortest * 0.9
-        # 反射次數預算 7：實測末端能量落在 shortest + 約 6 倍場景跨距，取 7 留餘裕。
         end = shortest + self.bounce_budget * extent
-        return float(start), float((end - start) / temporal_bins)
+        # NOTE(NOTE-027): 前緣餘裕以 **bin 數** 表示，不用相對比例。
+        # 解 bin_width = (end - start)/N 且 start = shortest - m*bin_width，
+        # 得 bin_width = (end - shortest)/(N - m)，非循環。
+        #
+        # 餘裕有上界：start 不得 <= 0（光還沒離開發射器）。
+        # 由 m*(end-shortest)/(N-m) < shortest 解得 m < shortest*N/end。
+        # bin 數太少時窗口本身就粗，餘裕跟著被壓縮 —— 這是幾何事實，
+        # 不是可調參數，因此實際採用的 m 一律寫進 manifest 供事後核對。
+        margin_ceiling = int(shortest * temporal_bins / end) - 1
+        margin = max(1, min(_LEADING_MARGIN_BINS, margin_ceiling))
+        if temporal_bins <= margin:
+            raise SimulationDependencyError(
+                f"temporal_bins ({temporal_bins}) must exceed the leading margin "
+                f"({margin} bins); otherwise the window has no room for the echo."
+            )
+        bin_width = (end - shortest) / (temporal_bins - margin)
+        start = shortest - margin * bin_width
+        if start <= 0.0:
+            raise SimulationDependencyError(
+                f"derived start_opl ({start:.4f} m) is not positive; the leading "
+                f"margin ({margin} bins) does not fit in {temporal_bins} bins for a "
+                f"scene whose shortest path is {shortest:.4f} m."
+            )
+        return float(start), float(bin_width)
 
     def render_transient(
         self,

@@ -324,6 +324,193 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-027 瓶壁必須是 roughdielectric，時間窗前緣餘裕以 bin 數表示
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/simulation/mitsuba_adapter.py` 的 `bottle_wall` BSDF 與
+`_BOTTLE_SURFACE_ALPHA`；`pcmef/simulation/mitransient_adapter.py` 的
+`default_binning()`、`_LEADING_MARGIN_BINS` 與 `bounce_budget` 預設值。
+
+**決策**：
+
+1. 瓶壁 BSDF 由 `dielectric` 改為 **`roughdielectric`**（GGX，
+   `_BOTTLE_SURFACE_ALPHA = 0.02`）。此值不得為 0。
+2. 時間窗前緣餘裕改以 **bin 數**（`_LEADING_MARGIN_BINS = 8`）表示，
+   不再用 `shortest * 0.9` 這種相對比例。
+3. `bounce_budget` 預設由 **7.0 改為 3.0**。
+
+**原因**：
+
+**其一，delta 光源配 delta BSDF 是採樣不到的路徑。** NOTE-026 把光源改成
+共置的 `spot`（delta 光源）之後，瓶壁若是完全光滑的 `dielectric`（delta BSDF），
+兩者之間的鏡面路徑在標準 path tracing 中機率為零 —— 這是經典的 SDS 問題。
+於是瓶子**結構上完全不回光**，不是回得少。實測證據：
+
+| 量測 | 值 |
+|---|---|
+| 有能量的像素 | 234 / 4096（**5.7%**），全部在畫面最左與最右兩條窄邊 |
+| 中央 16×16（瓶身正中）能量佔比 | **0.02%** |
+| 四類 distance | 全部 **261.28 mm**（= 背景板），與瓶內容物無關 |
+
+瓶身對相機張開 `asin(28.5/78.5) = 21.3°`，相機半視角 22.5°，因此只在左右各留
+一條 21.3°–22.5° 的窄縫看得到背景板；上下沒有窄縫，因為圓柱高 114 mm
+而 50 mm 處的可見半高只有 20.7 mm，垂直方向永遠被瓶身擋住。
+唯一回到感測器的能量就是那兩條窄縫後方的背景板 —— 四類同值的原因。
+
+改成 `roughdielectric` 後總能量由 325 / 294 / 283 / 298 變成
+**37,248 / 346,095 / 119,154 / 56,049**（Empty / Water / Bubbly / Misty），
+distance 恢復隨內容物變化。
+
+粗糙度不是為了讓數字好看而加的：真實 PET／玻璃瓶本來就有微觀表面粗糙度，
+理想鏡面才是不真實的假設。**但 0.02 這個值尚未校準**，真值須由 E1
+calibration 決定。
+
+**其二，相對比例的前緣餘裕在小場景等於沒有餘裕。** 舊式 `start = shortest * 0.9`
+在 shortest = 0.10 m、bin 寬 0.0137 m 時只有 **0.73 個 bin**。瓶子開始回光後
+峰值就落在 bin 0，量不到左側半高點，FWHM 恆為 0，`map_sigma_like()` 直接
+拒絕輸出 —— 與 NOTE-013 的窗尾截斷是同一種病，只是發生在另一端。
+
+改以 bin 數表示後可解析且與場景尺度無關：由 `bin_width = (end - start)/N`
+與 `start = shortest - m*bin_width` 得 **`bin_width = (end - shortest)/(N - m)`**，
+非循環。餘裕另有上界 —— `start` 不得 ≤ 0（光還沒離開發射器）——
+由同一組式子解得 **`m < shortest*N/end`**。bin 數太少時餘裕被壓縮是幾何事實，
+不是可調參數，因此實際採用的 m 一律寫進 manifest 供事後核對。
+
+**其三，`bounce_budget = 7` 是在「瓶子不回光」的舊場景上量的。**
+NOTE-013 當時實測末端能量落在 1.675 m，那是 area emitter + 光滑瓶壁的結果。
+新場景實測四類能量**全部終止於 OPL ≤ 0.646 m**（= shortest + 2.19×extent），
+而舊窗尾 1.8465 m 讓三分之二的解析度落在永遠沒有能量的區間。
+取 3.0 使窗尾為 0.8485 m，對實測末端仍有 31% 餘裕。
+
+**驗證**：
+```
+export PATH="/c/Program Files/LLVM/bin:$PATH"
+py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml \
+    --out outputs/rough_win_2140
+py -3.10 -m pcmef.cli surrogate smoke \
+    --simulation-out outputs/rough_win_2140 --out outputs/rough_win_2140_surrogate
+py -3.10 -m pytest tests/simulation tests/surrogate -q
+```
+窗口推導在 32/64/128/256 bins 下 `start_opl` 均為正，首回波分別落在
+bin 2.00 / 6.00 / 8.00 / 8.00，窗尾恆為 0.8485 m。
+
+**尚未解決**：distance 現在會隨內容物變化，但仍是雙峰的
+**45.35 mm（Empty、Misty）／285.6 mm（Water、Bubbly）**，
+而真實資料為 Empty 100.91 / Water 113.87 / Bubbly 105.57 / Misty 79.51 mm ——
+四類落在 79–114 mm 的連續區間，對應瓶子遠壁（107 mm）而非前緣（50 mm）。
+模擬取的是全域峰值，真實 VL53L0X 取的不是。這一步尚未裁決，
+**在此之前 distance 一欄不得用於任何 fidelity 主張**。
+
+**維護邊界**：
+- `_BOTTLE_SURFACE_ALPHA` 不得設為 0，會退回 delta BSDF 並復現上述
+  「瓶子完全不回光」的狀態，而且**不會有任何錯誤訊息**。
+- `_BOTTLE_SURFACE_ALPHA`、`_LEADING_MARGIN_BINS`、`bounce_budget`
+  都是未校準的建模常數，與 NOTE-026 的 `_ROOM_LIGHT_RATIO` 等同屬
+  `calibration.py` 的 placeholder 防線攔不到的缺口；
+  凍結 `initial_simulation.lock` 前必須一併處理。
+- 不得為了讓 distance 對上真實均值而調整這三個常數中的任何一個。
+
+相關：[NOTE-013]、[NOTE-026]、[NOTE-005]
+
+---
+
+## NOTE-026 收發同軸的場景幾何，與「參與介質必須真的進積分器」
+
+**決策日期**：2026-08-27
+
+**適用範圍**：`pcmef/simulation/mitsuba_adapter.py` 的 `build_scene_dict()`、
+`scene_path_bounds()`、`_medium_dict()`；`pcmef/simulation/mitransient_adapter.py`
+的 `build_transient_scene_dict()` 積分器選擇。
+
+**決策**：
+
+1. **光源與相機共置（monostatic）**，型別由 `rectangle` + area emitter 改為
+   `spot`（`cutoff_angle` 25°），座標與 sensor 完全相同。
+2. **最短光程改為 `2.0 * sensor_to_bottle`**，不再由光源座標另算一條斜邊。
+3. **場景含參與介質時，積分器改用 `transient_prbvolpath`**；無介質時維持
+   `transient_path`。依場景內容自動選擇，不由呼叫端指定。
+4. **另加一盞 `constant` 環境光**（`_ROOM_LIGHT_RATIO = 0.02`），與感測器
+   自己的 spot 分開。
+
+**原因**：
+
+**其一，共置是 `optical_path_to_distance = 0.5` 的幾何前提。** SRC-SAI §10
+明令不得把這個係數當旋鈕去逼近真實均值。舊場景的光源在
+`(0, outer_r*4, camera_z*0.5)` —— 離軸且離相機很遠，光程是一條斜邊加一段回程，
+根本不是單程距離的兩倍。在那個幾何下 `0.5` 沒有任何物理依據，
+唯一能讓距離對上的方法就是去調係數，而那正是規格禁止的事。
+改成共置之後，`0.5` 由幾何成立，係數不再是自由參數。
+
+用 `spot` 而非把 rectangle 搬到相機位置，有兩個理由：rectangle 是實體幾何，
+放在相機同一點會與相機視線互相遮擋；而 VL53L0X 的 VCSEL 本來就是帶發散角的
+點狀照明，spot 更貼近實物。
+
+**其二，`transient_path` 會靜默忽略 interior medium。** 這是最危險的一種錯：
+算得出圖、能量數值也正常，但四類的散射差異完全不存在 —— 實測加介質前後
+總能量到小數點都相同。沒有任何例外、任何警告。改用 volumetric 積分器後，
+四類總能量由「幾乎相同」變成有實質差異（見驗證）。
+
+依場景內容自動選擇而非由呼叫端指定，是因為「加了介質但忘了換積分器」
+不會有任何症狀，而這個系統要比較的正是散射行為。讓兩者無法分離，
+就不可能忘記。
+
+**其三，環境光必須與感測器的光分開。** 改成 monostatic 之後場景只剩感測器
+自己發光，`ambient_rate` 會恆為 0 —— 而真實 VL53L0X 的 ambient 量的正是
+「不是自己打出去的光」。少了它，四特徵中的 ambient 這一欄不具意義，
+E1 會在一個恆為零的欄位上比較分佈。
+
+**驗證**：
+```
+export PATH="/c/Program Files/LLVM/bin:$PATH"     # drjit 執行期需要 LLVM-C.dll
+py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml \
+    --out outputs/baseline_2116
+py -3.10 -m pcmef.cli surrogate smoke \
+    --simulation-out outputs/baseline_2116 --out outputs/baseline_2116_surrogate
+```
+四類總能量 **325.0 / 294.5 / 282.9 / 298.2**（Empty / Water / Bubbly / Misty），
+落差約 13%。改動前的 area-emitter + `transient_path` 版本為
+3908.9 / 3898.9 / 3879.0 / 3875.9，落差僅 0.8% —— 那 0.8% 是幾何與 seed 造成的，
+不是散射。ambient / signal / sigma 三欄在改動後都取得類別差異。
+
+**已知後果，尚未解決 —— distance 一欄同時失去了類別鑑別力。**
+四類 distance 全部等於 **261.28 mm**（真實資料為 Empty 100.91 / Water 113.87
+/ Bubbly 105.57 / Misty 79.51 mm）。根因已定位，不是係數問題：
+
+| 事實 | 數值 |
+|---|---|
+| 瓶身對相機張開的半角 | `asin(28.5/78.5)` = **21.3°** |
+| 相機半視角（fov 45°） | **22.5°** |
+| 有能量的像素 | **234 / 4096（5.7%）**，全部集中在畫面最左與最右兩條窄邊 |
+| 中央 16×16（瓶身正中）能量佔比 | **0.02%** |
+| 峰值所在 | bin 31，distance 261.13 mm ≈ 背景板（幾何預期 249.5 mm） |
+
+瓶身幾乎填滿整個視野，只在左右各留一條 21.3°–22.5° 的窄縫看得到背景板；
+而瓶壁是**完全光滑的 `dielectric`**，在共置照明下鏡面反射一律偏離光源，
+除了正射入射那一點之外不回光。於是唯一回到感測器的能量來自那兩條窄縫後方的
+背景板，其距離與瓶內裝什麼無關 —— 四類同值。
+
+上下兩條邊沒有能量，因為圓柱高 114 mm，在 50 mm 距離的可見半高只有 20.7 mm，
+垂直方向永遠被瓶身擋住。只有左右看得到瓶身輪廓外。
+
+修法屬於場景與 BSDF 的建模決策（候選：`roughdielectric` 表面粗糙度、
+背景板配置、感測器 FOV 加權），**尚未裁決**，另立 NOTE 記錄。
+在此之前 distance 一欄不得用於任何 fidelity 主張。
+
+**維護邊界**：
+- 不得為了讓 distance 對上真實均值而調整 `optical_path_to_distance`
+  或搬動背景板（SRC-SAI §10 禁止做法）。本條目的整個重點就是讓那個係數
+  由幾何決定而非由擬合決定。
+- `_ROOM_LIGHT_RATIO`、`_SIGMA_T_REFERENCE_PER_M`、`_ALBEDO_BY_PRESET`
+  全部是**未校準的建模常數**，真值須由 E1 calibration 產出。
+  它們不在 `calibration.py` 的 placeholder 清單內，因此 formal 模式的
+  自動防線攔不到 —— 這是已知缺口，凍結 `initial_simulation.lock` 前必須處理。
+- 積分器不得改回由呼叫端指定。
+
+相關：[NOTE-005]、[NOTE-013]、[NOTE-012]
+
+---
+
 ## NOTE-025 Console 只探索不凍結，即時輸出以檔案為單一真相
 
 **決策日期**：2026-08-27

@@ -4,7 +4,7 @@
 #         mitransient_adapter 重用，確保 RGB 與 transient 來自同一場景。
 # 檔案路徑: pcmef/simulation/mitsuba_adapter.py
 # 產生時間: 2026-08-26 06:35 +08:00
-# 版本: v0.1.0
+# 版本: v0.3.0
 # 功能說明: 把場景設定翻成 Mitsuba 能懂的場景描述並算出一張 RGB 影像，
 #           同時記下算圖當下的所有版本與參數，讓同樣的輸入日後能算出同樣的結果。
 # 模組定位: Mitsuba 的封裝層。它「不是」物理校準器 —— 本批次只做 single-scenario
@@ -20,7 +20,18 @@
 #   - 不得在 retry 時更換 seed；SRC-SAI §28 規定 render 失敗只能以相同
 #     config/seed 重試，換 seed 等於偷換實驗條件。
 #   - 不得把本模組產出的影像當成 real-fidelity 證據；claim boundary 見 E1-G12。
+#   - 不得把 _BOTTLE_SURFACE_ALPHA 設為 0：會退回 delta BSDF，與 delta 光源
+#     之間的鏡面路徑採樣機率為零，瓶子完全不回光，且不會有任何錯誤訊息
+#     （NOTE-027）。
+#   - 本檔的 _ROOM_LIGHT_RATIO / _BOTTLE_SURFACE_ALPHA /
+#     _SIGMA_T_REFERENCE_PER_M / _ALBEDO_BY_PRESET 皆為未校準建模常數，
+#     且不在 surrogate/calibration.py 的 placeholder 防線內 —— 凍結
+#     initial_simulation.lock 前必須納入（NOTE-026、NOTE-027）。
 #   - v0.1.0 新增：首版 RGB smoke adapter。
+#   - v0.2.0 光源改為與相機共置的 spot、另加室內環境光，最短光程改由
+#     共置幾何推導（NOTE-026）。
+#   - v0.3.0 瓶壁由 dielectric 改為 roughdielectric，解決 SDS 導致
+#     瓶子完全不回光（NOTE-027）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "rgb or variant or scale" -v
 # ------------------------------------------------------------
@@ -141,13 +152,27 @@ def scene_path_bounds(config: ScenarioConfig) -> tuple[float, float]:
     outer_r = geometry.outer_radius_mm / _MM_PER_M
     sensor_distance = geometry.sensor_to_bottle_mm / _MM_PER_M
     camera_z = -(sensor_distance + outer_r)
-    light_position = (0.0, outer_r * 4.0, camera_z * 0.5)
     backdrop_z = outer_r * 6.0
 
-    light_to_bottle = math.dist(light_position, (0.0, 0.0, -outer_r))
-    shortest = light_to_bottle + sensor_distance
+    # NOTE(NOTE-026): 收發同軸（monostatic），光源與相機在同一點，
+    # 因此最短光程就是「相機 -> 瓶面 -> 相機」的來回，恰為單程距離的兩倍。
+    # 這正是 optical_path_to_distance = 0.5 成立的幾何前提。
+    shortest = 2.0 * sensor_distance
     extent = max(backdrop_z - camera_z, outer_r * 4.0)
     return float(shortest), float(extent)
+
+
+#: 室內環境光相對於感測器 VCSEL 的強度比。**建模常數，尚未校準** ——
+#: 真實比例必須由 E1 calibration 決定。取小值是因為 ToF 感測器的
+#: signal rate 應由自己的發射器主導，ambient 只是背景。
+_ROOM_LIGHT_RATIO = 0.02
+
+#: 瓶壁表面的 GGX 粗糙度。**建模常數，尚未校準** ——
+#: 真值須由 E1 calibration 決定（NOTE-027）。取小值代表「接近光滑但不是理想
+#: 鏡面」，對應 PET/玻璃瓶實際的微觀表面。這個值不得為 0：
+#: 0 會退化成 delta BSDF，與 delta 光源之間的鏡面路徑在 path tracing 中
+#: 機率為零，瓶子會完全不回光。
+_BOTTLE_SURFACE_ALPHA = 0.02
 
 
 def _look_at(mi, origin, target, up):
@@ -203,27 +228,51 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
             },
         },
         # 瓶壁：玻璃介電質。折射率為玻璃的通用值，非校準結果。
+        # NOTE(NOTE-027): 必須是 roughdielectric 而非 dielectric。
         "bottle_wall": {
             "type": "cylinder",
             "p0": [0.0, -height / 2, 0.0],
             "p1": [0.0, height / 2, 0.0],
             "radius": outer_r,
-            "bsdf": {"type": "dielectric", "int_ior": "bk7", "ext_ior": "air"},
+            "bsdf": {
+                "type": "roughdielectric",
+                "int_ior": "bk7",
+                "ext_ior": "air",
+                "distribution": "ggx",
+                "alpha": _BOTTLE_SURFACE_ALPHA,
+            },
         },
+        # NOTE(NOTE-026): 光源與相機共置（monostatic），對應 VL53L0X 的
+        # VCSEL 與 SPAD 同軸配置。用 spot 而非 area rectangle 有兩個理由：
+        # 其一，rectangle 是實體幾何，放在相機同一點會與相機視線重疊；
+        # 其二，VCSEL 本來就是帶發散角的點狀照明，spot 更貼近實物。
+        # 共置讓光程恰為單程距離的兩倍，surrogate 的
+        # optical_path_to_distance = 0.5 因此由幾何成立，不必調係數去湊。
         "light": {
-            "type": "rectangle",
+            "type": "spot",
             "to_world": _look_at(
                 mi,
-                origin=[0.0, height, camera_z * 0.5],
+                origin=[lateral, 0.0, camera_z],
                 target=[0.0, 0.0, 0.0],
-                up=[0.0, 0.0, 1.0],
+                up=[0.0, 1.0, 0.0],
             ),
-            "emitter": {
-                "type": "area",
-                "radiance": {
-                    "type": "rgb",
-                    "value": [config.lighting.irradiance] * 3,
-                },
+            "cutoff_angle": 25.0,
+            "intensity": {
+                "type": "rgb",
+                "value": [config.lighting.irradiance] * 3,
+            },
+        },
+        # NOTE(NOTE-026): 室內環境光，與感測器自己的 spot 分開。
+        # 改成 monostatic 之後場景只剩感測器發光，ambient 會恆為 0 ——
+        # 而真實 VL53L0X 的 ambient rate 量的正是「不是自己打出去的光」，
+        # 也就是室內光。少了它，四特徵中的 ambient 這一欄不具意義。
+        # 比例為建模常數，尚未校準：真實室內光與 VCSEL 的相對強度
+        # 必須由 E1 calibration 決定。
+        "room_light": {
+            "type": "constant",
+            "radiance": {
+                "type": "rgb",
+                "value": [config.lighting.irradiance * _ROOM_LIGHT_RATIO] * 3,
             },
         },
         "backdrop": {
@@ -238,16 +287,84 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
         },
     }
 
-    # 內部介質。Empty 代表空氣，不放額外幾何；其餘放一個內圓柱代表液體/氣霧。
+    # 內部介質。Empty 代表空氣，不放額外幾何；其餘放一個內圓柱代表液體/氣霧，
+    # 並在其內部掛上參與介質（participating medium）。
+    #
+    # NOTE(NOTE-026): 沒有參與介質時，Water / Bubbly / Misty 會是三個
+    # **完全相同**的場景 —— 同一個 dielectric 內圓柱，只有 seed 不同。
+    # 那會讓四類在 distance 上得到同一個值，E1 要比較的分佈差異根本不存在。
+    # 本研究要區分的正是散射行為，因此散射必須真的進場景。
     if config.medium_preset.value != "empty":
-        scene["bottle_interior"] = {
+        interior: dict[str, Any] = {
             "type": "cylinder",
             "p0": [0.0, -height / 2 * 0.98, 0.0],
             "p1": [0.0, height / 2 * 0.98, 0.0],
             "radius": inner_r,
             "bsdf": {"type": "dielectric", "int_ior": "water", "ext_ior": "bk7"},
         }
+        medium = _medium_dict(config)
+        if medium is not None:
+            interior["interior"] = medium
+        scene["bottle_interior"] = interior
     return scene
+
+
+#: 把設定裡的無單位密度換算成散射係數 sigma_t (1/m) 的參考尺度。
+#: 選 100 是為了讓瓶徑 5.7 cm 在密度 0.1–0.3 時得到光學厚度 τ≈0.6–1.7，
+#: 也就是「看得見但不到全散射」的範圍 —— 這是**建模常數，尚未校準**。
+#: 真正的值必須由 E1 calibration 決定；在此之前上游的密度參數仍是 placeholder，
+#: formal 模式會在 ScenarioConfig 就拒絕載入，不會走到這裡。
+_SIGMA_T_REFERENCE_PER_M = 100.0
+
+#: 各類的單次散射反照率。Bubbly/Misty 以散射為主，Water 另有吸收。
+#: 同樣是尚未校準的建模常數。
+_ALBEDO_BY_PRESET: dict[str, float] = {
+    "water": 0.60,
+    "bubbly": 0.92,
+    "misty": 0.88,
+}
+
+#: 各類的密度參數名稱，對應 configs/simulation/*.yaml 的 medium 欄位。
+_DENSITY_KEY_BY_PRESET: dict[str, str] = {
+    "water": "turbidity",
+    "bubbly": "bubble_density",
+    "misty": "mist_density",
+}
+
+
+def _medium_value(raw: Any) -> float | None:
+    """取出介質參數的數值。placeholder 以 {'value': x, 'placeholder': True} 表示。"""
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
+def _medium_dict(config: ScenarioConfig) -> dict[str, Any] | None:
+    """由設定的密度參數組出 homogeneous participating medium。
+
+    參數缺失時回傳 None（退回純 dielectric），而不是自己補一個預設密度 ——
+    補值會讓「忘了設定」與「刻意設成很稀」長得一樣，
+    而前者應該被看見（NOTE-005 的同一個道理）。
+    """
+    preset = config.medium_preset.value
+    key = _DENSITY_KEY_BY_PRESET.get(preset)
+    if key is None:
+        return None
+    density = _medium_value(config.medium_parameters.get(key))
+    if density is None or density <= 0.0:
+        return None
+
+    sigma_t = density * _SIGMA_T_REFERENCE_PER_M
+    albedo = _ALBEDO_BY_PRESET[preset]
+    return {
+        "type": "homogeneous",
+        # sigma_t 用 uniform 而非 rgb：rgb spectrum 會被當成反照率並限制在
+        # [0,1]，而消光係數的單位是 1/m，數值遠大於 1。
+        "sigma_t": {"type": "uniform", "value": sigma_t},
+        "albedo": {"type": "rgb", "value": [albedo] * 3},
+    }
 
 
 class MitsubaAdapter:
