@@ -600,25 +600,98 @@ signal / ambient / sigma 都恢復了鑑別力，**distance 只修到一半**。
 | Bubbly | 21.1% | 85.9 mm（15.3%） | 285.5 mm（**54.8%**） |
 | Misty | **51.1%** | 120.2 mm（4.6%） | 291.7 mm（33.0%） |
 
-**三個峰的身分已確認：**
+**目前能宣稱到什麼程度（措辭刻意保守）：**
 
-1. **45.32 mm 峰** = 瓶外壁前緣的一次鏡面反射（幾何 50.00，差 −4.7 mm ≈
-   0.75 個 bin，bin 寬 6.24 mm）。四類都有且位置完全相同 —— 它只反映
-   瓶子外表面，**與內容物無關**，這正是先前 Empty/Misty 取到 45.35 的原因。
-2. **285–292 mm 峰** = 背景板。軸上幾何 249.5 mm，實際偏大 36–42 mm，
-   因為相機 45° FOV 的離軸像素看到的背景板更遠，且部分光經瓶身折射後路徑更長。
-   Water/Bubbly 取到 285.6 就是這個峰蓋過其他峰。
-3. **中段峰**（60.9 / 85.9 / 120.2 / 142.0 mm）才是**唯一隨內容物變化**的成分，
-   位置落在瓶內壁前緣到瓶外壁後緣之間 —— 也就是真實感測器讀到的區段。
+| 成分 | 可宣稱 | **不可**宣稱 |
+|---|---|---|
+| 45.32 mm | bottle **front-related** component | 已完成的 front-surface path lineage |
+| 285–292 mm | **background-board-related** component | — |
+| 中段 | **content-sensitive** component | 「= far-side bottle/foil return」 |
 
-**真實資料支持這個分解，而且不需要任何調參**：四類真實均值
-79.51–113.87 mm 圍繞瓶外壁後緣 107.00 mm；Water 比 Empty 長 **12.96 mm**，
-而水（n=1.333）填滿 53 mm 內徑的預期單程光程延遲是 **+8.82 mm** ——
-同號、同量級。Misty 比 Empty 短 21.40 mm，對應散射使回波前緣提早。
+45.32 mm 與瓶外壁前緣幾何 50.00 相差 0.75 個 bin，四類位置完全相同、
+與內容物無關；285–292 與背景板軸上幾何 249.5 相差 36–42 mm，方向與
+離軸／折射一致。這兩者的歸屬有幾何支持。
 
-**因此 estimator 的問題已經定性**：不是「45.35 和 285.6 挑一個」，
-而是**現行的全域峰值判定同時被一個與內容物無關的前緣鏡面反射
-和一個場景佈景假影主導**，真正帶資訊的中段峰在四類中佔比只有 3–42%。
+**中段成分不得宣稱為遠壁回波。** 四類位置 Empty 142.0 / Water 60.9 /
+Bubbly 85.9 / Misty 120.2 mm 差距過大：若是同一個反射面因介質改變而平移，
+加水應使光程變**長**，但 Water 反而最短。這代表中段很可能是**數個不同
+optical-path family 混在一起**，而不是單一 reflector。path lineage 尚未建立。
+
+**水的 OPL sanity check（2026-08-28 修正）**：monostatic 往返通過厚度 L
+的水，額外 OPL = `2L(n−1)`；ToF 除以 2 後表觀距離增量為
+**`Δd = (n−1)L = 0.333 × 53 ≈ 17.65 mm`**。
+
+> 先前本節記載 8.82 mm 是**錯的** —— 該值把 `L(n−1)` 又除了一次 2。
+> 錯誤值曾寫入 commit 684d457 的訊息，該處無法更正，以本節為準。
+
+實測 `Water − Empty = +12.96 mm`，與理想全水路徑 +17.65 mm 同號同量級，
+但**小於**它。可能原因（**皆為 hypothesis，不得選一個當解釋**）：有效光程
+未完整穿越 53 mm、多路徑混合、瓶壁折射、接收 FoV 加權。
+
+**因此問題定位為 scene physics mismatch，不是 estimator 選擇問題。**
+Empty 的 45 mm 成分佔 67.4%，任何前緣偵測器都會先抓到它；為了跳過它而加入
+minimum distance / ignore-first-reflection 之類的規則，就是用 estimator
+去補場景的錯 —— 那與「用 real class mean 建搜尋窗」是同一種偷渡。
+**修場景在前，設 estimator 在後。**
+
+### Scene/path decomposition（2026-08-28）
+
+**發現 A —— Empty 的瓶子被建成實心玻璃柱，不是玻璃殼。** 這由程式碼直接可驗，
+不依賴任何峰值比對：`build_scene_dict()` 的 `bottle_interior` **只在
+`medium_preset != "empty"` 時建立**，因此 Empty 場景裡半徑 28.5 mm 的
+`bottle_wall` 是一根**實心 bk7 圓柱**，光要穿過 57 mm 的玻璃。
+真實的空瓶應該是「2 mm 殼 + 53 mm 空氣 + 2 mm 殼」。
+
+| Empty 的遠側表觀距離 | 值 |
+|---|---|
+| 現行（實心玻璃 57 mm） | 136.46 mm |
+| **正確（殼＋空氣＋殼）** | **109.07 mm** |
+| 實測中段成分 | 142.0 mm（距實心玻璃預期 +5.54 mm ≈ 1.8 個 distance-bin） |
+
+bin 寬為 3.12 mm（OPL bin 6.237 mm 的一半），所以 1.8 bin 的殘差**不算緊密吻合**，
+只能說「與實心玻璃假設相容、與殼假設不相容」。
+
+**發現 B —— 四個中段成分確實是不同的 path family，不是同一反射面平移。**
+
+| 場景 | 實測中段 | 最接近的路徑假設 | 殘差 |
+|---|---|---|---|
+| Empty | 142.0 | 實心玻璃遠側 136.46 | +5.5 mm |
+| Water | 60.9 | **玻璃→水 前介面 53.03** | +7.9 mm |
+| Water | 60.9 | （殼＋水＋殼遠側 126.72） | **−65.8 mm** |
+
+Water 的中段成分靠近**內側前介面**，離遠側差 65.8 mm。Empty 的則靠近遠側。
+兩者不可能是同一個 reflector 因介質改變而平移 —— 這證實了先前
+「中段峰 = far-side return」的說法必須撤回。
+
+**發現 C —— 背景板無 provenance，且 ToF 光路終結在它上面。**
+場景只有一個 `backdrop`（diffuse rectangle、reflectance 0.5、z = 171 mm），
+它是為了讓 RGB 有背景才加的。SRC-PLAN 與 SRC-HANDOFF 都沒有支持
+「該位置有一塊漫反射板」。反而 SRC-HANDOFF §0 把
+「aluminum-foil 的 offset / orientation / BRDF / 940 nm reflectance」
+列為**未回收**，這正表示真實裝置的遠端目標是**鋁箔**。
+目前 285–292 mm 成分在 Water/Bubbly 佔 47–55% 能量 —— 一個純 RGB 佈景物件
+主導了 ToF 通道。
+
+**尚未查明 —— 45 mm front 成分為何在模擬中如此強（Empty 佔 67.4%）。**
+待查清單（**不得先用 estimator 繞開**）：瓶身曲率與法線分佈、
+`_BOTTLE_SURFACE_ALPHA` 的 GGX lobe 寬度、bk7 IOR 在 940 nm 的適用性、
+spot 的 `cutoff_angle` 與接收端 FoV 加權、以及該成分的 specular path lineage
+（單次反射 vs 多次）。目前只知道它與內容物無關且四類位置相同。
+
+**下一棒的順序（不得跳過）**：
+1. 移除或隔離純 RGB 需求造成的 ToF background artifact
+2. 建立 provenance-supported 的 far-side aluminum-foil reflector，
+   光學常數一律標記為 **calibration-only nuisance parameters**
+3. 修正 Empty 的殼結構（發現 A）
+4. 查明 45 mm 成分過強的原因
+5. 確認修正後是否存在**四類共同、物理一致**的 far-side return family
+
+以上完成後才設計 estimator，且措辭一律為
+**VL53L0X-inspired / VL53L0X-like transient range estimator** ——
+ST 公開的是 `RangeMilliMeter` / Signal / Ambient / RangeStatus 與
+Signal Fail、Sigma Fail、Range Ignore Threshold 等門檻機制，
+**沒有公開「最終 range 由 ranging window 內的 leading-edge + centroid 得出」**。
+不得宣稱為 internal algorithm 的重現。
 
 ### 還沒解決的那一半
 
