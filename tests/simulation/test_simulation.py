@@ -153,12 +153,73 @@ def test_smoke_mode_allows_placeholder_but_flags_it():
     assert config.medium_value("bubble_density") == 0.3
 
 
-def test_medium_without_placeholder_flag_passes_formal():
+def _clean_parameter_registry(tmp_path, monkeypatch):
+    """給 formal 建構一份真的乾淨 registry，以便單獨驗其他 formal 行為。
+
+    刻意**不** mock 掉 assert_formal_ready()：mock 掉防線本身會讓
+    「防線被拿掉」與「防線通過」在測試裡長得一模一樣。
+    """
+    import yaml
+
+    from pcmef.core import parameters as parameters_module
+
+    path = tmp_path / "clean_registry.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "registry_version": "test-clean",
+                "parameters": [
+                    {
+                        "name": "only_parameter",
+                        "source": "test",
+                        "role": "test",
+                        "value": 1.0,
+                        "provenance_status": "CONFIRMED",
+                        "kind": "fixed",
+                        "class_scope": "shared",
+                        "formal_blocking": True,
+                    }
+                ],
+                "confounded_groups": [],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(parameters_module, "DEFAULT_REGISTRY_PATH", path)
+
+
+def test_medium_without_placeholder_flag_is_not_what_blocks_formal(tmp_path, monkeypatch):
+    """兩層 formal 防線必須分得開：介質層過了，參數層仍可能擋。
+
+    NOTE-030 之後 formal 建構同時受兩道檢查管制。這一條驗的是「沒有標
+    placeholder 的介質參數不會觸發**介質層**那道」—— 因此被擋下來時理由必須
+    是參數集，不是 placeholder keys。理由指錯地方，下一棒就會去修錯的東西
+    （NOTE-018 是同一個教訓）。
+    """
+    with pytest.raises(ScenarioConfigError) as error:
+        ScenarioConfig(
+            class_label="Bubbly", seed=1, medium_parameters={"bubble_density": 0.3},
+            formal=True,
+        )
+    message = str(error.value)
+    assert "not formal-ready" in message
+    assert "placeholder medium parameters" not in message
+
+    # 參數層滿足後，介質層確實放行。
+    _clean_parameter_registry(tmp_path, monkeypatch)
     config = ScenarioConfig(
         class_label="Bubbly", seed=1, medium_parameters={"bubble_density": 0.3},
         formal=True,
     )
     assert not config.uses_placeholder_medium()
+
+    # 而標了 placeholder 的介質參數仍必須被介質層擋下。
+    with pytest.raises(ScenarioConfigError, match="placeholder medium parameters"):
+        ScenarioConfig(
+            class_label="Bubbly", seed=1, medium_parameters=PLACEHOLDER_MEDIUM,
+            formal=True,
+        )
 
 
 def test_unknown_class_label_is_rejected():
@@ -190,11 +251,17 @@ def test_scene_hash_is_stable_and_sensitive():
     assert a.scene_hash() != c.scene_hash()
 
 
-def test_scene_hash_ignores_the_formal_flag():
-    """同一場景在 smoke 與 formal 下應是同一場景；模式差異由 manifest 記錄。"""
+def test_scene_hash_ignores_the_formal_flag(tmp_path, monkeypatch):
+    """同一場景在 smoke 與 formal 下應是同一場景；模式差異由 manifest 記錄。
+
+    NOTE-030 之後建構 formal config 需要參數層放行，因此先給一份乾淨 registry。
+    這條驗的仍是 scene_hash 的性質，不是防線。
+    """
+    _clean_parameter_registry(tmp_path, monkeypatch)
     plain = ScenarioConfig(class_label="Empty", seed=1)
     formal = ScenarioConfig(class_label="Empty", seed=1, formal=True)
     assert plain.scene_hash() == formal.scene_hash()
+    assert "formal" not in plain.to_dict()
 
 
 def test_from_mapping_parses_the_documented_shape():

@@ -324,6 +324,340 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-033 角度慣例實測：fov 是全角、cutoff_angle 是半角，且硬編值一律參數化
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/simulation/mitsuba_adapter.py` 的 `_SENSOR_FOV_DEG`、
+`_LIGHT_CUTOFF_ANGLE_DEG`、`_MAX_DEPTH`、`_FOIL_ORIENTATION` 與
+`_foil_transform()`；`configs/parameter_registry.yaml` 的 `sensor.fov_deg`、
+`light.cutoff_angle_deg`、`foil_orientation`、`max_depth`。
+
+**決策**：
+
+1. 把 `build_scene_dict()` 內 dict literal 的四個字面值提升為具名模組常數。
+   **數值一個都沒有改。**
+2. `sensor.fov_deg = 45` **不改成 25**，維持 UNKNOWN 且 formal-blocking。
+3. `_foil_transform()` 只實作 `facing_camera`，其餘取值一律拒絕而非退回預設。
+4. 兩個角度的慣例差異寫進檔頭維護提醒與 registry note。
+
+**原因**：
+
+**其一，硬編值不是任何防線看得見的東西。** 這四個量都會決定四特徵，卻不是
+具名常數，因此 `parameter_registry` 的 live-value 綁定抓不到它們 ——
+registry 可以宣稱 `sensor.fov_deg = 45`，程式改成 60 也不會有任何症狀。
+參數化之後 `live_value_drift()` 才有對象可比。
+
+**其二，「45 對 25 差近一倍」這句話裡的兩個數字慣例不同。** 這是本次實測結果，
+不是查文件：
+
+| 量 | 設定值 | 實測 | 慣例 |
+|---|---|---|---|
+| perspective `fov` | 45 | 單邊半角 **22.4959°**、對角 **30.3562°** | **全角**，預設綁 x 軸 |
+| spot `cutoff_angle` | 25 | 24.9° 仍有輻射、25.1° 為 **0** | **半角**，即 50° 全角 |
+
+量法：對 sensor 以 `sample_ray()` 取film 中心與邊緣的射線夾角；對 spot 以
+`sample_direction()` 掃離軸角度找輻射歸零處。非方形 film（128×64）時 x 半角
+維持 22.4959° 而 y 降為 11.6986°，證實 `fov` 綁 x 軸。
+spot 在錐內的衰減恰為 `cos²θ`（24.9° 時 0.8227 = cos²24.9°），
+即純平方反比、無角度衰減，因此 25° 是硬邊界而非柔化起點。
+
+於是有兩個直接後果：
+- 「光源比感測器窄」是錯覺。照明錐 **50° 全角** 其實**寬於**接收視野 45° 全角。
+- 把 45 改成 25 會把接收半角壓到 12.5°，而瓶身對相機的張角是
+  `asin(28.5/78.5) = 21.3°`（NOTE-026）—— 瓶身會超出視野邊界，
+  這是一個場景層級的改變，不是「修正一個筆誤」。
+
+**其三，25° 這個目標值本身沒有一手來源。** SRC-PLAN 與 SRC-HANDOFF 都沒有記載
+VL53L0X 的 FoV，也沒有記載它是 full-cone 還是 half-angle。拿一個慣例不明的
+數字去改一個慣例已知的數字，只會把不確定性藏進場景裡。
+**因此本項維持 UNKNOWN 且 formal-blocking**，解除條件寫在 registry：
+取得 ST 資料手冊對 25° 的定義，並裁決「方形 film 的角落 30.36°」
+要如何對應到圓錐 FoV。
+
+**其四，未實作的箔片朝向必須拒絕而不是近似。** SRC-HANDOFF §0 把箔片
+orientation 列為未回收。若 `_foil_transform()` 對未知取值悄悄退回
+`facing_camera`，「刻意選了正對相機」與「還沒實作傾角」就長得一樣 ——
+這正是 NOTE-005 要避免的那種混淆。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/unit/test_parameter_registry.py -v
+py -3.10 -m pcmef.cli params audit          # sensor.fov_deg[UNKNOWN] 仍在阻塞清單
+```
+
+角度量測腳本見本次 session 的 `probe_optics.py`（結果如上表）。
+`live_value_drift()` 對 30 個 code-resident 參數回報 0 筆漂移，
+其中包含本次新增的四個具名常數。
+
+**維護邊界**：
+- 不得因為「VL53L0X 是 25°」就把 `_SENSOR_FOV_DEG` 改成 25；先取得慣例定義。
+- 不得把兩個角度的慣例統一「順手改一改」：改任一個都會改變哪些回波被收集，
+  屬場景層級變更，須先有 provenance 再動。
+- 不得為 `_FOIL_ORIENTATION` 新增取值卻不實作對應幾何。
+
+相關：[NOTE-026]、[NOTE-029]、[NOTE-030]、[NOTE-005]
+
+---
+
+## NOTE-032 Ambient 通道量到的是雷射多重反射，CG-3 因此裁決為 BLOCKED
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/surrogate/features.py` 的 `background_energy`；
+`pcmef/surrogate/ambient.py`；`configs/parameter_registry.yaml` 的
+`CG-3_ambient`、`_ROOM_LIGHT_RATIO`、`ambient_energy_to_mcps`。
+
+**決策**：
+
+1. **CG-3 裁決為 BLOCKED**，不給任何成員預設值，不做部分校準。
+2. 阻塞理由記為**觀測量定義錯誤**，而非「證據不足」。
+3. 解除條件寫入 registry 的 `unblock_requires`，共三步。
+
+**原因**：
+
+NOTE-026 當時的判斷是「改成 monostatic 後場景只剩感測器發光，`ambient_rate`
+會恆為 0」，據此加了一盞 `constant` 室內光。**該前提在現行場景下不成立，
+而且加室內光沒有修好真正的問題。** 實測（Empty 與 Water-filled，
+64×64／spp=16／128 bins，室內光比例 0.0 / 0.02 / 0.5 三點）：
+
+| | Empty | Water-filled |
+|---|---|---|
+| `background_energy`（室內光**關閉**） | **26408.47** | **200336.76** |
+| `background_energy`（室內光 0.02，現行值） | 26417.22 | 200344.72 |
+| 室內光佔比 | **0.033%** | **0.004%** |
+| 雷射多重反射佔比 | **99.967%** | **99.996%** |
+| 純 ambient pass（移除 spot）總能量 | **14.17** | **12.32** |
+
+三件事同時成立：
+
+**其一，ambient 從來不是 0。** 室內光完全關閉時 `background_energy` 仍有
+26408（Empty 總能量的 7%）。因為它的定義是
+`total − 主窗能量` —— 而主窗外那些能量是**感測器自己打出去的光**經箔片與
+內側介面回來的多重反射。NOTE-026 預測的「恆為 0」沒有發生，
+所以加室內光解決的不是它宣稱要解決的問題。
+
+**其二，真正的 ambient 訊號比它小三到四個數量級。** 移除 spot 只留室內光時，
+整條 transient 的總能量只有 14.17 / 12.32，與 `background_energy` 相差
+**1864 倍 / 16262 倍**。目前 Ambient 這一欄實際上是多重反射強度的代理量。
+
+**其三，`_ROOM_LIGHT_RATIO` 因此不可辨識。** 它對 Ambient 輸出的槓桿只有
+萬分之三；把比例從 0 拉到 0.5（25 倍於現值）也只讓總能量變動 0.058%。
+在這個觀測量上校準它，得到的數字會收斂，但收斂到的是多重反射的大小。
+
+還有一個結構性的旁證：純 ambient pass 只填滿 **23/128** 個 bin，
+前六個 bin 恰為 0。真正的環境光 DC 速率應該均勻鋪滿整條時間軸；
+`constant` environment emitter 在 transient 中只透過打到幾何再回來的路徑
+出現，本來就不是 DC pedestal。
+
+**因此這不是「再多量一點就能定」的證據不足，是校準目標定義錯誤。**
+CG-3 的簡併結構其實可解（irradiance 已由 CG-2 固定，剩下兩項簡併固定其一即可），
+但在觀測量修正之前，固定哪一項都沒有意義。給任何一個數值都等於把一個
+不可辨識的量寫成已知 —— 那正是 registry 存在的理由。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli params audit    # CG-3_ambient 顯示 BLOCKED 與三條解除條件
+py -3.10 -m pytest tests/unit/test_parameter_registry.py -k blocked -v
+```
+
+上表數字由本次 session 的 `probe_ambient.py` 產出。
+
+**維護邊界**：
+- 不得因為 Ambient 欄「有數字、有類別差異」就當作它可用；
+  那些差異來自多重反射，不是環境光。
+- 不得為了讓 CG-3 變成 RESOLVED 而只固定 `_ROOM_LIGHT_RATIO`；
+  觀測量沒改，固定誰都一樣。
+- 修正觀測量時不得直接把 `background_energy` 減掉一個估計的多重反射量；
+  那是用另一個未校準的量去修一個未校準的量。正解是獨立的 ambient pass。
+
+相關：[NOTE-026]、[NOTE-030]、[NOTE-031]
+
+---
+
+## NOTE-031 CG-1／CG-2 以 gauge fixing 裁決，並新增受限的 CONVENTION 狀態
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`configs/parameter_registry.yaml` 的 `CG-1_extinction`、
+`CG-2_brightness`、`_SIGMA_T_REFERENCE_PER_M`、`lighting.irradiance`、
+`_FOIL_REFLECTANCE_940NM`；`pcmef/core/parameters.py` 的 `GAUGE_STATUS`、
+`sanctioned_gauges()`、`gauge_violations()`、`_validate_decision()`。
+
+**決策**：
+
+| 組 | 裁決 | 固定 | 校準 |
+|---|---|---|---|
+| CG-1 消光係數 | **RESOLVED** | `_SIGMA_T_REFERENCE_PER_M` | 三個密度 |
+| CG-2 絕對能量 | **RESOLVED** | `lighting.irradiance` | `signal_energy_to_mcps` |
+
+並新增 provenance 狀態 `CONVENTION`：**只有**在該參數是某個 RESOLVED
+confounded group 的 `fixed` 成員、且該組寫明 `claim_boundary` 時才放行。
+
+**原因**：
+
+**其一，CG-2 的組成原本就是錯的，必須先更正。** registry 原記載
+irradiance × foil_reflectance × energy_to_mcps「三者相乘」。實測推翻：
+
+| 變動 | 總能量比 | 正規化波形逐 bin 差 |
+|---|---|---|
+| irradiance 1.0 → 2.0 | **2.0000** | **0.0（恰為零）** |
+| foil 0.85 → 0.425 | 0.983 (Empty) / 0.768 (Water) | L1 **0.020 / 0.166** |
+
+`irradiance` 是**精確的全域增益**，與 `signal_energy_to_mcps` 完全簡併 ——
+波形裡不存在任何能分辨兩者的資訊。而 `_FOIL_REFLECTANCE_940NM` 只縮放箔片
+那一支回波，會改變波形**形狀**（變化集中在 147.4 / 162.6 mm 的箔片 bin），
+因此在原理上可與全域增益分離。**它不屬於這一組**，已移出並改為獨立的
+calibration-only 參數。三項簡併其實是「兩項精確簡併 + 一項可分離」。
+
+**其二，固定項的選擇不能用「哪個比較好 fit」決定。** 同組內固定任一項在
+數值上都可行，因此判準只能是 provenance 與可解釋性：
+
+*CG-1* —— SRC-SAI §9 的 scenario.yaml 草案把 `bubble_density` 標為
+`<validation-frozen range>`，也就是規格本身把**密度**定位為由 validation
+決定的量；規格從未提及「參考尺度」，那是本實作為了換算單位而引入的。
+把規格指名要校準的量固定起來、去校準一個規格沒有的量，方向相反。
+另外固定的必須是 shared 那一項：固定 `turbidity` 會讓「水有多濁」成為定義，
+並使其餘兩類的 σt 都相對於一個關於水的任意選擇而定，把三類耦合在一起。
+最後，`_SIGMA_T_REFERENCE_PER_M = 100.0` 的來源本身就證明它不是量測 ——
+程式註解明寫「選 100 是為了讓密度 0.1–0.3 得到光學厚度 τ≈0.6–1.7」，
+它是**與密度一起挑出來湊出某個 τ 範圍**的。一個由挑選產生的數字沒有資格
+當校準結果，但完全有資格當 gauge。
+
+*CG-2* —— mitsuba spot 的 `intensity` 單位是 W/sr，而 SRC-HANDOFF 未回收任何
+VCSEL 光功率規格，這個絕對值沒有一手來源可對。反之 `signal_energy_to_mcps`
+的定義**就是**「模擬能量換算成 MCPS」，任意的輻射尺度本來就該落在這個換算
+係數上，因為 MCPS 才是可觀測、可校準的那一端。把尺度留在 scenario yaml
+另有實務風險：yaml 逐 run 變動，全域亮度會在 run 之間無聲漂移。
+
+**其三，gauge fixing 與「偷給預設值」的差別必須是機器可檢查的，不能靠自律。**
+兩者表面上都是「把一個 PLACEHOLDER 固定下來」。差別在於 gauge 對應的是一個
+**在原理上不可辨識**的自由度 —— 它沒有物理真值，固定它是選座標系。
+因此 `CONVENTION` 設計成一把**配對鎖**：
+
+- 單獨把某個 PLACEHOLDER 改標 `CONVENTION` **不會**放行，
+  `gauge_violations()` 會指名擋下；
+- 必須有一個 RESOLVED 的 group 指名它為 `fixed`；
+- 該 group 必須寫出 `claim_boundary`，否則 schema 在載入時就拒絕。
+
+`claim_boundary` 是這筆交易的代價，必須寫得下來才算成立：CG-1 的代價是
+校準後的三個密度**不得**被解讀為絕對濁度／密度，可宣稱的只有 σt 本身；
+CG-2 的代價是 `lighting.irradiance = 1.0` **不得**被引用為 VCSEL 實際發射
+功率，校準後的 `signal_energy_to_mcps` 也只是相對值。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli params audit
+  CG-1_extinction  [RESOLVED] fixed=['_SIGMA_T_REFERENCE_PER_M']
+  CG-2_brightness  [RESOLVED] fixed=['lighting.irradiance']
+py -3.10 -m pytest tests/unit/test_parameter_registry.py -k "convention or resolved or group" -v
+```
+
+反向驗收（實測會失敗，不是宣稱）：把 `gauge_violations()` 改成一律回空，
+`test_convention_without_a_sanctioning_group_fails` 與
+`test_convention_needs_the_group_to_be_resolved_not_blocked` 兩條立即 FAIL。
+
+**維護邊界**：
+- 不得把 `CONVENTION` 加進 `FORMAL_ELIGIBLE_STATUSES`；它的放行必須繼續
+  依賴 group 的授權，否則就成了繞過防線的萬用鑰匙。
+- 不得在沒有 `claim_boundary` 的情況下把任何 group 標成 RESOLVED。
+- 固定值變動時 `parameter_set_hash` 必然改變，須開新 run，不得就地重凍。
+- 論文措辭不得出現「校準得到的水濁度為 X」或「VCSEL 發射功率為 Y」。
+
+相關：[NOTE-030]、[NOTE-032]、[NOTE-005]、[NOTE-028]
+
+---
+
+## NOTE-030 parameter registry 由說明文件升為 formal firewall
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/core/parameters.py`（新增）；
+`pcmef/surrogate/calibration.py` 的 `assert_formal_ready()`／`with_calibrated()`／
+`OPTICAL_PATH_TO_DISTANCE`；`pcmef/simulation/scenario.py` 的 formal 建構；
+`pcmef/simulation/controller.py` 的 manifest；`pcmef/cli.py` 的 `params audit`；
+`tests/unit/test_parameter_registry.py`。
+
+**決策**：
+
+1. `configs/parameter_registry.yaml` 由資料層接上**實際會擋人的**防線：
+   `ScenarioConfig(formal=True)` 與
+   `SurrogateCalibration.assert_formal_ready()` 兩處都轉呼叫
+   `core.parameters.assert_formal_ready()`。
+2. 新增 `parameter_set_hash()`，涵蓋每個參數的
+   name/source/value/status/kind/scope/formal_blocking/allowed_range/confounded_with
+   與每一組 confounded group 的**裁決內容**；**不涵蓋** `role`/`note` 散文欄位。
+3. 新增 `live_value_drift()`：逐項比對 registry 宣稱值與程式碼此刻真正在用的值。
+4. simulation manifest 記錄 registry 摘要與 `parameter_set_hash`，
+   並新增 `run_identity_hash = f(manifest_hash, parameter_set_hash)`。
+5. `optical_path_to_distance` 改標 `derived=True`、移出可校準集合，
+   `with_calibrated()` 拒絕覆寫它。
+
+**原因**：
+
+**其一，一份沒有被拿去對照程式的 registry 只是第二份文件。** 它會漂移，
+而且漂移時沒有任何症狀 —— registry 寫 `sensor.fov_deg = 45`、程式改成 60，
+不會有任何測試失敗。`live_value_drift()` 讓這件事變成可偵測的。
+綁定涵蓋率也必須誠實回報而不是湊成 100%：目前 **30 項綁到程式常數、
+8 項由 scenario yaml 逐 run 供應、0 項未綁定**，三種狀態分開列。
+
+**其二，`assert_formal_ready()` 必須一次收齊全部理由。** 遇到第一個問題就
+返回，會讓交接的人以為修掉它就過了 —— 而實際上還有二十幾條。
+目前實測回報 **27 個 formal-blocking 參數 + CG-3 BLOCKED**。
+
+**其三，`manifest_hash` 的涵蓋範圍不夠，但也不能就地擴大。** 現行
+`manifest_hash` 只涵蓋 scenario 內容；把 27 個未校準建模常數全部換掉，
+scenario 內容可以一個位元都不變 —— 那正是要防的靜默漂移。但直接擴大它的
+定義會讓既有 E1-G03 證據的比對基準整批失效。因此**另立** `run_identity_hash`
+同時涵蓋兩者，`manifest_hash` 的意義保持不變。
+
+**其四，`optical_path_to_distance` 是 derived 而不是 calibration 常數。**
+共置幾何使光程恰為單程距離的兩倍，係數由幾何得 0.5（NOTE-026）。
+先前它被標成 placeholder，於是同時有兩個錯：formal 模式因為它而擋
+（理由是錯的），而且它在型別上仍是一個可被 calibration 寫入的旋鈕 ——
+SRC-SAI §10 明令禁止拿它去逼近真實均值，但**一句註解攔不住任何人**。
+新增的 `derived` 旗標與 `with_calibrated()` 的拒絕才是實質防線。
+
+**其五，順帶修掉一個 provenance 不實。** `TransientResult.extra["integrator"]`
+先前硬編字串 `"transient_path"`，但帶參與介質的場景實際使用
+`transient_prbvolpath`（NOTE-026 的自動選擇）。四個 smoke 場景中有三個的
+manifest 記載了它們沒有用過的積分器。manifest 是 provenance，**記錯比不記更糟**。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli params audit
+  parameters 38 / unresolved 27 / bindings code=30 config=8 unbound=0
+  live value drift 0 / formal-ready NO        -> exit code 2
+py -3.10 -m pytest tests/unit/test_parameter_registry.py -q     # 28 passed
+```
+
+反向驗收（三次實際破壞，皆確認會 FAIL 而非只是宣稱）：
+
+| 破壞 | 失敗的測試 |
+|---|---|
+| `FORMAL_ELIGIBLE_STATUSES` 加入 PLACEHOLDER/UNKNOWN/RECONSTRUCTED | `test_unresolved_status_fails` 三個參數化案例 |
+| `gauge_violations()` 一律回空 | `test_convention_without_a_sanctioning_group_fails` 等兩條 |
+| `with_calibrated()` 不再擋 derived | `test_optical_path_to_distance_is_derived_not_calibratable` |
+
+`test_a_clean_registry_passes` 刻意保留：少了它，其餘負向測試會在
+「防線永遠拒絕一切」的情況下全部通過，等於什麼都沒驗到。
+
+**維護邊界**：
+- 不得用 `check_registry=False` 讓 formal 路徑略過檢查；該參數只為單元測試存在。
+- 不得為了消除 drift 而修改 registry 的 `value` 欄；drift 代表程式與登記
+  不一致，要查的是哪一邊錯。
+- 不得新增建模常數而不登記；`binding_coverage()` 的 `unbound` 必須維持為空，
+  對應測試會失敗。
+- 不得改變 `manifest_hash` 的涵蓋範圍。
+
+相關：[NOTE-031]、[NOTE-032]、[NOTE-033]、[NOTE-026]、[NOTE-005]、[NOTE-028]
+
+---
+
 ## NOTE-029 canonical physical scene 只放真實存在的物件；RGB 背景不得進 ToF 光路
 
 **決策日期**：2026-08-28

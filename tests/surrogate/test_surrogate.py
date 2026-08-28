@@ -268,7 +268,16 @@ def test_smoke_mode_allows_placeholder_but_records_it():
     surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
     provenance = surrogate.provenance()
     assert provenance["formal"] is False
-    assert len(provenance["calibration"]["placeholders"]) == 9
+
+    # 九個 scale 中有**八**個是 placeholder。少的那一個是
+    # optical_path_to_distance —— 它由共置幾何決定（NOTE-026），
+    # NOTE-030 起改標 derived 並移出可校準集合，因此不算 placeholder。
+    # 這裡把「為什麼是 8 不是 9」寫死成斷言，而不是把數字改小了事。
+    placeholders = provenance["calibration"]["placeholders"]
+    assert len(placeholders) == 8
+    assert "optical_path_to_distance" not in placeholders
+    assert len(PLACEHOLDER_SMOKE_CALIBRATION.scales()) == 9
+    assert PLACEHOLDER_SMOKE_CALIBRATION.derived_names() == ["optical_path_to_distance"]
 
 
 def test_non_placeholder_scale_requires_a_source():

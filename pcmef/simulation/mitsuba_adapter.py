@@ -4,7 +4,7 @@
 #         mitransient_adapter 重用，確保 RGB 與 transient 來自同一場景。
 # 檔案路徑: pcmef/simulation/mitsuba_adapter.py
 # 產生時間: 2026-08-26 06:35 +08:00
-# 版本: v0.4.0
+# 版本: v0.5.0
 # 功能說明: 把場景設定翻成 Mitsuba 能懂的場景描述並算出一張 RGB 影像，
 #           同時記下算圖當下的所有版本與參數，讓同樣的輸入日後能算出同樣的結果。
 # 模組定位: Mitsuba 的封裝層。它「不是」物理校準器 —— 本批次只做 single-scenario
@@ -27,9 +27,13 @@
 #     之間的鏡面路徑採樣機率為零，瓶子完全不回光，且不會有任何錯誤訊息
 #     （NOTE-027）。
 #   - 本檔的 _ROOM_LIGHT_RATIO / _BOTTLE_SURFACE_ALPHA /
-#     _SIGMA_T_REFERENCE_PER_M / _ALBEDO_BY_PRESET 皆為未校準建模常數，
-#     且不在 surrogate/calibration.py 的 placeholder 防線內 —— 凍結
-#     initial_simulation.lock 前必須納入（NOTE-026、NOTE-027）。
+#     _SIGMA_T_REFERENCE_PER_M / _ALBEDO_BY_PRESET 皆為未校準建模常數。
+#     它們現已納入 configs/parameter_registry.yaml 並由 core.parameters 的
+#     formal 防線攔截；**新增任何建模常數都必須同時登記**，否則
+#     tests/unit/test_parameter_registry.py 的綁定測試會失敗（NOTE-030）。
+#   - 不得把 _SENSOR_FOV_DEG 逕自改成 25：本檔的 fov 是**全角**而
+#     cutoff_angle 是**半角**（實測見 NOTE-033），兩者慣例不同；
+#     VL53L0X 規格值的角度慣例尚無一手來源，改值前必須先取得。
 #   - v0.1.0 新增：首版 RGB smoke adapter。
 #   - v0.2.0 光源改為與相機共置的 spot、另加室內環境光，最短光程改由
 #     共置幾何推導（NOTE-026）。
@@ -38,6 +42,9 @@
 #   - v0.4.0 移除無 provenance 的 backdrop、改建 far-side 鋁箔反射體；
 #     內圓柱一律建立（修正 Empty 的實心玻璃柱拓樸錯誤）；
 #     內部基底折射率依類別語意決定（NOTE-029）。
+#   - v0.5.0 把 fov / cutoff_angle / max_depth / foil orientation 由 dict
+#     literal 內的字面值提升為具名常數，讓 parameter registry 攔得到；
+#     **數值一個都沒有改**（NOTE-030、NOTE-033）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "rgb or variant or scale" -v
 # ------------------------------------------------------------
@@ -200,6 +207,28 @@ _FOIL_REFLECTANCE_940NM = 0.85
 #: 箔片表面的 GGX 粗糙度。家用鋁箔有明顯皺褶，不是光學鏡面。**未校準**。
 _FOIL_SURFACE_ALPHA = 0.15
 
+# NOTE(NOTE-033): 以下三個量原本硬編在 build_scene_dict() 的 dict literal 裡，
+# 不是具名常數，因此 parameter registry 的 formal 防線完全攔不到。這裡只做
+# **參數化**，數值一個都沒有改 —— 改值需要先有 provenance，見 NOTE-031。
+#
+# 角度慣例在本檔內**不一致**，這是實測結果不是推測（NOTE-033 附量測）：
+#   - perspective sensor 的 `fov` 是**全角**，且預設綁在 x 軸。
+#     fov=45 -> 實測單邊半角 22.4959°，畫面對角 30.3562°。
+#   - spot emitter 的 `cutoff_angle` 是**半角**（自軸線起算）。
+#     cutoff_angle=25 -> 實測 24.9° 仍有光、25.1° 為 0，即全角 50°。
+# 也就是說本檔的兩個角度雖然都寫了「25」，意思差了兩倍。
+#: 接收端視角。**全角**，見上。VL53L0X 規格值的角度慣例尚未取得一手來源，
+#: 因此**不得**逕自改成 25（NOTE-033）。
+_SENSOR_FOV_DEG = 45.0
+#: VCSEL 發散角。**半角**，故實際照明錐為 50° 全角。**未校準**。
+_LIGHT_CUTOFF_ANGLE_DEG = 25.0
+#: path tracer 最大反射深度。實測 far-side 箔片回波需 >= 12 才出現（NOTE-029）；
+#: 設太低會靜默丟失整個 path family 且無任何錯誤訊息。**未校準**。
+_MAX_DEPTH = 12
+#: 箔片法線方向。SRC-HANDOFF §0 明列未回收，目前取「正對相機」。
+#: 這是**建模假設**而非量測值；改成具名常數只是為了讓防線攔得到它。
+_FOIL_ORIENTATION = "facing_camera"
+
 #: 瓶內基底介質的折射率名稱，依類別語意決定（SRC-SAI FR-002 標籤定義）。
 #: 這是**拓樸/材質類別**而非可調數值：霧是懸浮在空氣中的液滴，
 #: 氣泡是水中的氣體，因此兩者的基底本來就不同。
@@ -218,7 +247,19 @@ def foil_center_z(outer_r_m: float) -> float:
 
 
 def _foil_transform(mi, outer_r_m: float):
-    """箔片面向相機，尺寸足以在感測器視角下覆蓋瓶身輪廓。"""
+    """箔片的位置與朝向，尺寸足以在感測器視角下覆蓋瓶身輪廓。
+
+    朝向由 `_FOIL_ORIENTATION` 決定。目前只實作 facing_camera，其餘取值一律
+    拒絕而非退回預設 —— 「未實作的朝向」與「刻意選了正對相機」必須分得開
+    （NOTE-005 的同一個道理）。
+    """
+    if _FOIL_ORIENTATION != "facing_camera":
+        raise SimulationDependencyError(
+            f"foil orientation {_FOIL_ORIENTATION!r} is registered but not "
+            "implemented; SRC-HANDOFF §0 lists the real orientation as not "
+            "recovered, so it must not be silently approximated by the "
+            "facing_camera case"
+        )
     half = outer_r_m * _FOIL_SIZE_TO_DIAMETER_RATIO
     transform = _look_at(
         mi,
@@ -258,10 +299,11 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
 
     scene: dict[str, Any] = {
         "type": "scene",
-        "integrator": {"type": "path", "max_depth": 12},
+        "integrator": {"type": "path", "max_depth": _MAX_DEPTH},
         "sensor": {
             "type": "perspective",
-            "fov": 45.0,
+            # 全角，且預設綁 x 軸；半角為此值的一半（NOTE-033）。
+            "fov": _SENSOR_FOV_DEG,
             "to_world": _look_at(
                 mi,
                 origin=[lateral, 0.0, camera_z],
@@ -310,7 +352,8 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
                 target=[0.0, 0.0, 0.0],
                 up=[0.0, 1.0, 0.0],
             ),
-            "cutoff_angle": 25.0,
+            # 半角：實測 24.9° 有光、25.1° 為 0，故照明錐為 50° 全角（NOTE-033）。
+            "cutoff_angle": _LIGHT_CUTOFF_ANGLE_DEG,
             "intensity": {
                 "type": "rgb",
                 "value": [config.lighting.irradiance] * 3,

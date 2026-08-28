@@ -60,6 +60,7 @@ _PREREQUISITE_CHAIN: tuple[tuple[str, dict], ...] = (
     ("initial_simulation", {
         "scene_hash": "s1", "surrogate_hash": "u1",
         "code_version": "v0", "parameter_ranges": {},
+        "parameter_set_hash": "test-parameter-set",
     }),
     ("calibrated_simulation", {
         "calibrated_scene_hash": "s2", "calibrated_surrogate_hash": "u2",

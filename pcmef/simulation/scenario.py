@@ -161,6 +161,20 @@ class ScenarioConfig:
                 "parameters must come from a frozen calibration, not from a default. "
                 f"placeholder keys: {sorted(self.placeholder_keys())}"
             )
+        if self.formal:
+            # NOTE(NOTE-030): placeholder 介質參數只是全部參數的一小部分。
+            # 場景側還有二十幾個未校準建模常數（fov、箔片光學、消光尺度…），
+            # 它們同樣決定四特徵，卻不是 medium_parameters 的一員，因此上面
+            # 那道檢查看不到它們。registry 防線補的正是這個範圍差。
+            from pcmef.core.parameters import (
+                ParameterRegistryError,
+                assert_formal_ready,
+            )
+
+            try:
+                assert_formal_ready()
+            except ParameterRegistryError as error:
+                raise ScenarioConfigError(str(error)) from error
 
     @property
     def medium_preset(self) -> MediumPreset:

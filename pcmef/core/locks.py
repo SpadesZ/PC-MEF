@@ -106,6 +106,13 @@ LOCK_SPECS: dict[str, LockSpec] = {
                 "surrogate_hash",
                 "code_version",
                 "parameter_ranges",
+                # NOTE(NOTE-030): parameter_set_hash 是必要 key，不是附註。
+                # scene_hash 只涵蓋 scenario 內容；把 27 個未校準建模常數全部
+                # 換掉，scene_hash 可以一個位元都不變。少了這個欄位，lock 就
+                # 無法回答「這次凍的是哪一組參數」。
+                # 本 lock 仍為 pending（尚無凍結檔），因此契約現在還能改；
+                # 一旦凍結就不得再動。
+                "parameter_set_hash",
             ),
             requires=("real_split_policy",),
         ),

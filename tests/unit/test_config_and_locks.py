@@ -216,6 +216,7 @@ def test_lock_prerequisites_are_enforced(tmp_path):
                 "surrogate_hash": "b" * 64,
                 "code_version": "git:abc123",
                 "parameter_ranges": {},
+                "parameter_set_hash": "test-parameter-set",
             },
         )
 

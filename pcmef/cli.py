@@ -480,6 +480,89 @@ def _build_real_split(args: argparse.Namespace):
     return config, report, plan_real_split(eligible, policy)
 
 
+def cmd_params_audit(args: argparse.Namespace) -> int:
+    """列出 parameter registry 現況與擋住 formal 的每一條理由。
+
+    exit code 是判準，不是畫面文字：0 = 這組參數可進 formal，2 = 不可。
+    """
+    from pcmef.core.parameters import (
+        ParameterRegistry,
+        ParameterRegistryError,
+        binding_coverage,
+        formal_blocking_reasons,
+        live_value_drift,
+    )
+
+    try:
+        registry = ParameterRegistry.load(args.registry)
+    except ParameterRegistryError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    counts = registry.counts()
+    coverage = binding_coverage(registry)
+    print(f"registry_version    : {registry.registry_version}")
+    print(f"parameter_set_hash  : {registry.parameter_set_hash()}")
+    print(f"parameters          : {counts['total']}")
+    print(f"  unresolved        : {counts['unresolved']}")
+    print(f"  formal blockers   : {counts['formal_blockers']}")
+    print(
+        "  by status         : "
+        + ", ".join(
+            f"{k.split('.', 1)[1]}={v}" for k, v in counts.items() if k.startswith("status.")
+        )
+    )
+    print(
+        "bindings            : "
+        f"code={len(coverage['code'])} config={len(coverage['config_supplied'])} "
+        f"unbound={len(coverage['unbound'])}"
+    )
+    if coverage["unbound"]:
+        print(f"  UNBOUND           : {coverage['unbound']}")
+
+    drift = live_value_drift(registry)
+    print(f"live value drift    : {len(drift)}")
+    for item in drift:
+        print(f"  ! {item}")
+
+    print("\nconfounded groups:")
+    for group in sorted(registry.groups, key=lambda g: g.group_id):
+        decision = group.decision or {}
+        print(f"  [{group.status:<9}] {group.group_id}")
+        if group.status == "RESOLVED":
+            print(f"      fixed      : {decision.get('fixed')}")
+            print(f"      calibrated : {decision.get('calibrated')}")
+        elif group.status == "BLOCKED":
+            print(f"      blocked    : {_squash(decision.get('blocked_reason', ''))}")
+            for item in decision.get("unblock_requires") or []:
+                print(f"      unblock    : {_squash(item)}")
+
+    reasons = formal_blocking_reasons(registry)
+    print(f"\nformal-ready: {'YES' if not reasons else 'NO'}")
+    for reason in reasons:
+        print(f"  - {reason}")
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = registry.summary()
+        payload["binding_coverage"] = coverage
+        payload["live_value_drift"] = drift
+        payload["formal_blocking_reasons"] = reasons
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        print(f"\nartifact: {out_path.resolve()}")
+
+    return 0 if not reasons else 2
+
+
+def _squash(text: str) -> str:
+    """把多行 YAML 折疊字串壓成一行，避免報告排版散掉。"""
+    return " ".join(str(text).split())
+
+
 def cmd_split_plan_real(args: argparse.Namespace) -> int:
     """E1-G02：規劃 real split 並寫出 split_registry.json。"""
     _, _, plan = _build_real_split(args)
@@ -1377,6 +1460,18 @@ def build_parser() -> argparse.ArgumentParser:
     e1_evidence.add_argument("--tests-dir", default="tests/e1")
     e1_evidence.add_argument("--out", default="tests/e1_metrics.xml")
     e1_evidence.set_defaults(func=cmd_e1_metrics_evidence)
+
+    params_parser = subparsers.add_parser("params", help="參數 registry 與 formal 防線")
+    params_sub = params_parser.add_subparsers(dest="params_command", required=True)
+    params_audit = params_sub.add_parser(
+        "audit",
+        help="列出 registry 現況、綁定涵蓋率與擋住 formal 的每一條理由",
+    )
+    params_audit.add_argument(
+        "--registry", default=None, help="registry 路徑（預設 configs/parameter_registry.yaml）"
+    )
+    params_audit.add_argument("--out", default=None, help="另存 JSON 報告")
+    params_audit.set_defaults(func=cmd_params_audit)
 
     sur_parser = subparsers.add_parser("surrogate", help="感測器替身")
     sur_sub = sur_parser.add_subparsers(dest="surrogate_command", required=True)

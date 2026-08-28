@@ -4,7 +4,7 @@
 #         到 artifact 目錄，後者即 CanonicalCase 的 optical_transient_time_axis。
 # 檔案路徑: pcmef/simulation/mitransient_adapter.py
 # 產生時間: 2026-08-26 07:20 +08:00
-# 版本: v0.4.0
+# 版本: v0.5.0
 # 功能說明: 算出光在場景裡隨時間傳播的過程 —— 不是一張靜態影像，而是每個時間
 #           切片各一張，合起來就是單次 acquisition 內部的光飛行歷程。
 #           同時把 mitransient 用的光程長換算成秒，存成獨立的時間軸檔。
@@ -32,6 +32,10 @@
 #   - v0.3.0 場景含參與介質時自動改用 transient_prbvolpath（NOTE-026）。
 #   - v0.4.0 前緣餘裕改以 bin 數表示並解出上界 m < shortest*N/end，
 #     bounce_budget 預設 7.0 → 3.0（NOTE-027）。
+#   - v0.5.0 manifest 的 integrator 欄改記**實際採用**的積分器；先前硬編
+#     "transient_path"，帶介質的三個場景等於記載了沒用過的積分器。
+#     bounce_budget 提升為具名常數 _DEFAULT_BOUNCE_BUDGET，供 parameter
+#     registry 的 formal 防線綁定（NOTE-030）。
 #   - v0.1.0 新增：首版 transient smoke adapter。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "transient or reproducible" -v
@@ -166,11 +170,19 @@ def build_transient_scene_dict(
 #: 8 個 bin 是「足以解析上升緣」的下界，不是校準值。
 _LEADING_MARGIN_BINS = 8
 
+#: 時間窗尾端 = shortest + bounce_budget * extent。由實測能量末端 0.646 m 推得
+#: （NOTE-027），**未校準**；改場景後須重新量測末端能量再定。
+#: 提升為具名常數是為了讓 parameter registry 的 formal 防線攔得到它 —— 先前它
+#: 只是 __init__ 的預設引數，不是任何防線看得見的東西（NOTE-030）。
+_DEFAULT_BOUNCE_BUDGET = 3.0
+
 
 class MiTransientAdapter:
     """optical transient 算圖的封裝。"""
 
-    def __init__(self, variant: str = DEFAULT_VARIANT, bounce_budget: float = 3.0) -> None:
+    def __init__(
+        self, variant: str = DEFAULT_VARIANT, bounce_budget: float = _DEFAULT_BOUNCE_BUDGET
+    ) -> None:
         self.variant = variant
         self.bounce_budget = float(bounce_budget)
 
@@ -303,7 +315,12 @@ class MiTransientAdapter:
                 "optical_transient_time_axis": time_path.as_posix(),
             },
             extra={
-                "integrator": "transient_path",
+                # 實際採用的積分器，不是寫死的字串。含參與介質時
+                # build_transient_scene_dict() 會自動改用 transient_prbvolpath
+                # （NOTE-026）；先前這裡硬編 "transient_path"，於是四個場景中
+                # 有三個的 manifest 記載了它們沒有用過的積分器。manifest 是
+                # provenance，記錯比不記更糟（NOTE-030）。
+                "integrator": scene_dict["integrator"]["type"],
                 "temporal_filter": "box",
                 "scene_units": "metre",
                 "total_energy": float(transient.sum()),

@@ -3,7 +3,7 @@
 #         與 initial_simulation.lock 引用；parameter_set_hash 進 formal artifact。
 # 檔案路徑: configs/parameter_registry.yaml
 # 產生時間: 2026-08-28 01:20 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 列出所有會影響 E1 四特徵（Distance / Ambient / Signal / Sigma-like）
 #           的 scene、renderer 與 surrogate 參數，並逐項標記它的物理角色、
 #           出處、provenance 狀態、是否可校準、允許範圍，以及是否阻擋 formal。
@@ -21,14 +21,29 @@
 #   - 不得新增未登記的自由參數；calibration 期間出現新參數必須先開 amendment
 #     （NOTE-028 的機制）。
 #   - class_scope: class_specific 的項目必須有物理理由，不得用來偷調單類結果。
+#   - 不得為了讓 formal 過關而把 PLACEHOLDER 改標 CONVENTION：CONVENTION 只在
+#     「是某個 RESOLVED confounded group 的 fixed 成員、且該組寫明 claim_boundary」
+#     時才被防線接受，其餘一律視為未解決（NOTE-031）。
+#   - 不得在此改 value 欄來消除 live drift；drift 代表程式與登記不一致，
+#     要查的是哪一邊錯（NOTE-030）。
 #   - v0.1.0 新增：首版 registry，對應 NOTE-030。
+#   - v0.2.0 CG-1/CG-2 裁決為 RESOLVED、CG-3 裁決為 BLOCKED；
+#     _FOIL_REFLECTANCE_940NM 經實測確認可分離，移出 CG-2；
+#     optical_path_to_distance 改為非 formal-blocking 的 derived；
+#     fov/cutoff/foil orientation/max_depth/bounce_budget 的 source 改指
+#     具名常數（NOTE-030、NOTE-033）。
 # 驗證方式:
-#   - py -3.10 -c "import yaml,io; d=yaml.safe_load(io.open('configs/parameter_registry.yaml',encoding='utf-8')); print(len(d['parameters']),'parameters',len(d['confounded_groups']),'confounded groups')"
+#   - py -3.10 -m pytest tests/unit/test_parameter_registry.py -v
+#   - py -3.10 -m pcmef.cli params audit
 # ------------------------------------------------------------
 
-registry_version: v0.1.0
+registry_version: v0.2.0
 
-# provenance_status: CONFIRMED | RECONSTRUCTED | PLACEHOLDER | UNKNOWN | FIXED_SPEC
+# provenance_status: CONFIRMED | FIXED_SPEC | CONVENTION | RECONSTRUCTED
+#                  | PLACEHOLDER | UNKNOWN
+#   只有 CONFIRMED / FIXED_SPEC 無條件可進 formal。
+#   CONVENTION 是 gauge fixing（原理上不可辨識的自由度），僅在被 RESOLVED
+#   confounded group 指名為 fixed 成員時才放行。
 # kind: fixed | derived | calibration_only | topology
 # class_scope: shared | class_specific | n/a
 
@@ -118,7 +133,11 @@ parameters:
     allowed_range: [0.0001, 1.0]
     class_scope: shared
     formal_blocking: true
-    note: NOTE-026
+    confounded_with: [lighting.irradiance, ambient_energy_to_mcps]
+    note: >
+      NOTE-026。**CG-3 已裁決為 BLOCKED（NOTE-032）**：實測本參數對 Ambient
+      輸出的槓桿僅 0.033%（Empty）／0.004%（Water），其餘 99.97% 來自雷射
+      多重反射。在 Ambient 觀測量重新定義之前不得校準本項。
 
   - name: _BOTTLE_SURFACE_ALPHA
     source: pcmef/simulation/mitsuba_adapter.py
@@ -162,7 +181,14 @@ parameters:
     allowed_range: [0.3, 0.98]
     class_scope: shared
     formal_blocking: true
-    note: NOTE-029
+    note: >
+      NOTE-029。**2026-08-28 移出 CG-2**：先前被登記為與 irradiance、
+      signal_energy_to_mcps「三者相乘」，實測推翻 —— 它只縮放箔片那一支回波，
+      0.85->0.425 使總能量僅變為 0.983x(Empty) / 0.768x(Water)（非 0.5x），
+      且正規化波形改變（L1 0.020 / 0.166），變化集中在箔片 bin
+      147.4 / 162.6 mm。改變波形形狀者可與全域增益分離，故本項獨立可辨識。
+      但 Empty 的槓桿明顯較弱（0.983x），可辨識性由箔片回波佔比大的類別主導，
+      calibration 時須逐類檢查條件數，不得只看整體殘差。
 
   - name: _FOIL_SURFACE_ALPHA
     source: pcmef/simulation/mitsuba_adapter.py
@@ -176,29 +202,36 @@ parameters:
     note: NOTE-029
 
   - name: foil_orientation
-    source: pcmef/simulation/mitsuba_adapter.py:_foil_transform（隱含）
-    role: 箔片法線方向；目前硬編為正對相機
+    source: pcmef/simulation/mitsuba_adapter.py:_FOIL_ORIENTATION
+    role: 箔片法線方向；目前為正對相機
     value: facing_camera
     provenance_status: UNKNOWN         # SRC-HANDOFF §0 明列未回收
     kind: calibration_only
-    allowed_range: null                # 尚未參數化 —— 已知缺口
+    allowed_range: null                # 類別型參數，無數值區間
     class_scope: shared
     formal_blocking: true
-    note: 目前不是具名參數，硬編在 _foil_transform() 內；須先參數化才能校準
+    note: >
+      2026-08-28 已參數化為具名常數，防線攔得到（NOTE-033）。
+      `_foil_transform()` 只實作 facing_camera，其餘取值一律拒絕而非退回預設 ——
+      「未實作的朝向」與「刻意選了正對相機」必須分得開。
+      仍為 UNKNOWN：SRC-HANDOFF §0 把箔片 orientation 列為未回收，
+      正對相機是建模假設，不是量測。校準它需要先實作傾角參數化。
 
   - name: _SIGMA_T_REFERENCE_PER_M
     source: pcmef/simulation/mitsuba_adapter.py
     role: 無單位密度換算成消光係數 sigma_t (1/m) 的參考尺度
     value: 100.0
-    provenance_status: PLACEHOLDER
-    kind: calibration_only
-    allowed_range: [1.0, 2000.0]
+    provenance_status: CONVENTION      # CG-1 裁決：gauge fixing，不是量測值
+    kind: fixed
+    allowed_range: null                # 不再是搜尋對象；固定即定義
     class_scope: shared
-    formal_blocking: true
+    formal_blocking: false
     confounded_with: [medium.turbidity, medium.bubble_density, medium.mist_density]
     note: >
-      與三個密度參數**相乘**決定 sigma_t，因此只有乘積可辨識。
-      單獨校準本參數與單獨校準密度是同一件事，必須擇一固定。
+      CG-1 的固定項。與三個密度**相乘**決定 sigma_t，只有乘積可辨識，
+      因此本項沒有物理真值可求 —— 固定它是選座標系，不是宣稱知道它。
+      claim boundary 見 confounded_groups.CG-1_extinction：
+      校準後的三個密度不得被解讀為絕對濁度／密度。
 
   - name: _ALBEDO_BY_PRESET
     source: pcmef/simulation/mitsuba_adapter.py
@@ -248,13 +281,17 @@ parameters:
     source: configs/simulation/*.yaml
     role: VCSEL 發射強度；同時被 _ROOM_LIGHT_RATIO 乘用
     value: 1.0
-    provenance_status: PLACEHOLDER
-    kind: calibration_only
-    allowed_range: [0.01, 100.0]
+    provenance_status: CONVENTION      # CG-2 裁決：radiometric gauge
+    kind: fixed
+    allowed_range: null
     class_scope: shared
-    formal_blocking: true
+    formal_blocking: false
     confounded_with: [_ROOM_LIGHT_RATIO, signal_energy_to_mcps]
-    note: 整體亮度尺度與 surrogate 的 energy->MCPS 係數重複控制同一物理量
+    note: >
+      CG-2 的固定項。實測 irradiance 1.0->2.0 使能量恰為 2.0000 倍且正規化
+      波形逐 bin 差為 **0.0** —— 與 signal_energy_to_mcps 精確簡併，
+      波形中不存在任何能分辨兩者的資訊。SRC-HANDOFF 未回收 VCSEL 光功率，
+      因此此值不得被引用為實際發射功率。
 
   # ---- Renderer / 時間窗 ---------------------------------------------------
   - name: _LEADING_MARGIN_BINS
@@ -269,7 +306,7 @@ parameters:
     note: NOTE-027
 
   - name: bounce_budget
-    source: pcmef/simulation/mitransient_adapter.py:MiTransientAdapter.__init__
+    source: pcmef/simulation/mitransient_adapter.py:_DEFAULT_BOUNCE_BUDGET
     role: 時間窗尾端 = shortest + bounce_budget * extent
     value: 3.0
     provenance_status: RECONSTRUCTED   # 由實測能量末端 0.646 m 推得
@@ -280,7 +317,7 @@ parameters:
     note: NOTE-027。改場景後須重新量測末端能量再定
 
   - name: max_depth
-    source: pcmef/simulation/mitransient_adapter.py:build_transient_scene_dict
+    source: pcmef/simulation/mitsuba_adapter.py:_MAX_DEPTH
     role: path tracer 最大反射深度；決定哪些 path family 進得了 transient
     value: 12
     provenance_status: PLACEHOLDER
@@ -324,7 +361,7 @@ parameters:
     formal_blocking: true
 
   - name: sensor.fov_deg
-    source: pcmef/simulation/mitsuba_adapter.py:build_scene_dict（硬編 45.0）
+    source: pcmef/simulation/mitsuba_adapter.py:_SENSOR_FOV_DEG
     role: 接收端視角；決定哪些回波被收集
     value: 45.0
     provenance_status: UNKNOWN
@@ -332,10 +369,19 @@ parameters:
     allowed_range: [10.0, 60.0]
     class_scope: shared
     formal_blocking: true
-    note: VL53L0X 實際 FoV 約 25 度；目前硬編 45 且不是具名參數 —— 已知缺口
+    note: >
+      **角度慣例已由實測確定：這是全角。** mitsuba perspective 的 fov 預設綁 x 軸，
+      實測 fov=45 -> 單邊半角 22.4959 度、畫面對角 30.3562 度（NOTE-033）。
+      **不得逕自改成 25。** 兩個理由：
+      (a) VL53L0X 的 25 度規格值屬 full-cone 或 half-angle，本 repo 無一手來源
+          （SRC-PLAN / SRC-HANDOFF 皆未記載），對比 45 是拿定義不明的數字比；
+      (b) 本模擬的接收端是 64x64 perspective film，不是單一 SPAD 的圓錐視野，
+          方形視野的角落（30.36 度）本來就超出同名的圓錐半角。
+      解除阻塞需要：取得 ST 資料手冊對 25 度的定義，並裁決方形 film 與
+      圓錐 FoV 之間的對應方式。
 
   - name: light.cutoff_angle_deg
-    source: pcmef/simulation/mitsuba_adapter.py:build_scene_dict（硬編 25.0）
+    source: pcmef/simulation/mitsuba_adapter.py:_LIGHT_CUTOFF_ANGLE_DEG
     role: VCSEL 發散角
     value: 25.0
     provenance_status: UNKNOWN
@@ -343,7 +389,13 @@ parameters:
     allowed_range: [5.0, 45.0]
     class_scope: shared
     formal_blocking: true
-    note: 目前硬編，不是具名參數 —— 已知缺口
+    note: >
+      **角度慣例已由實測確定：這是半角。** cutoff_angle=25 時，離軸 24.9 度仍有
+      輻射、25.1 度為 0，故照明錐為 **50 度全角**（NOTE-033）。
+      同一個檔案裡 fov 的 45 是全角、本項的 25 是半角 —— 兩個角度用了相反的
+      慣例。因此「光源 25 度比感測器 45 度窄」是錯覺：實際上照明錐(50 度全角)
+      **比接收視野(45 度全角)寬**。這會影響哪些回波被收集，calibration 前必須
+      先裁決兩者的相對關係。
 
   # ---- Surrogate 校準常數（calibration.py 的九個）-------------------------
   - name: optical_path_to_distance
@@ -353,10 +405,13 @@ parameters:
     provenance_status: CONFIRMED       # monostatic 幾何使其為 0.5（NOTE-026）
     kind: derived
     class_scope: shared
-    formal_blocking: true              # 仍標為 placeholder，見 note
+    formal_blocking: false
     note: >
-      物理上由共置幾何決定，不該是自由參數。但目前仍在 placeholder 清單內，
-      formal 模式會擋。應改標為 derived 並移出可校準集合（待處理）。
+      由共置（monostatic）幾何決定：光程恰為單程距離的兩倍，故係數為 0.5。
+      **不是自由參數，不得進 calibration 搜尋集合。**
+      2026-08-28 已在 calibration.py 落實：改標 derived=True、placeholder=False，
+      並由 SurrogateCalibration.with_calibrated() 拒絕覆寫（NOTE-030）。
+      改動它等於改動幾何假設，必須先改場景再改這裡。
 
   - name: distance_offset_mm
     source: pcmef/surrogate/calibration.py
@@ -388,7 +443,11 @@ parameters:
     allowed_range: [1.0e-6, 1.0e6]
     class_scope: shared
     formal_blocking: true
-    confounded_with: [_ROOM_LIGHT_RATIO]
+    confounded_with: [_ROOM_LIGHT_RATIO, lighting.irradiance]
+    note: >
+      **CG-3 BLOCKED（NOTE-032）。** 本係數的輸入 background_energy 實測
+      99.97% 是雷射多重反射而非環境光，校準它會把多重反射的大小寫成
+      環境光速率。須先修正 Ambient 觀測量定義。
 
   - name: sigma_width_to_mm
     source: pcmef/surrogate/calibration.py
@@ -451,16 +510,110 @@ confounded_groups:
     members: [_SIGMA_T_REFERENCE_PER_M, medium.turbidity, medium.bubble_density,
               medium.mist_density]
     relation: sigma_t = density * _SIGMA_T_REFERENCE_PER_M
-    resolution: 固定 _SIGMA_T_REFERENCE_PER_M，只校準三個密度（待裁決）
+    decision:
+      status: RESOLVED
+      decided_on: "2026-08-28"
+      fixed: [_SIGMA_T_REFERENCE_PER_M]
+      calibrated: [medium.turbidity, medium.bubble_density, medium.mist_density]
+      rationale: >
+        四個成員共同決定三個可觀測量（每類一個 sigma_t），恰好多一個自由度，
+        且該自由度是純粹的尺度 —— 固定任一項在數值上都可行，因此不能用
+        「哪個比較好 fit」來選，只能用 provenance 與可解釋性選。
+
+        其一，provenance 上四者平手（全部 PLACEHOLDER），但**不對稱**：
+        SRC-SAI §9 的 scenario.yaml 草案把 bubble_density 標為
+        <validation-frozen range>，也就是規格本身已經把「密度」定位成
+        由 validation 決定的量；規格從未提及參考尺度這個東西，它是本實作
+        為了換算單位而引入的。把規格指名要校準的量固定起來、去校準一個
+        規格沒有的量，方向相反。
+
+        其二，固定的必須是 shared 那一項。固定某一類的密度（例如 turbidity）
+        等於讓「水有多濁」成為定義而非結果，並使其餘兩類的 sigma_t 都相對於
+        一個關於水的任意選擇而定，把原本互相獨立的三類耦合在一起。
+        固定 shared 的參考尺度則只移除那一個多餘自由度，三類互不牽連。
+
+        其三，_SIGMA_T_REFERENCE_PER_M = 100.0 的來源本身就證明它不是量測值：
+        程式註解明寫「選 100 是為了讓密度 0.1-0.3 得到光學厚度 tau 約 0.6-1.7」
+        —— 它是與密度一起挑出來湊出某個 tau 範圍的，不是獨立觀測。
+        一個由挑選產生的數字沒有資格當校準結果，但完全有資格當 gauge。
+      claim_boundary: >
+        _SIGMA_T_REFERENCE_PER_M 固定為 100.0 /m 是 **gauge fixing，不是量測**。
+        因此校準後的 turbidity / bubble_density / mist_density
+        **不得被解讀為絕對物理密度或濁度**，也不得與文獻的濁度值比較；
+        它們只有在「乘上本 gauge 得到 sigma_t」這個意義下成立。
+        可宣稱的物理量只有 sigma_t (1/m) 本身。
 
   - id: CG-2_brightness
-    physical_quantity: 回到感測器的絕對能量
-    members: [lighting.irradiance, signal_energy_to_mcps, _FOIL_REFLECTANCE_940NM]
-    relation: Signal ∝ irradiance × 反射率 × energy_to_mcps
-    resolution: 固定 irradiance = 1.0，只校準 surrogate 端係數（待裁決）
+    physical_quantity: 回到感測器的絕對能量尺度
+    # 2026-08-28 更正：原本登記為「三者相乘」是**錯的**，實測推翻。
+    members: [lighting.irradiance, signal_energy_to_mcps]
+    relation: Signal ∝ irradiance × signal_energy_to_mcps（兩者為精確簡併）
+    decision:
+      status: RESOLVED
+      decided_on: "2026-08-28"
+      fixed: [lighting.irradiance]
+      calibrated: [signal_energy_to_mcps]
+      rationale: >
+        **先更正組成。** 原 registry 把 _FOIL_REFLECTANCE_940NM 也列為成員，
+        理由是「三者相乘」。實測推翻此說（probe_cg2，64x64/spp=16/128 bins）：
+
+          irradiance 1.0 -> 2.0      能量比 2.0000，波形正規化後逐 bin 差 **0.0**
+          foil 0.85 -> 0.425         能量比 0.983(Empty) / 0.768(Water)，
+                                     正規化波形 L1 差 0.020 / 0.166，
+                                     變化集中在箔片 bin（147.4 / 162.6 mm）
+
+        irradiance 是**精確的全域增益**（shape delta 恰為 0），與
+        signal_energy_to_mcps 完全簡併；而 _FOIL_REFLECTANCE_940NM 只縮放
+        箔片那一支回波，會改變波形**形狀**，因此在原理上可與全域增益分離。
+        它不屬於本組，已移出，改為獨立的 calibration-only 參數。
+
+        **再選固定項。** 固定 irradiance = 1.0：mitsuba spot 的 intensity 單位是
+        W/sr，而 SRC-HANDOFF 未回收任何 VCSEL 光功率規格，因此這個絕對值沒有
+        一手來源可對；反之 signal_energy_to_mcps 的定義**就是**「模擬能量換算成
+        MCPS」，任意的輻射尺度本來就該落在這個換算係數上，因為 MCPS 才是
+        可觀測、可校準的那一端。把尺度留在 scenario yaml 還有一個實務風險：
+        yaml 逐 run 變動，全域亮度會在 run 之間無聲漂移。
+      claim_boundary: >
+        lighting.irradiance = 1.0 為 **radiometric gauge**，不是 VCSEL 的實際
+        光功率，**不得**被引用為感測器發射功率或任何絕對輻射量。
+        校準後的 signal_energy_to_mcps 因此也是相對值，只在本 gauge 下有意義。
 
   - id: CG-3_ambient
     physical_quantity: Ambient Rate
     members: [lighting.irradiance, _ROOM_LIGHT_RATIO, ambient_energy_to_mcps]
     relation: Ambient ∝ irradiance × room_ratio × ambient_energy_to_mcps
-    resolution: 待裁決
+    decision:
+      status: BLOCKED
+      decided_on: "2026-08-28"
+      rationale: >
+        本組的簡併結構其實可解 —— irradiance 已由 CG-2 固定，剩下
+        _ROOM_LIGHT_RATIO × ambient_energy_to_mcps 是單純的兩項簡併，
+        固定其一即可。**但那不是本組真正的問題。**
+
+        問題在於要拿來校準它的那個觀測量不是 ambient。實測（probe_ambient，
+        Empty 與 Water-filled，室內光比例 0.0 / 0.02 / 0.5 三點）：
+
+          background_energy（Ambient 通道的輸入）
+            室內光關閉      26408.47 (Empty)   200336.76 (Water)
+            室內光 0.02     26417.22           200344.72
+          -> 室內光佔比      **0.033%**          **0.004%**
+          -> 雷射多重反射佔比 99.967%            99.996%
+
+        也就是說 _ROOM_LIGHT_RATIO 對 Ambient 輸出的槓桿只有萬分之三，
+        其餘全部來自感測器自己打出去的光。在這個觀測量上校準室內光比例，
+        等於用一把 99.97% 是雜訊的尺去量一件事 —— 得到的數字會收斂，
+        但收斂到的是多重反射的大小，不是環境光。
+
+        這不是「證據不足」而已，是**校準目標定義錯誤**。在 Ambient 觀測量
+        改正之前給任何一項數值，都是把一個無法辨識的量寫成已知。
+      blocked_reason: >
+        Ambient 觀測量 features.extract_observables 的
+        background_energy := total - main_window 實測有 99.97% 是雷射多重反射，
+        並非環境光；_ROOM_LIGHT_RATIO 在其上的槓桿僅 0.033%（見 rationale）。
+      unblock_requires:
+        - Ambient 觀測量重新定義為「不含 VCSEL 貢獻」的量（例如關閉 spot 的
+          獨立 ambient pass；實測該 pass 總能量 Empty 14.17 / Water 12.32，
+          與現行 background_energy 差 1864x / 16262x）
+        - 重新量測 _ROOM_LIGHT_RATIO 對新觀測量的槓桿，確認其可辨識
+        - 上述完成後本組退化為 {_ROOM_LIGHT_RATIO, ambient_energy_to_mcps}
+          兩項簡併，再依 CG-2 同一套理由選定固定項

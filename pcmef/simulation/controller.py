@@ -4,7 +4,7 @@
 #         寫出 artifact 與 simulation_smoke_manifest.json（E1-G03 證據）。
 # 檔案路徑: pcmef/simulation/controller.py
 # 產生時間: 2026-08-26 08:05 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 把一份場景設定跑完整套模擬 —— 算 RGB、算 transient、記錄兩者共用的
 #           場景識別碼與所有版本資訊，失敗時也把錯誤留成可稽核的檔案而不是消失。
 # 模組定位: 模擬層的編排者。它不決定物理參數，也不做校準；
@@ -20,7 +20,13 @@
 #   - 不得把失敗的場景從 manifest 中略去；FAILED 與其錯誤訊息本身就是稽核結論。
 #   - 不得以本批次的產物宣稱任何 physics fidelity；材質參數尚未校準，
 #     claim boundary 由 E1-G12 管制。
+#   - 不得從 manifest 移除 parameter_registry 區塊，也不得在 registry 讀不到時
+#     靜默略過它；一份不知道自己用了哪組參數的 artifact 無法支持任何主張。
+#   - 不得改變 manifest_hash 的涵蓋範圍（僅 scenario 內容）；
+#     要涵蓋參數請看 run_identity_hash（NOTE-030）。
 #   - v0.1.0 新增：首版 smoke controller。
+#   - v0.2.0 manifest 記錄 parameter_registry 摘要與 parameter_set_hash，
+#     並新增 run_identity_hash = f(manifest_hash, parameter_set_hash)（NOTE-030）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "manifest or smoke_run or four_classes" -v
 #   - py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml
@@ -100,6 +106,23 @@ def dependency_versions(variant: str = DEFAULT_VARIANT) -> dict[str, str]:
     return versions
 
 
+def _parameter_registry_block() -> dict[str, Any]:
+    """manifest 內的參數身分區塊。
+
+    registry 讀不到時如實記錄錯誤而不是省略欄位：一份沒有這個區塊的 manifest
+    與一份記著「registry 壞了」的 manifest，事後的意義完全不同。
+    """
+    from pcmef.core.parameters import ParameterRegistry, ParameterRegistryError
+
+    try:
+        registry = ParameterRegistry.load()
+    except ParameterRegistryError as error:
+        return {"available": False, "error": str(error)}
+    summary = registry.summary()
+    summary["available"] = True
+    return summary
+
+
 class SimulationController:
     """場景執行的編排者。"""
 
@@ -160,6 +183,10 @@ class SimulationController:
             "gate": "E1-G03",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "dependencies": dependency_versions(self.variant),
+            # NOTE(NOTE-030): 每份 artifact 都必須帶著「這次用的是哪一組參數」。
+            # 沒有 parameter_set_hash 的產物，事後無法判定它是在哪一組未校準
+            # 常數下算出來的 —— 而那正是 fidelity 主張成立與否的前提。
+            "parameter_registry": _parameter_registry_block(),
             "counts": {
                 "total": len(runs),
                 "ok": sum(1 for r in runs if r.status == ScenarioStatus.OK),
@@ -173,6 +200,18 @@ class SimulationController:
             ),
         }
         manifest["manifest_hash"] = hash_object(scenarios)
+        # manifest_hash 的定義不變（只涵蓋 scenario 內容），否則既有 E1-G03
+        # 證據的比對基準會整批失效。但只有它是不夠的：把 27 個未校準建模常數
+        # 全部換掉，scenario 內容可以一個位元都不變 —— 那正是這裡要防的靜默漂移。
+        # 因此另立一個涵蓋兩者的 run 身分（NOTE-030）。
+        manifest["run_identity_hash"] = hash_object(
+            {
+                "manifest_hash": manifest["manifest_hash"],
+                "parameter_set_hash": manifest["parameter_registry"].get(
+                    "parameter_set_hash"
+                ),
+            }
+        )
 
         path = target_dir / filename
         path.write_text(
