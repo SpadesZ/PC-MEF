@@ -1,0 +1,159 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pcmef.surrogate.distance 的候選列舉與 cli 的 surrogate estimator-select
+#         讀取；其 preregistration_hash 進 initial_simulation.lock。
+# 檔案路徑: configs/estimator_preregistration.yaml
+# 產生時間: 2026-08-28 15:05 +08:00
+# 版本: v0.1.0
+# 功能說明: 在**跑任何比較之前**寫死「有哪些候選 estimator、各自有哪些可調參數、
+#           用什麼判準選、判準以什麼順序套用、以及什麼情況算選不出來」。
+# 模組定位: distance estimator 的預註冊契約。它「不是」比較結果 ——
+#           結果另存 artifact；本檔在結果產生前凍結，事後不得修改。
+# 主要責任:
+#   1. 列舉候選 estimator 與其 tunable parameters（全類共用）
+#   2. 列出判準與其**套用順序**，以及每一條的通過門檻
+#   3. 明列禁止作為判準的東西
+#   4. 提供 preregistration_hash 的輸入來源
+# 維護提醒:
+#   - 本檔一旦有對應的比較結果 artifact，就**不得再修改**。要改判準必須開
+#     amendment（NOTE-028 的機制）並重跑，理由寫進 amendment 而非改這裡。
+#   - 不得在跑完之後新增候選或新增判準；那等於看著結果發明規則（NOTE-035）。
+#   - 不得把四類 real class mean 加進 selection_criteria，任何形式都不行。
+#   - tunable parameters 一律 shared；出現 class-specific 值即為違規。
+#   - v0.1.0 新增：首版預註冊（NOTE-035）。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli surrogate estimator-select --out outputs/estimator_select
+#   - py -3.10 -m pytest tests/surrogate/test_estimator_selection.py -v
+# ------------------------------------------------------------
+
+preregistration_version: v0.1.0
+registered_on: "2026-08-28"
+status: FROZEN_BEFORE_COMPARISON
+
+# ---------------------------------------------------------------------------
+# 候選 estimator
+# ---------------------------------------------------------------------------
+# 全部作用在 active pass 的 collapsed waveform 上（整個像面加總，對應單一
+# SPAD 陣列）。四類共用同一個函式與同一組參數 —— class label 不進入任何一支。
+candidates:
+  - id: PEAK
+    description: 取全域最大 bin 的時間
+    physical_rationale: 最強回波。現行預設值，列入以作為對照組。
+    tunable_parameters: []
+
+  - id: ENERGY_CENTROID
+    description: 全波形的能量加權平均時間
+    physical_rationale: 對整條回波的一階矩；對多重反射敏感。
+    tunable_parameters: []
+
+  - id: LEADING_EDGE
+    description: 第一個超過偵測門檻的 bin，門檻由 ambient pass 的雜訊水準定義
+    physical_rationale: >
+      ToF 感測器在回波前緣觸發，不是等整條波形收完再取平均。
+      門檻以 **ambient pass 量到的雜訊水準**為單位，因此它是量出來的參考，
+      不是憑感覺挑的絕對值。
+    tunable_parameters: [detection_threshold_sigma, min_return_bins]
+
+  - id: STRONGEST_RETURN_CENTROID
+    description: >
+      把波形切成「連續超過門檻」的數段 return，取能量最大的那一段，
+      回傳該段的能量重心
+    physical_rationale: >
+      VL53L0X-like 的 signal-gated 行為：先判定有哪些 return 通過訊號門檻，
+      再在**單一 return 內**求中心，而不是跨越整條波形平均。
+    tunable_parameters: [detection_threshold_sigma, min_return_bins]
+
+# ---------------------------------------------------------------------------
+# 可調參數（**全類共用**）
+# ---------------------------------------------------------------------------
+tunable_parameters:
+  - name: detection_threshold_sigma
+    role: 偵測門檻，以 ambient pass 的每-bin 雜訊水準為單位
+    allowed_range: [2.0, 10.0]
+    default: 5.0
+    class_scope: shared
+
+  - name: min_return_bins
+    role: 連續超閾多少個 bin 才算一段 return
+    allowed_range: [1, 8]
+    default: 2
+    class_scope: shared
+
+# ---------------------------------------------------------------------------
+# 判準與套用順序
+# ---------------------------------------------------------------------------
+# 順序有意義：先過硬門檻，全部過完才輪到 tie-break。若硬門檻後只剩一個候選，
+# **不得**再去跑 tie-break —— 那會讓一個已經定案的選擇又去碰真實資料。
+selection_criteria:
+
+  - stage: 1
+    id: P
+    name: physics validity
+    kind: hard_gate
+    checks:
+      - P1 回傳值有限且為正
+      - P2 落在場景幾何的光程界限內（start_opl/2 .. end_opl/2）
+      - P3 對同一條波形是決定性的（同輸入同輸出）
+      - P4 函式簽章不接受 class label，實作也不讀取任何類別資訊
+
+  - stage: 2
+    id: S
+    name: synthetic sanity
+    kind: hard_gate
+    checks:
+      - id: S1
+        name: geometric monotonicity
+        detail: >
+          把 geometry.sensor_to_bottle_mm 由 50 mm 增加到 60 mm（純幾何掃描，
+          與類別無關），估計距離必須**增加**，且增量落在 [5, 15] mm。
+          這是測距器的定義性質：真的在量距離的東西，距離變了它就得變。
+        pass_condition: 5.0 <= delta_mm <= 15.0
+      - id: S2
+        name: gain invariance
+        detail: >
+          lighting.irradiance 由 1.0 改為 4.0（純全域增益），估計距離變動
+          必須 < 1%。測距器不得同時是亮度計。
+        pass_condition: relative_change < 0.01
+      - id: S3
+        name: cross-class applicability
+        detail: >
+          同一組參數在四類上都必須算得出有限值。不要求四類數值接近，
+          **也不比較它們與真實值的差距** —— 只要求不炸掉。
+        pass_condition: all four classes finite
+
+  - stage: 3
+    id: A
+    name: independent offset anchors
+    kind: tie_break
+    applies_when: 通過 stage 1+2 的候選多於一個
+    detail: >
+      偏移量測試錨點（實測 98.53 / 90.91 / 88.73 mm）。比較的是**相對**差
+      而非絕對值：絕對值依賴尚未校準的箔片幾何，相對差則是幾何預測。
+    data_provenance:
+      dataset: 偏移量測試（獨立採集，取樣間隔 0.0624 s）
+      is_held_out: false
+      held_out_relation: >
+        held_out_real 由 Edge Impulse export 的 560 筆抽出（NOTE-014）。
+        偏移量測試是**另一次採集**，不在那 560 筆內，因此不屬於 held-out。
+      permitted_use: estimator validation only
+      forbidden_use: >
+        不得用於 calibration、不得用於 E1 fidelity 判定、
+        不得由此推導任何類別相關結論。
+
+# ---------------------------------------------------------------------------
+# 判定規則
+# ---------------------------------------------------------------------------
+decision_rule: >
+  依序套用 stage 1 -> 2。全部通過者進入候選集合。
+  若候選集合恰有一個 -> 直接選定，**不執行 stage 3**。
+  若多於一個 -> 執行 stage 3，取相對偏移誤差最小者；仍相同則取
+  tunable_parameters 較少者；再相同則取 candidates 列表中較前者。
+  若候選集合為空 -> 結論為 NO_ESTIMATOR_SELECTED，不得放寬門檻重跑，
+  必須開 amendment。
+
+# 明列禁止事項，避免日後「沒寫就以為可以」。
+forbidden_selection_inputs:
+  - 四類 real class mean（Empty 100.91 / Water 113.87 / Bubbly 105.57 / Misty 79.51）
+  - 任何 held_out_real 的資料
+  - 「哪個候選算出來比較接近真實分佈」這類事後觀察
+  - 為了避開 45 mm 前玻璃回波而設的 distance search window 或 minimum-distance 規則
+  - class-specific 的門檻或參數
