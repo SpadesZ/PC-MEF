@@ -3,7 +3,7 @@
 #         讀取；其 preregistration_hash 進 initial_simulation.lock。
 # 檔案路徑: configs/estimator_preregistration.yaml
 # 產生時間: 2026-08-28 15:05 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 在**跑任何比較之前**寫死「有哪些候選 estimator、各自有哪些可調參數、
 #           用什麼判準選、判準以什麼順序套用、以及什麼情況算選不出來」。
 # 模組定位: distance estimator 的預註冊契約。它「不是」比較結果 ——
@@ -20,12 +20,14 @@
 #   - 不得把四類 real class mean 加進 selection_criteria，任何形式都不行。
 #   - tunable parameters 一律 shared；出現 class-specific 值即為違規。
 #   - v0.1.0 新增：首版預註冊（NOTE-035）。
+#   - v0.2.0 依 AMD-002 新增 S4 連續性判準；stage 3 標為 NOT_EXECUTABLE
+#     並記錄三個理由。**修改發生在跑任何新比較之前**（NOTE-037）。
 # 驗證方式:
 #   - py -3.10 -m pcmef.cli surrogate estimator-select --out outputs/estimator_select
 #   - py -3.10 -m pytest tests/surrogate/test_ambient_and_estimator.py -v
 # ------------------------------------------------------------
 
-preregistration_version: v0.1.0
+preregistration_version: v0.2.0
 registered_on: "2026-08-28"
 status: FROZEN_BEFORE_COMPARISON
 
@@ -113,6 +115,24 @@ selection_criteria:
           lighting.irradiance 由 1.0 改為 4.0（純全域增益），估計距離變動
           必須 < 1%。測距器不得同時是亮度計。
         pass_condition: relative_change < 0.01
+      - id: S4
+        name: continuity under a small geometric perturbation
+        detail: >
+          橫向偏移 ±5 mm（純幾何擾動），估計距離的變化量必須 <= 25 mm。
+          測距器必須對場景幾何連續：小位移只能造成小變化。若輸出在
+          path family 之間跳躍，它量到的就不是任何單一表面，而是由
+          Monte Carlo 取樣雜訊決定哪一支回波當選。
+
+          門檻由物理定出、未經調校：任何連續幾何響應都 < 1 mm
+          （1 mm 橫移的弓形高 0.018 mm），而 path family 之間的間隔約
+          100 mm（前玻璃 45.8 vs 箔片 145.9）。25 mm 落在兩者之間且
+          距兩端各有數量級餘裕，因此判定對倍數的選擇不敏感。
+
+          本判準由 AMD-002 加入，**非盲**：作者事前已知 NOTE-035 的
+          ±5 mm 觀測。揭露與緩解措施記錄於 AMD-002 的
+          precondition_evidence.DISCLOSURE_prior_knowledge。
+        pass_condition: max(|delta_mm|) <= 25.0 for lateral offset +/-5 mm
+
       - id: S3
         name: cross-class applicability
         detail: >
@@ -124,7 +144,25 @@ selection_criteria:
     id: A
     name: independent offset anchors
     kind: tie_break
-    applies_when: 通過 stage 1+2 的候選多於一個
+    status: NOT_EXECUTABLE            # AMD-002；三個理由見 not_executable_because
+    not_executable_because:
+      - >
+        量級：實測響應 −7.62 / −9.80 mm，但 1 mm 橫移在 R=28.5 mm 圓柱上的
+        前表面弓形高只有 0.018 mm，經瓶內弦長/折射路徑也僅 ~0.012 mm。
+        觀測值比任何幾何預測大 400–550 倍。
+      - >
+        符號：兩側**都變小**。鏡像對稱場景的鏡像對稱位移不可能兩側都變近，
+        代表真實裝置存在未記錄的不對稱（傾角、安裝或基準未置中）。
+        模擬場景鏡像對稱，因此無論用哪個 estimator 都重現不出這個型態。
+      - >
+        解析度：在實際使用的 ±1 mm 位移下，三個存活候選的估計值變化
+        **全部為 0.00 mm**（低於 3.12 mm 的 distance bin 寬），
+        即錨點在該位移下不帶任何鑑別資訊。
+    recovered_provenance:
+      displacement: "±0.1 cm（1 mm）"
+      source: 採集當下的繪圖標題 Baseline / Shift left by 0.1 cm / Shift right by 0.1 cm
+      moving_body: UNKNOWN            # 標題未指明移動的是感測器還是瓶子
+    applies_when: （已停用）通過 stage 1+2 的候選多於一個
     detail: >
       偏移量測試錨點（實測 98.53 / 90.91 / 88.73 mm）。比較的是**相對**差
       而非絕對值：絕對值依賴尚未校準的箔片幾何，相對差則是幾何預測。
@@ -143,12 +181,19 @@ selection_criteria:
 # 判定規則
 # ---------------------------------------------------------------------------
 decision_rule: >
-  依序套用 stage 1 -> 2。全部通過者進入候選集合。
-  若候選集合恰有一個 -> 直接選定，**不執行 stage 3**。
-  若多於一個 -> 執行 stage 3，取相對偏移誤差最小者；仍相同則取
-  tunable_parameters 較少者；再相同則取 candidates 列表中較前者。
-  若候選集合為空 -> 結論為 NO_ESTIMATOR_SELECTED，不得放寬門檻重跑，
-  必須開 amendment。
+  依序套用 stage 1 -> 2（含 AMD-002 新增的 S4）。全部通過者進入候選集合。
+  若候選集合恰有一個 -> 直接選定。
+  若多於一個 -> stage 3 已標為 NOT_EXECUTABLE，因此結論為
+  **TIE_BREAK_UNAVAILABLE**，不得選定任何 estimator，必須再開 amendment。
+  若候選集合為空 -> 結論為 NO_ESTIMATOR_SELECTED，不得放寬門檻重跑。
+
+  兩種「選不出來」都是合法結局。放寬門檻直到只剩一個，不是。
+
+amendments:
+  - id: AMD-002
+    payload_hash: 9742eab8baafe2b91786a17fe20df7853afe6939d098de47d301fdcc92b44237
+    adds: [S4]
+    disables: [stage 3 offset anchors]
 
 # 明列禁止事項，避免日後「沒寫就以為可以」。
 forbidden_selection_inputs:
