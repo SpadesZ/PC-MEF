@@ -35,7 +35,11 @@ import numpy as np
 from pcmef.core.constants import N_TOF_FEATURES, TOF_SCHEMA
 from pcmef.surrogate.ambient import map_ambient_rate
 from pcmef.surrogate.calibration import SurrogateCalibration
-from pcmef.surrogate.distance import DistanceEstimator, map_distance
+from pcmef.surrogate.distance import (
+    SELECTED_ESTIMATOR,
+    DistanceEstimator,
+    map_distance,
+)
 from pcmef.surrogate.features import TransientObservables, extract_observables
 from pcmef.surrogate.signal_rate import map_signal_rate
 from pcmef.surrogate.sigma import map_sigma_like
@@ -48,7 +52,8 @@ class SensorSurrogate:
     """VL53L0X-like 感測器替身。"""
 
     calibration: SurrogateCalibration
-    estimator: DistanceEstimator = DistanceEstimator.PEAK
+    # NOTE(NOTE-037): 預設值由預註冊選定程序決定，不是實作偏好。
+    estimator: DistanceEstimator = SELECTED_ESTIMATOR
     formal: bool = False
 
     def __post_init__(self) -> None:

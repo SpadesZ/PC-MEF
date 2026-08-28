@@ -324,6 +324,212 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-039 initial_simulation.lock 的內容與「凍結當下重驗」規則
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/cli.py` 的 `freeze initial-simulation`；
+`freeze/initial_simulation.lock.json`。
+
+**決策**：
+
+1. 凍結指令**重新執行** readiness 與 reproducibility 兩份稽核，
+   不採信既有 artifact 的結論；任一項非 PASS 即 exit 2。
+2. 工作區有未提交變更時**拒絕凍結**（除非顯式 `--allow-dirty`，
+   且該情況會在 lock 內標記 `code_dirty_at_freeze`）。
+3. lock 內容涵蓋十類：code commit、scene topology/version、registry/hash、
+   initial parameter values、estimator config/hash、surrogate config/hash、
+   seeds、integrator、environment manifest、amendment hashes。
+4. lock 內含 `claim_boundary`，明寫這是 **pre-calibration** 模型。
+
+**原因**：
+
+**其一，lock 不可覆寫，因此前置條件必須在寫入的同一次執行中成立。**
+「上次跑的時候是好的」不是凍結的依據 —— artifact 可能是三小時前、
+不同 commit、不同 registry 下產生的。重跑成本只有幾秒（兩份稽核都不算圖），
+換來的是 lock 與其證據同時成立。
+
+**其二，一個宣稱 commit 的 lock 必須真的來自那個 commit。**
+工作區髒的時候 `git rev-parse HEAD` 仍會給出一個 commit，但那個 commit
+重建不出當下的程式。拒絕凍結是預設；若真有理由放行，
+`code_dirty_at_freeze: true` 會留在 lock 裡，讓後人知道這份 lock
+不能只靠 commit 重建。
+
+**其三，`scene_hash` 取 `content_hash` 而非 `manifest_hash`。**
+理由見 NOTE-038：後者涵蓋 wall-clock 與輸出路徑，用它當 lock 身分
+會讓同一個場景每次凍出不同的值。
+
+**其四，claim boundary 必須寫進 lock 本身而不只是 NOTE。**
+26 個值仍是未校準的 placeholder/nuisance，這份 lock **不宣稱**模擬接近
+真實分佈。它的用途是把起點固定下來，讓 calibration 無法悄悄移動它 ——
+凍結的是「起點」，不是「正確性」。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli audit initial-simulation      # PASS 6 FAIL 0 -> exit 0
+py -3.10 -m pcmef.cli audit reproducibility \
+    --run-a outputs/repro_a --run-b outputs/repro_b # PASS 4 FAIL 0 -> exit 0
+py -3.10 -m pcmef.cli freeze initial-simulation
+```
+
+以不同內容重凍已由 `LockStore.write()` 的既有契約擋下（locks are immutable）。
+
+**維護邊界**：
+- 凍結後**不得**再修改 initial model；要改就是新的 run。
+- 不得為了通過而使用 `--allow-dirty`；那個旗標是為了記錄例外，不是繞過。
+- 不得把 `parameter_ranges` 之外的參數交給 calibration 調整。
+
+相關：[NOTE-036]、[NOTE-037]、[NOTE-038]、[NOTE-014]
+
+---
+
+## NOTE-038 run 身分不得涵蓋 wall-clock 與輸出路徑，並訂定可重現性容忍值
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/simulation/controller.py` 的 `_content_payload()`、
+`_surrogate_identity()`、`content_hash`、`run_identity_hash`；
+`pcmef/audit/reproducibility.py`（新增）；`pcmef/cli.py` 的
+`audit reproducibility`。
+
+**決策**：
+
+1. 新增 `content_hash`：涵蓋 scenario 內容，**剝除** `runtime_s` 與 `outputs`。
+2. `run_identity_hash` 改由 `content_hash` + `parameter_set_hash` +
+   `surrogate_identity` 組成，不再引用 `manifest_hash`。
+3. `manifest_hash` 定義維持不變（NOTE-030 的承諾），但**不參與 run 身分**。
+4. 可重現性容忍值訂為 **bitwise 相同（0.0）**，非「近似」。
+
+**原因**：
+
+**其一，`manifest_hash` 在原理上不可重現，這是實測發現的。** 兩次相同輸入的
+獨立執行：**12 個 .npy 全部 bitwise 相同**、seed/integrator/binning 全部相同，
+但 `manifest_hash` 不同。逐欄位比對後，差異只有兩種：
+
+| 欄位 | run A | run B |
+|---|---|---|
+| `rgb.runtime_s` | 0.1006 | 0.0613 |
+| `transient.runtime_s` | 0.2163 | 0.2115 |
+| `outputs.*` | `outputs/repro_a/…` | `outputs/repro_b/…` |
+
+**沒有任何物理欄位不同。** 也就是說原本的 run 身分把「這次跑了多久、
+存到哪裡」算進了「跑了什麼」。用它當凍結身分，等於保證每次凍結都得到
+不同的答案 —— 那不是嚴格，是壞掉。
+
+NOTE-030 曾寫「不得改變 manifest_hash 的涵蓋範圍」，理由是保護既有比對基準。
+該理由在此不成立：它從來就沒有跨執行穩定過，因此沒有任何基準依賴它。
+折衷做法是**保留原定義、另立 content_hash**，兩邊的承諾都不違背。
+
+**其二，容忍值取 0.0 是量出來的結論，不是理想。** 在固定 seed、固定 spp、
+固定 variant（`llvm_ad_rgb`）、同一台機器上，mitsuba/drjit 是決定性的，
+實測 12/12 artifact bitwise 相同。既然實際做得到，容忍值就沒有理由放寬 ——
+先訂一個寬鬆值再說「符合容忍」，會讓真正的非決定性永遠不被發現。
+
+若日後換到會引入非決定性的後端（多執行緒 reduction 順序不固定的 GPU
+variant），必須**先量測**其上界再據以放寬，並把量測寫進 NOTE。
+**不得因為一次失敗就調大容忍值。**
+
+**其三，surrogate 與 estimator 也是 run 身分的一部分。** 場景一模一樣但
+estimator 換了，產出的四特徵就不同。因此 `surrogate_identity` 收錄
+estimator、兩個可調參數、calibration hash 與 preregistration hash。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli sim smoke --out outputs/repro_a
+py -3.10 -m pcmef.cli sim smoke --out outputs/repro_b
+py -3.10 -m pcmef.cli audit reproducibility --run-a outputs/repro_a --run-b outputs/repro_b
+  RP-01 PASS  12 identity field(s) compared, all identical
+  RP-02 PASS  4 scenario(s) x 9 field(s) compared, all identical
+  RP-03 PASS  12/12 artifact(s) bitwise identical; tolerance all 0.0
+  RP-04 PASS  estimator=LEADING_EDGE preregistration=172b82058460bdb0
+  reproducibility: PASS        -> exit code 0
+```
+
+**維護邊界**：
+- 不得把 `runtime_s` 或 `outputs` 放回 `content_hash`。
+- 不得只比 manifest 而不比 `.npy`：manifest 相同而張量不同是最危險的情況，
+  RP-03 存在的理由就是這個。
+- 不得以「差不多」結案；非 bitwise 相同時必須寫出 max abs / max rel /
+  相對能量差三個數字。
+
+相關：[NOTE-030]、[NOTE-036]、[NOTE-037]
+
+---
+
+## NOTE-037 distance estimator 選定為 LEADING_EDGE，並記錄其 range walk
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/surrogate/distance.py` 的 `SELECTED_ESTIMATOR`；
+`pcmef/surrogate/single_acquisition.py` 的 `SensorSurrogate.estimator` 預設值；
+`configs/estimator_preregistration.yaml` v0.2.0；
+`freeze/amendments/AMD-002.amendment.json`；
+`outputs/estimator_select/estimator_selection.json`。
+
+**決策**：
+
+依 preregistration v0.2.0（含 AMD-002 的 S4）選定
+**`LEADING_EDGE`**，可調參數 `detection_threshold_sigma = 5.0`、
+`min_return_bins = 2`（**全類共用**）。
+
+**原因**：
+
+**其一，先回收 provenance，再決定 stage 3 能不能用。** 從採集當下的繪圖標題
+取得一手證據：`Baseline` / `Shift left by 0.1 cm` / `Shift right by 0.1 cm`，
+即位移為 **±1 mm**。**未**回收的是「移動的是感測器還是瓶子」—— 標題沒有主詞。
+
+同一步同時證明錨點不能當 tie-break（三個理由詳見 AMD-002），其中最硬的一條是
+**符號**：兩側都變小，而鏡像對稱場景的鏡像對稱位移做不到這件事。
+
+**其二，S4 淘汰三個候選，且門檻不是關鍵。**
+
+| 候選 | S1 幾何單調 | S4 最大變化（±5 mm 橫移） | 結果 |
+|---|---|---|---|
+| PEAK | +11.62 mm | **100.06 mm** | 淘汰 |
+| ENERGY_CENTROID | **+16.96 mm**（超界） | 56.33 mm | 淘汰（S1+S4） |
+| **LEADING_EDGE** | +9.70 mm | **0.00 mm** | **選定** |
+| STRONGEST_RETURN_CENTROID | +12.21 mm | **100.54 mm** | 淘汰 |
+
+門檻為 25 mm，而實測值是 0.00 對 56–101 —— 中間空了一個數量級，
+**判定對門檻的選擇不敏感**，這正是 AMD-002 宣稱的性質。
+
+`real_data_consulted: false`：stage 1/2 全程只用未校準場景的合成算圖，
+沒有任何 real class mean、held-out 或 calibration split 進入選定程序。
+
+**其三，選定的 estimator 有已知的 range walk，必須先寫下來。**
+前緣觸發對回波振幅敏感：振幅越大，高斯前緣越早穿越固定門檻。
+實測振幅 10 → 500（50 倍）時，估計距離變動 **10.0%**（89.97 → 80.97 mm）。
+
+這是前緣式 ToF 的固有行為，不是缺陷，但它有兩個後果必須記住：
+（a）`test_signal_is_not_derived_from_distance` 的距離容忍度因此由 5% 放寬到
+20%，並改為斷言「Signal 的相對變化遠大於 Distance 的」；
+（b）**calibration 期間任何改變回波振幅的參數**（箔片反射率、瓶壁粗糙度、
+介質密度）**都會連帶移動 distance**。這是真實耦合，不得以「distance 只該由
+幾何決定」為由把它消掉。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli surrogate estimator-select --out outputs/estimator_select
+  preregistration_hash 172b82058460bdb07f024fb78adc2315d2b682397b1aae6b6d1173771f50db6c
+  outcome SELECTED / selected LEADING_EDGE / real_data_consulted false
+py -3.10 -m pcmef.cli audit initial-simulation      # IS-04 PASS
+```
+
+**維護邊界**：
+- 不得直接改 `SELECTED_ESTIMATOR` 而不重跑 selection；程式與選定證據分家時
+  `RP-04` 會 FAIL。
+- 不得因為 calibration 的結果回頭換 estimator。
+- 兩個可調參數不得逐類設定。
+- 論文措辭一律 **VL53L0X-inspired / VL53L0X-like**；ST 未公開最終 range 的
+  產生方式，不得宣稱重現 internal algorithm。
+
+相關：[NOTE-035]、[NOTE-036]、[NOTE-038]、AMD-002
+
+---
+
 ## NOTE-036 initial_simulation 的凍結判準與 formal-run 防線刻意不同
 
 **決策日期**：2026-08-28

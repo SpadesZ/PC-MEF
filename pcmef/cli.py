@@ -480,6 +480,38 @@ def _build_real_split(args: argparse.Namespace):
     return config, report, plan_real_split(eligible, policy)
 
 
+def cmd_audit_reproducibility(args: argparse.Namespace) -> int:
+    """NOTE-038：比對兩次獨立執行的 initial simulation。"""
+    from pcmef.audit.reproducibility import audit_reproducibility
+
+    report = audit_reproducibility(args.run_a, args.run_b)
+    print("audit: reproducibility")
+    for check in report.results:
+        print(f"[{check.status.value:>12}] {check.identifier}  {check.requirement}")
+        print(f"               {_squash(check.detail)}")
+        for finding in check.findings[:5]:
+            print(f"               ! {_squash(finding)}")
+    counts = report.counts()
+    print(
+        f"\nPASS {counts['PASS']}  FAIL {counts['FAIL']}  "
+        f"NOT_PRODUCED {counts['NOT_PRODUCED']}"
+    )
+    ok = counts["FAIL"] == 0 and counts["NOT_PRODUCED"] == 0
+    print(f"reproducibility: {'PASS' if ok else 'FAIL'}")
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = report.to_artifact()
+        payload["run_a"] = str(args.run_a)
+        payload["run_b"] = str(args.run_b)
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        print(f"artifact: {out_path.resolve()}")
+    return 0 if ok else 2
+
+
 def cmd_audit_initial_simulation(args: argparse.Namespace) -> int:
     """NOTE-036：判定 initial_simulation.lock 現在可不可以凍結。
 
@@ -787,6 +819,152 @@ def cmd_freeze_real_split_policy(args: argparse.Namespace) -> int:
         "\nheld-out is now sealed: it may only be opened once, for E1 final "
         "evaluation. Re-running this command with different data or seed will be "
         "refused (locks are immutable)."
+    )
+    return 0
+
+
+def cmd_freeze_initial_simulation(args: argparse.Namespace) -> int:
+    """凍結 initial_simulation.lock（NOTE-039）。
+
+    凍結前**重新執行**兩份稽核，不採信既有 artifact 的結論：
+    lock 一旦寫下就不可覆寫，因此它的前置條件必須在寫入的同一次執行中成立，
+    而不是「上次跑的時候是好的」。
+    """
+    import subprocess
+
+    from pcmef.audit.initial_simulation import audit_initial_simulation
+    from pcmef.audit.reproducibility import (
+        REPRODUCIBILITY_TOLERANCE,
+        audit_reproducibility,
+    )
+    from pcmef.audit.result import CheckStatus
+    from pcmef.core.parameters import ParameterRegistry
+    from pcmef.simulation.controller import dependency_versions
+    from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
+    from pcmef.surrogate.distance import (
+        DEFAULT_DETECTION_THRESHOLD_SIGMA,
+        DEFAULT_MIN_RETURN_BINS,
+        SELECTED_ESTIMATOR,
+    )
+    from pcmef.surrogate.estimator_selection import preregistration_hash
+
+    readiness = audit_initial_simulation(simulation_manifest=args.manifest)
+    blocking = [c for c in readiness.results if c.status is not CheckStatus.PASS]
+    repro = audit_reproducibility(args.run_a, args.run_b)
+    repro_blocking = [c for c in repro.results if c.status is not CheckStatus.PASS]
+
+    if blocking or repro_blocking:
+        print("error: initial_simulation is not freezable", file=sys.stderr)
+        for check in blocking + repro_blocking:
+            print(f"  [{check.status.value}] {check.identifier}  "
+                  f"{_squash(check.detail)}", file=sys.stderr)
+        return 2
+
+    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    registry = ParameterRegistry.load()
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if dirty and not args.allow_dirty:
+        print(
+            "error: the working tree has uncommitted changes; a lock that names a "
+            "commit must be produced from that commit. Commit first, or pass "
+            "--allow-dirty and accept that the lock cannot be reproduced from the "
+            "named commit alone.",
+            file=sys.stderr,
+        )
+        return 2
+
+    amendments: dict[str, str] = {}
+    amendment_dir = Path(args.freeze_dir) / "amendments"
+    for path in sorted(amendment_dir.glob("*.amendment.json")):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        amendments[document["amendment_id"]] = document["payload_hash"]
+
+    payload = {
+        # -- 必要 key（LOCK_SPECS）------------------------------------------
+        "scene_hash": manifest["content_hash"],
+        "surrogate_hash": PLACEHOLDER_SMOKE_CALIBRATION.calibration_hash(),
+        "code_version": commit,
+        "parameter_ranges": {
+            p.name: p.allowed_range
+            for p in registry.parameters
+            if p.kind == "calibration_only"
+        },
+        "parameter_set_hash": registry.parameter_set_hash(),
+        # -- 其餘凍結內容 ---------------------------------------------------
+        "code_dirty_at_freeze": bool(dirty),
+        "scene_topology": {
+            "version": "NOTE-029 shell+air+shell with far-side foil reflector",
+            "run_identity_hash": manifest["run_identity_hash"],
+            "scenarios": {
+                s["scenario_id"]: {
+                    "scenario_hash": s["scenario_hash"],
+                    "seed": s["transient"]["seed"],
+                    "spp": s["transient"]["spp"],
+                    "integrator": s["transient"]["integrator"],
+                    "temporal_bins": s["transient"]["temporal_bins"],
+                    "start_opl_m": s["transient"]["start_opl_m"],
+                    "bin_width_opl_m": s["transient"]["bin_width_opl_m"],
+                }
+                for s in manifest["scenarios"]
+                if s.get("status") == "OK"
+            },
+        },
+        "registry": {
+            "version": registry.registry_version,
+            "parameter_set_hash": registry.parameter_set_hash(),
+            "counts": registry.counts(),
+            "confounded_groups": registry.summary()["confounded_groups"],
+        },
+        "initial_parameter_values": {
+            p.name: p.value for p in sorted(registry.parameters, key=lambda x: x.name)
+        },
+        "estimator": {
+            "selected": SELECTED_ESTIMATOR.value,
+            "detection_threshold_sigma": DEFAULT_DETECTION_THRESHOLD_SIGMA,
+            "min_return_bins": DEFAULT_MIN_RETURN_BINS,
+            "preregistration_hash": preregistration_hash(),
+            "selection_artifact": "outputs/estimator_select/estimator_selection.json",
+        },
+        "surrogate": PLACEHOLDER_SMOKE_CALIBRATION.to_dict(),
+        "environment": dependency_versions(),
+        "reproducibility": {
+            "verified": True,
+            "tolerance": dict(REPRODUCIBILITY_TOLERANCE),
+            "runs_compared": [str(args.run_a), str(args.run_b)],
+            "checks": {c.identifier: c.status.value for c in repro.results},
+        },
+        "readiness": {c.identifier: c.status.value for c in readiness.results},
+        "amendments": amendments,
+        "claim_boundary": (
+            "This lock freezes the PRE-CALIBRATION model. 26 registry values remain "
+            "uncalibrated placeholders/nuisance parameters; the simulation is NOT "
+            "claimed to be close to the real sensor's distributions. Its purpose is "
+            "to fix the starting point so that calibration cannot silently move it."
+        ),
+    }
+
+    store = LockStore(args.freeze_dir)
+    path = store.write("initial_simulation", payload)
+    print("initial_simulation.lock frozen")
+    print(f"  path               : {path.resolve()}")
+    print(f"  payload hash       : {store.load_hash('initial_simulation')}")
+    print(f"  code_version       : {commit}")
+    print(f"  scene_hash         : {payload['scene_hash']}")
+    print(f"  parameter_set_hash : {payload['parameter_set_hash']}")
+    print(f"  surrogate_hash     : {payload['surrogate_hash']}")
+    print(f"  estimator          : {SELECTED_ESTIMATOR.value} "
+          f"(prereg {preregistration_hash()[:16]})")
+    print(f"  amendments         : {amendments}")
+    print(
+        "\nthe initial model is now sealed. Calibration may only move the "
+        "calibration-only parameters inside their registered ranges; changing the "
+        "initial model requires a new run, not a re-freeze."
     )
     return 0
 
@@ -1626,6 +1804,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     initial_sim.set_defaults(func=cmd_audit_initial_simulation)
 
+    repro = audit_sub.add_parser(
+        "reproducibility",
+        help="NOTE-038：比對兩次獨立執行的 initial simulation（RP-01..RP-04）",
+    )
+    repro.add_argument("--run-a", required=True)
+    repro.add_argument("--run-b", required=True)
+    repro.add_argument("--out", default="outputs/audit/reproducibility_report.json")
+    repro.set_defaults(func=cmd_audit_reproducibility)
+
     sim_parser = subparsers.add_parser("sim", help="模擬")
     sim_sub = sim_parser.add_subparsers(dest="sim_command", required=True)
     smoke = sim_sub.add_parser(
@@ -1672,6 +1859,25 @@ def build_parser() -> argparse.ArgumentParser:
     plan_real.set_defaults(func=cmd_split_plan_real)
     freeze_real.add_argument("--freeze-dir", default="freeze")
     freeze_real.set_defaults(func=cmd_freeze_real_split_policy)
+
+    freeze_parser = subparsers.add_parser("freeze", help="凍結 formal lock")
+    freeze_sub = freeze_parser.add_subparsers(dest="freeze_command", required=True)
+    freeze_initial = freeze_sub.add_parser(
+        "initial-simulation",
+        help="凍結 initial_simulation.lock（先重跑 readiness 與 reproducibility）",
+    )
+    freeze_initial.add_argument(
+        "--manifest", default="outputs/repro_a/simulation_smoke_manifest.json"
+    )
+    freeze_initial.add_argument("--run-a", default="outputs/repro_a")
+    freeze_initial.add_argument("--run-b", default="outputs/repro_b")
+    freeze_initial.add_argument("--freeze-dir", default="freeze")
+    freeze_initial.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="容許工作區有未提交變更（lock 將標記 code_dirty_at_freeze）",
+    )
+    freeze_initial.set_defaults(func=cmd_freeze_initial_simulation)
 
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)

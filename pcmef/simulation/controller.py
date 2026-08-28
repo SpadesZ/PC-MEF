@@ -4,7 +4,7 @@
 #         寫出 artifact 與 simulation_smoke_manifest.json（E1-G03 證據）。
 # 檔案路徑: pcmef/simulation/controller.py
 # 產生時間: 2026-08-26 08:05 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 把一份場景設定跑完整套模擬 —— 算 RGB、算 transient、記錄兩者共用的
 #           場景識別碼與所有版本資訊，失敗時也把錯誤留成可稽核的檔案而不是消失。
 # 模組定位: 模擬層的編排者。它不決定物理參數，也不做校準；
@@ -22,11 +22,17 @@
 #     claim boundary 由 E1-G12 管制。
 #   - 不得從 manifest 移除 parameter_registry 區塊，也不得在 registry 讀不到時
 #     靜默略過它；一份不知道自己用了哪組參數的 artifact 無法支持任何主張。
-#   - 不得改變 manifest_hash 的涵蓋範圍（僅 scenario 內容）；
-#     要涵蓋參數請看 run_identity_hash（NOTE-030）。
+#   - 不得改變 manifest_hash 的涵蓋範圍（僅 scenario 內容，含 runtime/paths）；
+#     它保留原義以免既有引用失效，但**不參與 run 身分**。
+#   - 不得把 runtime_s 或 outputs 放回 content_hash：它們描述「在哪裡跑、
+#     跑多久」，放進去會讓 run 身分在原理上不可重現（NOTE-038 實測）。
 #   - v0.1.0 新增：首版 smoke controller。
 #   - v0.2.0 manifest 記錄 parameter_registry 摘要與 parameter_set_hash，
 #     並新增 run_identity_hash = f(manifest_hash, parameter_set_hash)（NOTE-030）。
+#   - v0.3.0 新增 content_hash（剝除 runtime_s/outputs）與 surrogate_identity；
+#     run_identity_hash 改由 content_hash + parameter_set_hash + surrogate 組成。
+#     原因：實測兩次相同輸入的執行，12 個 .npy 全部 bitwise 相同，
+#     manifest_hash 卻不同 —— 它涵蓋了 wall-clock 與輸出路徑（NOTE-038）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -k "manifest or smoke_run or four_classes" -v
 #   - py -3.10 -m pcmef.cli sim smoke --config configs/simulation/smoke.yaml
@@ -104,6 +110,49 @@ def dependency_versions(variant: str = DEFAULT_VARIANT) -> dict[str, str]:
         except Exception:  # noqa: BLE001
             versions[name] = "unavailable"
     return versions
+
+
+#: 不進 content_hash 的欄位。它們描述「這次在哪裡跑、跑多久」，
+#: 不描述「跑了什麼」。把它們算進去會讓 run 身分在原理上不可重現（NOTE-038）。
+_EXECUTION_ONLY_FIELDS = frozenset({"runtime_s", "outputs"})
+
+
+def _content_payload(node: Any) -> Any:
+    """遞迴剝除只描述執行環境的欄位，留下決定內容的部分。"""
+    if isinstance(node, dict):
+        return {
+            key: _content_payload(value)
+            for key, value in node.items()
+            if key not in _EXECUTION_ONLY_FIELDS
+        }
+    if isinstance(node, list):
+        return [_content_payload(item) for item in node]
+    return node
+
+
+def _surrogate_identity() -> dict[str, Any]:
+    """surrogate 與 estimator 的身分。它們同樣決定 initial simulation 的內容。"""
+    from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
+    from pcmef.surrogate.distance import (
+        DEFAULT_DETECTION_THRESHOLD_SIGMA,
+        DEFAULT_MIN_RETURN_BINS,
+        SELECTED_ESTIMATOR,
+    )
+
+    identity: dict[str, Any] = {
+        "estimator": SELECTED_ESTIMATOR.value,
+        "detection_threshold_sigma": DEFAULT_DETECTION_THRESHOLD_SIGMA,
+        "min_return_bins": DEFAULT_MIN_RETURN_BINS,
+        "calibration_hash": PLACEHOLDER_SMOKE_CALIBRATION.calibration_hash(),
+        "calibration_placeholders": PLACEHOLDER_SMOKE_CALIBRATION.placeholder_names(),
+    }
+    try:
+        from pcmef.surrogate.estimator_selection import preregistration_hash
+
+        identity["preregistration_hash"] = preregistration_hash()
+    except Exception as error:  # noqa: BLE001
+        identity["preregistration_hash"] = f"unavailable: {error}"
+    return identity
 
 
 def _parameter_registry_block() -> dict[str, Any]:
@@ -187,6 +236,7 @@ class SimulationController:
             # 沒有 parameter_set_hash 的產物，事後無法判定它是在哪一組未校準
             # 常數下算出來的 —— 而那正是 fidelity 主張成立與否的前提。
             "parameter_registry": _parameter_registry_block(),
+            "surrogate_identity": _surrogate_identity(),
             "counts": {
                 "total": len(runs),
                 "ok": sum(1 for r in runs if r.status == ScenarioStatus.OK),
@@ -200,16 +250,22 @@ class SimulationController:
             ),
         }
         manifest["manifest_hash"] = hash_object(scenarios)
-        # manifest_hash 的定義不變（只涵蓋 scenario 內容），否則既有 E1-G03
-        # 證據的比對基準會整批失效。但只有它是不夠的：把 27 個未校準建模常數
-        # 全部換掉，scenario 內容可以一個位元都不變 —— 那正是這裡要防的靜默漂移。
-        # 因此另立一個涵蓋兩者的 run 身分（NOTE-030）。
+        # NOTE(NOTE-038): manifest_hash 涵蓋 runtime_s 與 outputs 路徑，因此它
+        # **在原理上不可重現** —— 兩次相同輸入的執行必然得到不同的值。實測：
+        # 兩次獨立執行的 12 個 .npy 全部 bitwise 相同，manifest_hash 卻不同，
+        # 唯一差異就是 wall-clock 與輸出目錄名。
+        #
+        # 它的定義維持不變（NOTE-030 的承諾），但**不再**參與 run 身分：
+        # 執行耗時與存放路徑是「這次跑在哪裡跑多久」，不是「跑了什麼」。
+        # content_hash 只涵蓋決定內容的欄位。
+        manifest["content_hash"] = hash_object(_content_payload(scenarios))
         manifest["run_identity_hash"] = hash_object(
             {
-                "manifest_hash": manifest["manifest_hash"],
+                "content_hash": manifest["content_hash"],
                 "parameter_set_hash": manifest["parameter_registry"].get(
                     "parameter_set_hash"
                 ),
+                "surrogate": manifest["surrogate_identity"],
             }
         )
 

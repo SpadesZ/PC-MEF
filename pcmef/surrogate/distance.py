@@ -55,6 +55,13 @@ class DistanceEstimator(str, Enum):
 DEFAULT_DETECTION_THRESHOLD_SIGMA = 5.0
 DEFAULT_MIN_RETURN_BINS = 2
 
+#: 依預註冊判準選定的 estimator（NOTE-037）。
+#: **不是**在這裡挑的 —— 它是 outputs/estimator_select/estimator_selection.json
+#: 的結論，preregistration v0.2.0（含 AMD-002 的 S4）。
+#: 改這一行而不重跑 selection，會讓程式與選定證據分家；
+#: tests 會比對兩者是否一致。
+SELECTED_ESTIMATOR = DistanceEstimator.LEADING_EDGE
+
 
 def find_returns(
     waveform: np.ndarray,

@@ -99,12 +99,14 @@ def run_estimator_selection(
         "Misty": ({"mist_density": {"value": 0.15, "placeholder": True}}, 1004),
     }
 
-    def make_config(class_label, sensor_mm=50.0, irradiance=1.0):
+    def make_config(class_label, sensor_mm=50.0, irradiance=1.0, lateral_mm=0.0):
         medium, seed = MEDIA[class_label]
         return ScenarioConfig(
             class_label=class_label,
             seed=seed,
-            geometry=Geometry(sensor_to_bottle_mm=sensor_mm),
+            geometry=Geometry(
+                sensor_to_bottle_mm=sensor_mm, lateral_offset_mm=lateral_mm
+            ),
             lighting=Lighting(preset="nominal", irradiance=irradiance),
             medium_parameters=medium,
             spp=spp,
@@ -148,6 +150,12 @@ def run_estimator_selection(
         baseline[label] = observe(make_config(label))
     shifted_obs, _ = observe(make_config("Empty", sensor_mm=60.0))
     bright_obs, _ = observe(make_config("Empty", irradiance=4.0))
+    # S4（AMD-002）：橫向偏移 ±5 mm 的連續性。兩側都算，取變化較大者 ——
+    # 只看單側會漏掉單邊的 path-family 切換。
+    lateral_obs = {
+        offset: observe(make_config("Empty", lateral_mm=offset))[0]
+        for offset in (-5.0, 5.0)
+    }
 
     results: list[dict[str, Any]] = []
     for candidate in prereg["candidates"]:
@@ -216,6 +224,26 @@ def run_estimator_selection(
                 entry["measurements"]["S2_error"] = f"{type(error).__name__}: {error}"
                 failures.append("S2")
 
+            # -- S4（AMD-002）連續性：小幾何擾動不得造成 path family 跳躍 --
+            lateral_mm: dict[str, Any] = {}
+            worst = 0.0
+            s4 = True
+            for offset, obs in lateral_obs.items():
+                try:
+                    value = estimate(obs, estimator)
+                    lateral_mm[str(offset)] = value
+                    worst = max(worst, abs(value - base_mm))
+                except Exception as error:  # noqa: BLE001
+                    lateral_mm[str(offset)] = f"{type(error).__name__}: {error}"
+                    s4 = False
+            if s4:
+                s4 = worst <= 25.0
+            entry["measurements"]["lateral_offset_mm"] = lateral_mm
+            entry["measurements"]["S4_worst_delta_mm"] = worst
+            entry["checks"]["S4_continuity_under_perturbation"] = bool(s4)
+            if not s4:
+                failures.append("S4")
+
             per_class: dict[str, Any] = {}
             s3 = True
             for label in MEDIA:
@@ -251,10 +279,12 @@ def run_estimator_selection(
         )
     else:
         decision = None
-        outcome = "TIE_BREAK_REQUIRED"
+        outcome = "TIE_BREAK_UNAVAILABLE"
         reason = (
-            f"{len(survivors)} candidates survived ({survivors}); the preregistered "
-            "rule calls for stage 3 (independent offset anchors)."
+            f"{len(survivors)} candidates survived ({survivors}); stage 3 (offset "
+            "anchors) is marked NOT_EXECUTABLE by AMD-002, so no estimator may be "
+            "selected. Loosening a gate until one survivor remains is not a "
+            "permitted resolution -- this needs a further amendment."
         )
 
     return {
@@ -274,6 +304,15 @@ def run_estimator_selection(
         "selected": decision,
         "reason": reason,
         "real_data_consulted": False,
+        "amendments": prereg.get("amendments", []),
+        "anti_leakage_statement": (
+            "No real class mean, no held-out record, and no calibration-split "
+            "record entered this selection. Every criterion was evaluated on "
+            "synthetic renders of the uncalibrated scene. The tunable parameters "
+            "are shared across all four classes; no class label reaches "
+            "map_distance. Stage 3 (the only criterion that would have touched "
+            "real data) is marked NOT_EXECUTABLE by AMD-002 and was not run."
+        ),
         "claim_boundary": (
             "Selection used only physics validity and synthetic sanity. No real "
             "class mean and no held-out data entered this procedure. Passing does "
