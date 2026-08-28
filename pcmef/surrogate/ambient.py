@@ -53,6 +53,19 @@ def map_ambient_rate(
             "number, which is an artefact of the surrogate rather than physics."
         )
 
-    ambient_mcps = observables.background_energy * scale
+    # NOTE(NOTE-034): 來源必須是**獨立 ambient pass**（VCSEL 關閉、室內光開啟）。
+    # 先前用的是 active pass 主窗以外的能量，實測那個量 99.97% 是感測器自己
+    # 打出去的光造成的多重反射，室內光只佔 0.033% —— 那不是 Ambient。
+    # 缺 ambient pass 時直接拒絕，不退回舊行為：一個算得出來但量錯東西的
+    # Ambient，比一個算不出來的 Ambient 危險得多。
+    if observables.ambient_energy is None:
+        raise CalibrationError(
+            "Ambient Rate requires a dedicated ambient pass (VCSEL off, room light "
+            "on); no ambient_transient was provided. It must not fall back to the "
+            "active pass's out-of-window energy: that quantity was measured to be "
+            "99.97% laser multipath and only 0.033% room light (NOTE-034)."
+        )
+
+    ambient_mcps = observables.ambient_energy * scale
     ambient_mcps *= 1.0 + float(rng.normal(0.0, jitter))
     return float(max(ambient_mcps, 0.0))

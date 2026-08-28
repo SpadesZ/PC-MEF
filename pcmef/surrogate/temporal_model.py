@@ -103,6 +103,7 @@ class TemporalModel:
         seed: int,
         n_samples: int = TOF_RECORDING_POINTS,
         mode: RecordingMode = RecordingMode.STOCHASTIC,
+        ambient_transient: np.ndarray | None = None,
     ) -> TofRecording:
         """產生 (n_samples, 4) recording。
 
@@ -144,7 +145,9 @@ class TemporalModel:
                     "would be the stochastic model, not independent realizations."
                 )
             rows = [
-                self.surrogate.map_single_acquisition(item, time_axis_s, rng)
+                self.surrogate.map_single_acquisition(
+                    item, time_axis_s, rng, ambient_transient
+                )
                 for item in transients
             ]
         else:
@@ -157,7 +160,9 @@ class TemporalModel:
             # 每次 acquisition 都重跑一次映射：噪聲在映射層施加，
             # 因此同一份 transient 會產生互不相同但同分佈的觀測。
             rows = [
-                self.surrogate.map_single_acquisition(transient, time_axis_s, rng)
+                self.surrogate.map_single_acquisition(
+                    transient, time_axis_s, rng, ambient_transient
+                )
                 for _ in range(n_samples)
             ]
 

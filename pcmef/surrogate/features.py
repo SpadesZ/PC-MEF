@@ -53,8 +53,16 @@ class TransientObservables:
     peak_time_s: float
     centroid_time_s: float
     main_energy: float
-    background_energy: float
+    #: **active pass** 主窗以外的能量。NOTE(NOTE-034): 這是感測器**自己**打出去
+    #: 的光造成的多重反射，**不是**環境光 —— 實測室內光只佔其 0.033%。
+    #: 舊名 background_energy 誤導了 Ambient 映射整整一輪，故改名。
+    #: 只供 SNR 與 multipath 使用，**不得**用來推 Ambient。
+    out_of_window_energy: float
     total_energy: float
+    #: **ambient pass**（VCSEL 關閉）的總能量。Ambient Rate 的唯一來源。
+    #: None 代表沒有提供 ambient pass —— 此時 Ambient 映射必須失敗而不是
+    #: 退回舊行為（NOTE-005 的同一個道理）。
+    ambient_energy: float | None
     fwhm_s: float
     snr: float
     # 無因次的次要回波突起度，值域約 [0,1]。刻意不用「主窗外能量的時間離散度」：
@@ -62,13 +70,22 @@ class TransientObservables:
     # 會讓「回波越寬不確定度越大」這條基本物理被反轉（v0.2.0 修正）。
     multipath_prominence: float
     main_window: tuple[int, int]
+    #: collapsed active waveform 與其時間軸。estimator 需要整條波形才能做
+    #: return 分段（NOTE-035）；只給峰值與重心會讓候選集合被實作限制住，
+    #: 而不是被物理限制住。
+    waveform: np.ndarray | None = None
+    time_axis_s: np.ndarray | None = None
+    #: ambient pass 的每-bin 平均能量。這是**量出來的**雜訊參考，
+    #: 偵測門檻以它為單位，因此門檻不是一個憑感覺挑的絕對值。
+    ambient_noise_per_bin: float | None = None
 
     def to_dict(self) -> dict[str, float]:
         return {
             "peak_time_s": self.peak_time_s,
             "centroid_time_s": self.centroid_time_s,
             "main_energy": self.main_energy,
-            "background_energy": self.background_energy,
+            "out_of_window_energy": self.out_of_window_energy,
+            "ambient_energy": self.ambient_energy,
             "total_energy": self.total_energy,
             "fwhm_s": self.fwhm_s,
             "snr": self.snr,
@@ -138,11 +155,18 @@ def extract_observables(
     transient: np.ndarray,
     time_axis_s: np.ndarray,
     main_window_halfwidth_bins: int = 8,
+    ambient_transient: np.ndarray | None = None,
 ) -> TransientObservables:
-    """從一次 transient 抽出全部物理觀測量。
+    """從一次 acquisition 抽出全部物理觀測量。
+
+    `transient` 是 **active pass**（VCSEL on、室內光 off）；
+    `ambient_transient` 是 **ambient pass**（VCSEL off、室內光 on），
+    兩者取自同一組 binning（NOTE-034）。沒有提供 ambient pass 時
+    `ambient_energy` 為 None，Ambient 映射會拒絕產出 —— 不會退回舊的
+    「主窗外 active 能量」，因為那個量實測 99.97% 是雷射多重反射。
 
     main_window_halfwidth_bins 決定「主回波」的界定範圍。它是**分析參數**
-    而非校準常數：換一個值會改變 Signal/Ambient 的切分，因此必須寫入
+    而非校準常數：換一個值會改變主窗／窗外的切分，因此必須寫入
     surrogate freeze manifest，但它不需要教授裁決，因為它不是研究主張的一部分。
     """
     waveform = collapse_to_waveform(transient)
@@ -166,12 +190,28 @@ def extract_observables(
     low = max(peak_index - main_window_halfwidth_bins, 0)
     high = min(peak_index + main_window_halfwidth_bins + 1, waveform.size)
     main_energy = float(waveform[low:high].sum())
-    background_energy = float(total - main_energy)
+    out_of_window_energy = float(total - main_energy)
 
-    background_bins = waveform.size - (high - low)
-    background_mean = background_energy / background_bins if background_bins > 0 else 0.0
+    outside_bins = waveform.size - (high - low)
+    outside_mean = out_of_window_energy / outside_bins if outside_bins > 0 else 0.0
     peak_value = float(waveform[peak_index])
-    snr = float(peak_value / background_mean) if background_mean > 0 else float("inf")
+    snr = float(peak_value / outside_mean) if outside_mean > 0 else float("inf")
+
+    # ambient pass 允許能量極小甚至為零 —— 關掉室內光時本來就該接近 0，
+    # 那是正確結果而非錯誤，因此不套用 active pass 的「全零即例外」規則。
+    ambient_energy: float | None = None
+    if ambient_transient is not None:
+        ambient_waveform = collapse_to_waveform(ambient_transient)
+        if ambient_waveform.size != waveform.size:
+            raise TransientFeatureError(
+                f"ambient pass has {ambient_waveform.size} bins but the active pass "
+                f"has {waveform.size}; the two passes must share one binning, "
+                "otherwise Signal and Ambient are not comparable quantities"
+            )
+        ambient_energy = float(ambient_waveform.sum())
+        ambient_noise_per_bin = float(ambient_energy / ambient_waveform.size)
+    else:
+        ambient_noise_per_bin = None
 
     fwhm = _fwhm_seconds(waveform, axis, peak_index)
 
@@ -193,10 +233,14 @@ def extract_observables(
         peak_time_s=peak_time,
         centroid_time_s=centroid_time,
         main_energy=main_energy,
-        background_energy=background_energy,
+        out_of_window_energy=out_of_window_energy,
+        ambient_energy=ambient_energy,
         total_energy=total,
         fwhm_s=fwhm,
         snr=snr,
         multipath_prominence=multipath,
         main_window=(low, high),
+        waveform=waveform,
+        time_axis_s=axis,
+        ambient_noise_per_bin=ambient_noise_per_bin,
     )

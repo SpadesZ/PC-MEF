@@ -3,7 +3,7 @@
 #         與 initial_simulation.lock 引用；parameter_set_hash 進 formal artifact。
 # 檔案路徑: configs/parameter_registry.yaml
 # 產生時間: 2026-08-28 01:20 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 列出所有會影響 E1 四特徵（Distance / Ambient / Signal / Sigma-like）
 #           的 scene、renderer 與 surrogate 參數，並逐項標記它的物理角色、
 #           出處、provenance 狀態、是否可校準、允許範圍，以及是否阻擋 formal。
@@ -32,12 +32,16 @@
 #     optical_path_to_distance 改為非 formal-blocking 的 derived；
 #     fov/cutoff/foil orientation/max_depth/bounce_budget 的 source 改指
 #     具名常數（NOTE-030、NOTE-033）。
+#   - v0.3.0 Ambient 觀測量改為獨立 ambient pass 後重測，CG-3 由 BLOCKED 改判
+#     RESOLVED；_ROOM_LIGHT_RATIO 更名 _ROOM_LIGHT_RADIANCE 並與 VCSEL 功率
+#     解耦（預設值下數值不變）；lighting.irradiance 移出 CG-3（影響實測為 0）；
+#     新增 distance estimator 的三個預註冊參數（NOTE-034、NOTE-035）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_parameter_registry.py -v
 #   - py -3.10 -m pcmef.cli params audit
 # ------------------------------------------------------------
 
-registry_version: v0.2.0
+registry_version: v0.3.0
 
 # provenance_status: CONFIRMED | FIXED_SPEC | CONVENTION | RECONSTRUCTED
 #                  | PLACEHOLDER | UNKNOWN
@@ -124,20 +128,23 @@ parameters:
     formal_blocking: false
 
   # ---- 場景 nuisance：全部未校準 -----------------------------------------
-  - name: _ROOM_LIGHT_RATIO
+  - name: _ROOM_LIGHT_RADIANCE
     source: pcmef/simulation/mitsuba_adapter.py
-    role: 室內環境光相對 VCSEL 的強度比；Ambient 通道的唯一來源
+    role: 室內環境光的絕對 radiance；ambient pass 的唯一光源
     value: 0.02
-    provenance_status: PLACEHOLDER
-    kind: calibration_only
-    allowed_range: [0.0001, 1.0]
+    provenance_status: CONVENTION      # CG-3 裁決：ambient gauge
+    kind: fixed
+    allowed_range: null
     class_scope: shared
-    formal_blocking: true
-    confounded_with: [lighting.irradiance, ambient_energy_to_mcps]
+    formal_blocking: false
+    confounded_with: [ambient_energy_to_mcps]
     note: >
-      NOTE-026。**CG-3 已裁決為 BLOCKED（NOTE-032）**：實測本參數對 Ambient
-      輸出的槓桿僅 0.033%（Empty）／0.004%（Water），其餘 99.97% 來自雷射
-      多重反射。在 Ambient 觀測量重新定義之前不得校準本項。
+      NOTE-026 / NOTE-034。**2026-08-28 更名並改判**。
+      舊名 _ROOM_LIGHT_RATIO，值寫成 irradiance × ratio，也就是把室內光綁在
+      VCSEL 功率上；已解耦為絕對 radiance，**預設值下數值完全相同**（1.0×0.02）。
+      Ambient 改由獨立 ambient pass 取得後，本參數對 Ambient 是**精確純增益**
+      （實測 radiance ×4 → ambient 能量 ×4.0000），與 ambient_energy_to_mcps
+      精確簡併，故固定為 gauge。claim boundary 見 CG-3_ambient。
 
   - name: _BOTTLE_SURFACE_ALPHA
     source: pcmef/simulation/mitsuba_adapter.py
@@ -279,14 +286,14 @@ parameters:
 
   - name: lighting.irradiance
     source: configs/simulation/*.yaml
-    role: VCSEL 發射強度；同時被 _ROOM_LIGHT_RATIO 乘用
+    role: VCSEL 發射強度
     value: 1.0
     provenance_status: CONVENTION      # CG-2 裁決：radiometric gauge
     kind: fixed
     allowed_range: null
     class_scope: shared
     formal_blocking: false
-    confounded_with: [_ROOM_LIGHT_RATIO, signal_energy_to_mcps]
+    confounded_with: [signal_energy_to_mcps]
     note: >
       CG-2 的固定項。實測 irradiance 1.0->2.0 使能量恰為 2.0000 倍且正規化
       波形逐 bin 差為 **0.0** —— 與 signal_energy_to_mcps 精確簡併，
@@ -356,9 +363,14 @@ parameters:
     value: [64, 64]
     provenance_status: PLACEHOLDER
     kind: calibration_only
-    allowed_range: null
+    allowed_range: [32, 512]           # **逐軸**像素數的搜尋邊界
     class_scope: shared
     formal_blocking: true
+    note: >
+      allowed_range 是**每一軸**的像素數界限，不是 [width, height] 的值。
+      先前寫 null，於是這個 calibration_only 參數沒有搜尋邊界 ——
+      IS-06 抓到（NOTE-036）。下界 32 是「瓶身輪廓仍能被解析」的粗略下限，
+      上界 512 是實務算力上限；兩者都是**邊界**而非值，仍未校準。
 
   - name: sensor.fov_deg
     source: pcmef/simulation/mitsuba_adapter.py:_SENSOR_FOV_DEG
@@ -443,11 +455,11 @@ parameters:
     allowed_range: [1.0e-6, 1.0e6]
     class_scope: shared
     formal_blocking: true
-    confounded_with: [_ROOM_LIGHT_RATIO, lighting.irradiance]
+    confounded_with: [_ROOM_LIGHT_RADIANCE]
     note: >
-      **CG-3 BLOCKED（NOTE-032）。** 本係數的輸入 background_energy 實測
-      99.97% 是雷射多重反射而非環境光，校準它會把多重反射的大小寫成
-      環境光速率。須先修正 Ambient 觀測量定義。
+      NOTE-034。輸入已改為**獨立 ambient pass**（VCSEL 關閉）的總能量，
+      不再是 active pass 主窗外的能量。CG-3 因此由 BLOCKED 改判 RESOLVED，
+      本項為該組的**校準端**。
 
   - name: sigma_width_to_mm
     source: pcmef/surrogate/calibration.py
@@ -580,40 +592,46 @@ confounded_groups:
 
   - id: CG-3_ambient
     physical_quantity: Ambient Rate
-    members: [lighting.irradiance, _ROOM_LIGHT_RATIO, ambient_energy_to_mcps]
-    relation: Ambient ∝ irradiance × room_ratio × ambient_energy_to_mcps
+    # 2026-08-28 更正：lighting.irradiance 已**移出**本組。Ambient 改由獨立
+    # ambient pass（VCSEL 關閉）取得後，實測 irradiance 對 Ambient 的影響為
+    # **恰好 0**（1.0 -> 4.0 時 ambient 能量 3.603355 -> 3.603355，全位數相同）。
+    members: [_ROOM_LIGHT_RADIANCE, ambient_energy_to_mcps]
+    relation: Ambient ∝ _ROOM_LIGHT_RADIANCE × ambient_energy_to_mcps（精確簡併）
     decision:
-      status: BLOCKED
+      status: RESOLVED
       decided_on: "2026-08-28"
+      fixed: [_ROOM_LIGHT_RADIANCE]
+      calibrated: [ambient_energy_to_mcps]
       rationale: >
-        本組的簡併結構其實可解 —— irradiance 已由 CG-2 固定，剩下
-        _ROOM_LIGHT_RATIO × ambient_energy_to_mcps 是單純的兩項簡併，
-        固定其一即可。**但那不是本組真正的問題。**
+        **先修觀測量，再談可辨識性。** 本組先前裁決為 BLOCKED，理由是要拿來
+        校準它的觀測量不是 ambient：`background_energy = total - main_window`
+        實測 99.97% 是 VCSEL 多重反射（NOTE-032）。該阻塞已由 NOTE-034 解除 ——
+        Ambient 改為**獨立 ambient pass**（VCSEL off、室內光 on）。
 
-        問題在於要拿來校準它的那個觀測量不是 ambient。實測（probe_ambient，
-        Empty 與 Water-filled，室內光比例 0.0 / 0.02 / 0.5 三點）：
+        觀測量修正後重新量測（sim ambient-check，Empty，32x32/spp=16/128 bins，
+        artifact: outputs/ambient_audit/ambient_observable_audit.json）：
 
-          background_energy（Ambient 通道的輸入）
-            室內光關閉      26408.47 (Empty)   200336.76 (Water)
-            室內光 0.02     26417.22           200344.72
-          -> 室內光佔比      **0.033%**          **0.004%**
-          -> 雷射多重反射佔比 99.967%            99.996%
+          A1 室內光遞增 -> Ambient 單調遞增
+             radiance [0.005, 0.02, 0.08, 0.32]
+             -> ambient [0.9008, 3.6034, 14.4134, 57.6537]
+             增益線性度比值 4.0003 / 4.0000 / 4.0000 -> **精確純增益**
+          A2 VCSEL 功率 1.0 -> 4.0
+             ambient 3.603355 -> 3.603355（**完全相同**）
+             active  38675.7 -> 154702.9（x4.0000）
+          A3 VCSEL 關閉 -> 主窗內 ambient 殘留 **恰為 0**（殘留比 0.000e+00）
+          A4 室內光關閉 -> ambient 能量 **恰為 0**
 
-        也就是說 _ROOM_LIGHT_RATIO 對 Ambient 輸出的槓桿只有萬分之三，
-        其餘全部來自感測器自己打出去的光。在這個觀測量上校準室內光比例，
-        等於用一把 99.97% 是雜訊的尺去量一件事 —— 得到的數字會收斂，
-        但收斂到的是多重反射的大小，不是環境光。
+        A2 同時證實 `lighting.irradiance` 不再屬於本組（影響恰為 0），
+        因此本組由三項降為**兩項精確簡併**：兩者都是 Ambient 輸出上的純增益，
+        只有乘積可辨識。
 
-        這不是「證據不足」而已，是**校準目標定義錯誤**。在 Ambient 觀測量
-        改正之前給任何一項數值，都是把一個無法辨識的量寫成已知。
-      blocked_reason: >
-        Ambient 觀測量 features.extract_observables 的
-        background_energy := total - main_window 實測有 99.97% 是雷射多重反射，
-        並非環境光；_ROOM_LIGHT_RATIO 在其上的槓桿僅 0.033%（見 rationale）。
-      unblock_requires:
-        - Ambient 觀測量重新定義為「不含 VCSEL 貢獻」的量（例如關閉 spot 的
-          獨立 ambient pass；實測該 pass 總能量 Empty 14.17 / Water 12.32，
-          與現行 background_energy 差 1864x / 16262x）
-        - 重新量測 _ROOM_LIGHT_RATIO 對新觀測量的槓桿，確認其可辨識
-        - 上述完成後本組退化為 {_ROOM_LIGHT_RATIO, ambient_energy_to_mcps}
-          兩項簡併，再依 CG-2 同一套理由選定固定項
+        固定項的選擇與 CG-2 同一套理由：室內光的絕對 radiance 沒有一手來源
+        （SRC-PLAN / SRC-HANDOFF 都沒有記錄採集現場的照度），而
+        `ambient_energy_to_mcps` 的定義**就是**「模擬能量換算成 MCPS」，
+        MCPS 才是可觀測、可校準的那一端。任意的輻射尺度應落在換算係數上。
+      claim_boundary: >
+        _ROOM_LIGHT_RADIANCE = 0.02 為 **ambient gauge**，**不得**被引用為
+        採集現場的實際環境照度或任何絕對光度量。校準後的
+        ambient_energy_to_mcps 因此也是相對值，只在本 gauge 下有意義。
+        本組的通過只表示 Ambient 與 Signal 是分得開的觀測量，
+        **不表示** Ambient 數值接近真實感測器讀值。

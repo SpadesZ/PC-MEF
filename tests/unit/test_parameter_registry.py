@@ -347,9 +347,9 @@ def test_live_value_drift_is_detected(monkeypatch):
     registry = ParameterRegistry.load(REAL_REGISTRY)
     assert live_value_drift(registry) == [], "the shipped registry must match the code"
 
-    monkeypatch.setattr(ma, "_ROOM_LIGHT_RATIO", 0.99)
+    monkeypatch.setattr(ma, "_ROOM_LIGHT_RADIANCE", 0.99)
     drift = live_value_drift(registry)
-    assert any("_ROOM_LIGHT_RATIO" in item for item in drift)
+    assert any("_ROOM_LIGHT_RADIANCE" in item for item in drift)
 
     with pytest.raises(ParameterRegistryError) as error:
         assert_formal_ready(registry)
@@ -455,7 +455,8 @@ def test_simulation_manifest_records_the_parameter_set(tmp_path):
     assert block["available"] is True
     registry = ParameterRegistry.load(REAL_REGISTRY)
     assert block["parameter_set_hash"] == registry.parameter_set_hash()
-    assert block["confounded_groups"]["CG-3_ambient"]["status"] == "BLOCKED"
+    # CG-3 於 NOTE-034 由 BLOCKED 改判 RESOLVED（Ambient 觀測量已修正）。
+    assert block["confounded_groups"]["CG-3_ambient"]["status"] == "RESOLVED"
     assert manifest["run_identity_hash"] != manifest["manifest_hash"]
 
 

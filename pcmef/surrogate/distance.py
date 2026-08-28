@@ -39,10 +39,90 @@ _M_TO_MM = 1000.0
 
 
 class DistanceEstimator(str, Enum):
-    """飛行時間的取法。兩者對多路徑的敏感度不同，必須顯式選擇並凍結。"""
+    """飛行時間的取法。四者對多路徑的敏感度不同，必須顯式選擇並凍結。
+
+    候選集合與判準在 configs/estimator_preregistration.yaml **預先**凍結
+    （NOTE-035）；本列舉不得在比較之後新增成員。
+    """
 
     PEAK = "peak"
     ENERGY_CENTROID = "energy_centroid"
+    LEADING_EDGE = "leading_edge"
+    STRONGEST_RETURN_CENTROID = "strongest_return_centroid"
+
+
+#: 預註冊的可調參數預設值。**全類共用**，不得逐類設定（NOTE-035）。
+DEFAULT_DETECTION_THRESHOLD_SIGMA = 5.0
+DEFAULT_MIN_RETURN_BINS = 2
+
+
+def find_returns(
+    waveform: np.ndarray,
+    threshold: float,
+    min_return_bins: int,
+) -> list[tuple[int, int]]:
+    """把波形切成「連續超過門檻」的數段 return，回傳 [(start, stop), ...]。
+
+    刻意用「相對波形自身雜訊水準的門檻」而不是絕對距離視窗：距離視窗會把
+    「感測器看到什麼」變成「我們允許它看到什麼」，那正是紅線禁止的偷渡。
+    """
+    above = np.asarray(waveform) > threshold
+    segments: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, flag in enumerate(above):
+        if flag and start is None:
+            start = index
+        elif not flag and start is not None:
+            if index - start >= min_return_bins:
+                segments.append((start, index))
+            start = None
+    if start is not None and above.size - start >= min_return_bins:
+        segments.append((start, int(above.size)))
+    return segments
+
+
+def _gated_time(
+    observables: TransientObservables,
+    estimator: DistanceEstimator,
+    threshold_sigma: float,
+    min_return_bins: int,
+) -> float:
+    """LEADING_EDGE / STRONGEST_RETURN_CENTROID 共用的 return 分段。"""
+    waveform = observables.waveform
+    axis = observables.time_axis_s
+    noise = observables.ambient_noise_per_bin
+    if waveform is None or axis is None:
+        raise CalibrationError(
+            f"{estimator.value} needs the full waveform; the observables were built "
+            "without one. Re-run extract_observables on the active transient."
+        )
+    if noise is None:
+        raise CalibrationError(
+            f"{estimator.value} defines its detection threshold in units of the "
+            "measured ambient noise level, so it requires a dedicated ambient pass "
+            "(NOTE-034). Without one the threshold would be an invented constant."
+        )
+
+    threshold = noise * threshold_sigma
+    segments = find_returns(waveform, threshold, min_return_bins)
+    if not segments:
+        raise CalibrationError(
+            f"no return crossed the detection threshold "
+            f"({threshold_sigma} x ambient noise {noise:.6g} = {threshold:.6g}); "
+            "the estimator must not silently fall back to the global peak"
+        )
+
+    if estimator is DistanceEstimator.LEADING_EDGE:
+        start, _ = segments[0]
+        return float(axis[start])
+
+    # STRONGEST_RETURN_CENTROID：取能量最大的那一段，在**該段之內**求重心。
+    start, stop = max(segments, key=lambda s: float(waveform[s[0] : s[1]].sum()))
+    window = waveform[start:stop]
+    total = float(window.sum())
+    if total <= 0:
+        return float(axis[start])
+    return float(np.sum(axis[start:stop] * window) / total)
 
 
 def map_distance(
@@ -50,18 +130,23 @@ def map_distance(
     calibration: SurrogateCalibration,
     rng: np.random.Generator,
     estimator: DistanceEstimator = DistanceEstimator.PEAK,
+    threshold_sigma: float = DEFAULT_DETECTION_THRESHOLD_SIGMA,
+    min_return_bins: int = DEFAULT_MIN_RETURN_BINS,
 ) -> float:
     """把飛行時間換算成 Distance (mm)。
 
     光程長 = c x t。乘上 optical_path_to_distance 折算成單程距離
-    （共置收發時為 0.5；本研究場景光源與相機非共置，實際係數由校準決定），
-    再換成毫米並加上幾何 offset。
+    （共置收發，係數由幾何得 0.5，NOTE-026），再換成毫米並加上幾何 offset。
     """
-    time_s = (
-        observables.peak_time_s
-        if estimator is DistanceEstimator.PEAK
-        else observables.centroid_time_s
-    )
+    if estimator is DistanceEstimator.PEAK:
+        time_s = observables.peak_time_s
+    elif estimator is DistanceEstimator.ENERGY_CENTROID:
+        time_s = observables.centroid_time_s
+    else:
+        time_s = _gated_time(
+            observables, estimator, threshold_sigma, min_return_bins
+        )
+
     if time_s <= 0:
         raise CalibrationError(
             f"non-positive time of flight ({time_s}); the transient window is placed "

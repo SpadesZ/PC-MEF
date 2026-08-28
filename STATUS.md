@@ -115,8 +115,7 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~Sigma register 未定阻擋 E1-G08~~ | — | **已由 AMD-001 拆解**：channel/scale 為 CONFIRMED，位址獨立為 CONFLICT 且不再擋 gate（NOTE-028） |
 | 10 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
 | **27 個參數未解決** | 全部 formal run | `params audit`（exit 2）有完整清單。**防線已上線**（NOTE-030），不再需要人工數 |
-| **CG-3 / Ambient 觀測量定義錯誤** | `_ROOM_LIGHT_RATIO`、`ambient_energy_to_mcps` | Ambient 通道 99.97% 是雷射多重反射（NOTE-032）。**須先改觀測量定義**，不是校準問題 |
-| **Distance：模擬在真實讀值區間無能量** | `initial_simulation.lock` | Empty 0.15% / Water 0.03% 落在 75–120 mm。**estimator 不能先設**，見「C：Distance estimator」 |
+| ~~CG-3 / Ambient 觀測量定義錯誤~~ | — | **已解除**：Ambient 改為獨立 ambient pass（NOTE-034） |
 | **M2 場景保真度** | `initial_simulation.lock`，其下游 19 個 lock | **關鍵路徑。** 見下方「M2 場景保真度」一節 |
 
 **唯一的關鍵路徑是 M2。** `locks status` 的鏈頭是 `initial_simulation`（pending），
@@ -652,17 +651,29 @@ transient 中只透過打到幾何再回來的路徑出現，本來就不是 DC 
 | Bubbly | 162.63 | 110.74 | 26.16% | 1.94% | **25.72%** | 46.16% |
 | Misty | 45.77 | 84.52 | 31.74% | 23.69% | **15.73%** | 28.83% |
 
-**Empty 0.15%、Water 0.03%。** 沒有任何 estimator 能從一段在該區間沒有能量的
-波形裡取出 100.91 / 113.87 mm。要讓它輸出那個數字，只能加一個把能量無中生有的
-搜尋窗 —— 那正是紅線禁止的做法。**這是 scene physics 缺口，不是 estimator
-選擇問題。**
+> **2026-08-28 更正（重要）：上表不是 M2 formal blocker，本節先前的框架是錯的。**
+>
+> 先前寫「75–120 mm 無能量 ⇒ scene physics 缺口 ⇒ estimator 不能設」。
+> 這個推論把**校準階段的 mismatch 誤判成場景拓樸缺陷**，而且它會直接誘導出
+> 被禁止的做法 —— 若把「讓能量進入 75–120 mm」當成 pre-calibration 的修正目標，
+> 那個目標本身就是從真實類別均值反推出來的。
+>
+> 正確認定：**tracing-supported 的 far-side foil family 已經存在**
+> （約 145–163 mm，NOTE-029 以 `max_depth` 遞增取得，非位置比對）。
+> 它目前偏離真實讀值，可由**未校準的** `_FOIL_GAP_TO_BOTTLE_RATIO`、
+> 其餘 foil 光學常數與介質參數解釋 —— 這正是 calibration 要處理的事。
+> 這種 mismatch **應該保留在 `initial_simulation` 裡**，不得在 initial freeze
+> 之前把場景調進該區間。
+>
+> **紅線**：不得以真實類別均值、或 75–120 mm 視窗，作為 pre-calibration 的
+> 場景修正目標。initial simulation **不要求**貼近真實分佈。
 
-**已識別的陷阱**：`ENERGY_CENTROID` 在 Bubbly（110.74 vs 真實 105.57）與
-Misty（84.52 vs 79.51）看起來很接近，Empty／Water 則差 40 mm。
+**仍然成立、且必須保留的那一條**：`ENERGY_CENTROID` 在 Bubbly（110.74 vs
+真實 105.57）與 Misty（84.52 vs 79.51）看起來很接近，Empty／Water 則差 40 mm。
 若因為「四類中有兩類對得上」而選它，那就是拿真實類別均值挑 estimator，
 SRC-SAI §10 明列為禁止做法。**本節記下這件事，就是為了讓下一棒不會踩進去。**
 
-### 已定案的設計（待場景修好後才實作）
+### 已定案的設計
 
 *措辭一律為 VL53L0X-inspired / VL53L0X-like transient range estimator；
 ST 未公開最終 range 的產生方式，不得宣稱重現 internal algorithm。*
@@ -682,58 +693,99 @@ class-independent）、且屬於偏移測試那次**獨立採集**，不在 560 
 held-out 內（held-out 由那 560 筆抽出）。用它約束 estimator 不會碰到
 類別均值，也不會碰到 held-out。
 
+### 預註冊比較的實測結果（2026-08-28，NOTE-035）
+
+預註冊檔以**獨立 commit**（`68b21eb`）先進版控，內容不含任何結果，
+`preregistration_hash = 27ff55e2332ba8f7…`。之後才跑比較。
+
+| 候選 | S1 幾何單調（50→60 mm，須落在 5–15） | S2 增益不變 | 結果 |
+|---|---|---|---|
+| PEAK | +11.62 mm | 0.0 | **存活** |
+| ENERGY_CENTROID | **+16.96 mm** | 0.0 | **淘汰** |
+| LEADING_EDGE | +9.70 mm | 0.0 | **存活** |
+| STRONGEST_RETURN_CENTROID | +12.21 mm | 0.0 | **存活** |
+
+**硬門檻淘汰的正是先前標記的那個陷阱。** `ENERGY_CENTROID` 跟著整條波形的
+一階矩跑而非量距離，被 S1 擋下 —— 而它正是在 Bubbly／Misty 上看起來最接近
+真實均值的那一個。用物理判準淘汰它，與「因為看起來準所以選它」方向相反。
+
+**結果為 `TIE_BREAK_REQUIRED`，estimator 尚未選定。**
+`real_data_consulted: false` —— stage 1/2 完全沒有碰真實資料。
+
+**stage 3（偏移錨點）經實測判定不可執行**，三個獨立理由：
+
+1. **自變數量級對不上**：`configs/base.yaml` 記為 ±0.1 cm（±1 mm），
+   但瓶半徑 28.5 mm 上橫移 1 mm 的弓形高只有 **0.018 mm**，
+   比觀測到的 7.6–9.8 mm 小三個數量級。
+2. **符號不可能**：兩側**都變小**（Δ −7.62 / −9.80 mm）。凸面前表面橫移
+   只會讓最近點變遠，不可能兩側都變近；場景鏡像對稱，產生不出這個型態。
+3. **沒有鑑別力**：實測橫移 ±1 mm 時三個存活候選的估計值變化**全為 0.00 mm**
+   （低於 3.12 mm 的 distance bin 寬）。
+
+強行使用它只能靠挑一個能讓某候選勝出的位移量 —— 那正是預註冊要防的事。
+**因此本 session 不選定 estimator，也不放寬門檻重跑。**
+
+> 順帶量到但**不得用於本次選定**：橫移 +5 mm 時 PEAK 由 145.88 跳到 45.82 mm，
+> `STRONGEST_RETURN_CENTROID` 同樣跳 −101 mm，而 −5 mm 幾乎不動。
+> 場景鏡像對稱卻不對稱，代表這是 **path family 模式切換**而非幾何響應。
+> 它不在預註冊判準內，事後拿來選就是發明新規則；記錄供未來 amendment 引用。
+
 ### 解除 C 的前置（順序不得跳）
 
-1. B 的 ambient 觀測量改正（獨立 ambient pass）
-2. 查明為何 75–120 mm 區間在 Empty/Water 幾乎無能量 ——
-   幾何上瓶外壁後緣在 107 mm，該回波目前不存在於任何 path family
-   （NOTE-029 的 lineage 只找到 45 / 60 / 145–162 三支）
-3. 上述完成後才依預註冊準則選 estimator
+1. B 的 ambient 觀測量改正（獨立 ambient pass）—— **已完成，NOTE-034**
+2. **預註冊**候選 estimator 與其可調參數，再比較 —— **已完成，NOTE-035**
+3. 依預註冊的判定規則選定，只用 physics / synthetic sanity /
+   獨立 offset anchors，**不得用四類真實均值**
 
 ---
 
-## D：M2 sanity —— 仍為 INCOMPLETE，但阻塞項已從「不明」變成四條具名
+## D：M2 closure —— 六條 closure 條件，五條通過
 
-先前 M2 的阻塞描述是「場景保真度未完 / distance 只修到一半」，
-沒有可判定的準則。現在四條都有數字與判定指令：
+判準改依 M2 closure 的六個條件（**不含**「貼近真實分佈」），
+由 `py -3.10 -m pcmef.cli audit initial-simulation` 判定（NOTE-036）：
 
-| # | 阻塞 | 判定方式 | 現況 |
-|---|---|---|---|
-| 1 | 27 個參數未解決 | `params audit` exit code | **2**（不可進 formal） |
-| 2 | CG-3 觀測量定義錯誤 | `params audit` 顯示 BLOCKED | BLOCKED，三條解除條件已寫入 |
-| 3 | 75–120 mm 無能量 | 逐 bin 能量分佈 | Empty **0.15%** / Water **0.03%** |
-| 4 | estimator 無法選定 | 依賴 1–3 | BLOCKED |
-
-**第 3 條是 M2 的核心。** 真實四類均值 79.51–113.87 mm 對應瓶外壁後緣
-（幾何 107 mm），而 NOTE-029 的 bounce lineage 在整個 max_depth 掃描中
-**只找到 45 / 60 / 145–162 三支 path family** —— 遠壁那一支不存在。
-在它出現之前，distance 一欄無法用於任何 fidelity 主張，
-九個 surrogate 校準常數也無法離開 placeholder。
-
-**已實跑的端到端驗證**（`outputs/phaseA_verify`，四類全 ok、exit 0）：
+| ID | 條件 | 現況 |
+|---|---|---|
+| IS-01 | physical scene topology 合理 | **PASS** 空瓶為殼＋空氣＋殼；ToF 光路無純視覺幾何 |
+| IS-02 | foil return family 存在 | **PASS** 四場景皆有非零回波（lineage 見 NOTE-029） |
+| IS-03 | Ambient observable 定義正確 | **PASS** 四項分離檢查全過（NOTE-034） |
+| IS-04 | Distance estimator 定義固定 | **FAIL** 尚未選定，見 C |
+| IS-05 | 所有 calibration knobs 被 registry 管住 | **PASS** 38 項；code=30 config=8 unbound=0；drift=0；三組全裁決 |
+| IS-06 | 未校準值明確保留為 placeholder/nuisance | **PASS** 26 項未校準，全部有狀態與搜尋邊界 |
 
 ```
-parameter_set_hash  d6d30c7afe1284549effb7fd5d8ad1e9fa86aad3bfad9cddc5a40b535a1b3348
-manifest_hash       47b3d7f8c9925a91abfdb8a10b6a0ba08657a9e2910832dfcb76d62a2eb3a9ca
-run_identity_hash   c7a6b8dcbe4d9a66d37f95e471e9fcc510b4d7572bad517d791e430d87fd6324
-formal_blockers 27   CG-1 RESOLVED / CG-2 RESOLVED / CG-3 BLOCKED
-integrator          empty=transient_path  water/bubbly/misty=transient_prbvolpath
+PASS 5  FAIL 1  NOT_PRODUCED 0     initial_simulation freezable: NO   -> exit 2
 ```
 
-最後一行是修正後的結果 —— 先前四個場景一律記成 `transient_path`。
+**IS-06 與 `params audit` 刻意不同，這是本節的關鍵。** 前者問「pre-calibration
+狀態可否凍結」，後者問「可否進 formal run」。26 項仍是 placeholder 讓
+`params audit` 回 exit 2 是正確的，同時讓 IS-06 PASS 也是正確的 ——
+initial freeze 發生在 calibration **之前**，要求「校準完才能凍結校準前的狀態」
+會是循環（NOTE-036）。
 
-**未做的事，明說**：未重跑 `surrogate smoke` 的四類對照。
-上表第 3 條的數字取自既有 `outputs/scene_v2` artifact，不是本次新算的；
-本次改動屬防線與 provenance 層，不改變任何物理數值
-（`live_value_drift() == 0` 已確認 registry 與程式一致，
-且本次 `sim smoke` 的 Empty 總能量 **377634.3** 與 B 節探針量到的
-**377634.34** 相符）。
+IS-06 上線第一次跑就抓到一個真實缺口：`resolution` 是 `calibration_only`
+卻沒有 `allowed_range`，等於一個沒有搜尋邊界的可校準參數。已補為逐軸 [32, 512]。
+
+**端到端重跑**（`outputs/phaseBC_verify` / `phaseBC_surrogate`，四類全 ok）：
+
+| | Empty | Water | Bubbly | Misty |
+|---|---|---|---|---|
+| distance (mm) | 147.5 | 162.7 | 96.63 | 145.8 |
+| **ambient (MCPS)** | **14.19** | **12.34** | **5.946** | **9.596** |
+| signal (MCPS) | 2.505e+05 | 4.824e+05 | 5.082e+04 | 4.132e+04 |
+
+Ambient 由改動前的 12,111–173,643 降到 5.9–14.2 —— 三到四個數量級，
+與 NOTE-032 量到的「真 ambient 比多重反射小 1864–16262 倍」一致。
+**這不是變好或變差，是改成量另一個東西。**
 
 ---
 
-## E：`initial_simulation.lock` —— 未凍結，且現在**不應**凍結
+## E：`initial_simulation.lock` —— **不可凍結**，唯一阻塞是 IS-04
 
-依指示未進入正式 E1，也未凍結任何 lock。
+依指示未進入正式 E1，也未凍結任何 lock，未開啟 held-out。
+
+**唯一阻塞是 estimator 尚未選定**（IS-04）。其餘五條 closure 條件全部通過。
+解除後即可凍結 —— 不需要模擬距離貼近真實分佈。
 
 本 session 只改了 lock **契約**：`initial_simulation` 的 `required_keys`
 新增 **`parameter_set_hash`**。理由是 `scene_hash` 只涵蓋 scenario 內容 ——

@@ -480,6 +480,180 @@ def _build_real_split(args: argparse.Namespace):
     return config, report, plan_real_split(eligible, policy)
 
 
+def cmd_audit_initial_simulation(args: argparse.Namespace) -> int:
+    """NOTE-036：判定 initial_simulation.lock 現在可不可以凍結。
+
+    判準與 `params audit` **刻意不同**：initial freeze 發生在 calibration 之前，
+    因此「參數仍是 placeholder」是預期狀態，不是阻塞。
+    """
+    from pcmef.audit.initial_simulation import audit_initial_simulation
+
+    report = audit_initial_simulation(
+        ambient_report=args.ambient_report,
+        estimator_report=args.estimator_report,
+        simulation_manifest=args.simulation_manifest,
+    )
+    print("audit: initial_simulation_readiness")
+    for check in report.results:
+        print(f"[{check.status.value:>12}] {check.identifier}  {check.requirement}")
+        print(f"               {_squash(check.detail)}")
+    counts = report.counts()
+    print(
+        f"\nPASS {counts['PASS']}  FAIL {counts['FAIL']}  "
+        f"NOT_PRODUCED {counts['NOT_PRODUCED']}"
+    )
+    ready = counts["FAIL"] == 0 and counts["NOT_PRODUCED"] == 0
+    print(f"initial_simulation freezable: {'YES' if ready else 'NO'}")
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = report.to_artifact()
+        payload["freezable"] = ready
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        print(f"artifact: {out_path.resolve()}")
+    return 0 if ready else 2
+
+
+def cmd_sim_ambient_check(args: argparse.Namespace) -> int:
+    """NOTE-034：驗 Ambient 與 Signal 是兩個分得開的觀測量。
+
+    與 sim smoke 同樣走子行程隔離（NOTE-012）：父行程不載入 mitsuba，
+    成敗以 artifact 判定而非子行程 exit code。
+    """
+    out_dir = Path(args.out)
+    report_path = out_dir / "ambient_observable_audit.json"
+
+    if not args.in_worker:
+        import subprocess
+
+        if report_path.exists():
+            report_path.unlink()
+        command = [
+            sys.executable, "-m", "pcmef.cli", "sim", "ambient-check",
+            "--out", str(args.out), "--class-label", args.class_label,
+            "--resolution", str(args.resolution), "--spp", str(args.spp),
+            "--in-worker",
+        ]
+        completed = subprocess.run(command, check=False)
+        if not report_path.exists():
+            print(
+                f"error: worker exited with {completed.returncode} and wrote no report",
+                file=sys.stderr,
+            )
+            return completed.returncode or 1
+        if completed.returncode != 0:
+            print(
+                f"\nnote: the render worker exited with {completed.returncode} after "
+                "the report was written (known drjit teardown crash, NOTE-012); "
+                "the audit is judged from the report.",
+                file=sys.stderr,
+            )
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        _print_ambient_report(report, report_path)
+        return 0 if report["counts"]["fail"] == 0 else 2
+
+    from pcmef.simulation.ambient_audit import run_ambient_audit
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+
+    require_mitsuba()
+    report = run_ambient_audit(
+        class_label=args.class_label,
+        resolution=(args.resolution, args.resolution),
+        spp=args.spp,
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    _print_ambient_report(report, report_path)
+    return 0 if report["counts"]["fail"] == 0 else 2
+
+
+def cmd_surrogate_estimator_select(args: argparse.Namespace) -> int:
+    """NOTE-035：依**預先凍結**的判準選定 distance estimator。"""
+    out_dir = Path(args.out)
+    report_path = out_dir / "estimator_selection.json"
+
+    if not args.in_worker:
+        import subprocess
+
+        if report_path.exists():
+            report_path.unlink()
+        command = [
+            sys.executable, "-m", "pcmef.cli", "surrogate", "estimator-select",
+            "--out", str(args.out), "--resolution", str(args.resolution),
+            "--spp", str(args.spp), "--in-worker",
+        ]
+        completed = subprocess.run(command, check=False)
+        if not report_path.exists():
+            print(
+                f"error: worker exited with {completed.returncode} and wrote no report",
+                file=sys.stderr,
+            )
+            return completed.returncode or 1
+        if completed.returncode != 0:
+            print(
+                f"\nnote: the render worker exited with {completed.returncode} after "
+                "the report was written (NOTE-012); judged from the report.",
+                file=sys.stderr,
+            )
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        _print_estimator_report(report, report_path)
+        return 0 if report["outcome"] == "SELECTED" else 2
+
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+    from pcmef.surrogate.estimator_selection import run_estimator_selection
+
+    require_mitsuba()
+    report = run_estimator_selection(
+        resolution=(args.resolution, args.resolution), spp=args.spp
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    _print_estimator_report(report, report_path)
+    return 0 if report["outcome"] == "SELECTED" else 2
+
+
+def _print_estimator_report(report: dict, path: Path) -> None:
+    print(f"audit: distance_estimator_selection")
+    print(f"preregistration_hash: {report['preregistration_hash']}")
+    print(f"tunable parameters  : {report['tunable_parameters_used']}")
+    print()
+    for entry in report["candidates"]:
+        mark = "survives" if entry["survives"] else "  FAILED"
+        print(f"[{mark}] {entry['id']}")
+        for name, ok in entry["checks"].items():
+            print(f"           {'ok  ' if ok else 'FAIL'} {name}")
+        measurements = entry["measurements"]
+        for key in ("empty_mm", "S1_delta_mm", "S2_relative_change"):
+            if key in measurements:
+                print(f"           {key} = {measurements[key]}")
+        if "per_class_mm" in measurements:
+            print(f"           per_class_mm = {measurements['per_class_mm']}")
+    print(f"\noutcome : {report['outcome']}")
+    print(f"selected: {report['selected']}")
+    print(f"reason  : {_squash(report['reason'])}")
+    print(f"artifact: {path.resolve()}")
+
+
+def _print_ambient_report(report: dict, path: Path) -> None:
+    print(f"audit: ambient_observable ({report['class_label']})")
+    for check in report["checks"]:
+        print(f"[{check['status']:>12}] {check['check_id']}  {check['description']}")
+        print(f"               {check['detail']}")
+    counts = report["counts"]
+    print(f"\nPASS {counts['pass']}  FAIL {counts['fail']}")
+    print(f"artifact: {path.resolve()}")
+
+
 def cmd_params_audit(args: argparse.Namespace) -> int:
     """列出 parameter registry 現況與擋住 formal 的每一條理由。
 
@@ -649,17 +823,30 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
     for scenario in scenarios:
         transient_path = scenario / "transient.npy"
         axis_path = scenario / "transient_time.npy"
+        ambient_path = scenario / "transient_ambient.npy"
         if not (transient_path.exists() and axis_path.exists()):
             continue
         transient = np.load(transient_path)
         axis = np.load(axis_path)
+        # NOTE(NOTE-034): 缺 ambient pass 時**不**沿用舊行為，讓它以例外浮現。
+        # 舊的 artifact 目錄沒有這個檔，重跑 sim smoke 即可產生。
+        if not ambient_path.exists():
+            print(
+                f"error: {scenario.name} has no transient_ambient.npy. Ambient Rate "
+                "now requires a dedicated ambient pass (NOTE-034); re-run `sim smoke` "
+                "to regenerate this scenario.",
+                file=sys.stderr,
+            )
+            return 1
+        ambient_transient = np.load(ambient_path)
 
-        observables = surrogate.observe(transient, axis)
+        observables = surrogate.observe(transient, axis, ambient_transient)
         recording = model.generate_recording(
             transient, axis,
             sample_interval_s=args.sample_interval_s,
             sample_interval_source=args.sample_interval_source,
             seed=args.seed, n_samples=args.n_samples,
+            ambient_transient=ambient_transient,
         )
         finite = bool(np.all(np.isfinite(recording.values)))
         if not finite:
@@ -1418,6 +1605,27 @@ def build_parser() -> argparse.ArgumentParser:
     firewall.set_defaults(func=cmd_audit_heldout_firewall)
     split_policy.set_defaults(func=cmd_audit_real_split_policy)
 
+    initial_sim = audit_sub.add_parser(
+        "initial-simulation",
+        help="NOTE-036：initial_simulation.lock 的凍結前置稽核（IS-01..IS-06）",
+    )
+    initial_sim.add_argument(
+        "--out", default="outputs/audit/initial_simulation_readiness.json"
+    )
+    initial_sim.add_argument(
+        "--ambient-report",
+        default="outputs/ambient_audit/ambient_observable_audit.json",
+    )
+    initial_sim.add_argument(
+        "--estimator-report",
+        default="outputs/estimator_select/estimator_selection.json",
+    )
+    initial_sim.add_argument(
+        "--simulation-manifest",
+        default="outputs/phaseBC_verify/simulation_smoke_manifest.json",
+    )
+    initial_sim.set_defaults(func=cmd_audit_initial_simulation)
+
     sim_parser = subparsers.add_parser("sim", help="模擬")
     sim_sub = sim_parser.add_subparsers(dest="sim_command", required=True)
     smoke = sim_sub.add_parser(
@@ -1432,6 +1640,19 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,  # 內部旗標：標示此行程即為算圖 worker
     )
     smoke.set_defaults(func=cmd_sim_smoke)
+
+    ambient_check = sim_sub.add_parser(
+        "ambient-check",
+        help="NOTE-034：驗 Ambient 與 Signal 是分得開的兩個觀測量",
+    )
+    ambient_check.add_argument("--out", default="outputs/ambient_audit")
+    ambient_check.add_argument("--class-label", default="Empty")
+    ambient_check.add_argument("--resolution", type=int, default=32)
+    ambient_check.add_argument("--spp", type=int, default=16)
+    ambient_check.add_argument(
+        "--in-worker", action="store_true", help=argparse.SUPPRESS
+    )
+    ambient_check.set_defaults(func=cmd_sim_ambient_check)
 
     split_parser = subparsers.add_parser("split", help="資料切分")
     split_sub = split_parser.add_subparsers(dest="split_command", required=True)
@@ -1491,6 +1712,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="上述間隔的出處；不得留空",
     )
     sur_smoke.set_defaults(func=cmd_surrogate_smoke)
+
+    estimator_select = sur_sub.add_parser(
+        "estimator-select",
+        help="NOTE-035：依預先凍結的判準選定 distance estimator",
+    )
+    estimator_select.add_argument("--out", default="outputs/estimator_select")
+    estimator_select.add_argument("--resolution", type=int, default=32)
+    estimator_select.add_argument("--spp", type=int, default=16)
+    estimator_select.add_argument(
+        "--in-worker", action="store_true", help=argparse.SUPPRESS
+    )
+    estimator_select.set_defaults(func=cmd_surrogate_estimator_select)
 
     prov_parser = subparsers.add_parser("provenance", help="來源歧異的證據判定")
     prov_sub = prov_parser.add_subparsers(dest="provenance_command", required=True)

@@ -89,6 +89,15 @@ def _rng(seed: int = 0) -> np.random.Generator:
     return np.random.default_rng(seed)
 
 
+def _ambient_pass(level: float = 0.5, bins: int = BINS) -> np.ndarray:
+    """合成一個 ambient pass（VCSEL 關閉、只有室內光）。
+
+    NOTE(NOTE-034): Ambient 只能來自這個獨立的 pass。舊測試把 active pass
+    的主窗外能量當 ambient，那個量實測 99.97% 是雷射多重反射。
+    """
+    return np.full((1, 1, bins, 1), level)
+
+
 # ---------------------------------------------------------------------------
 # 物理量抽取
 # ---------------------------------------------------------------------------
@@ -187,23 +196,38 @@ def test_signal_rate_increases_with_echo_energy():
     assert strong > weak
 
 
-def test_ambient_rate_increases_with_background():
+def test_ambient_rate_tracks_the_ambient_pass_not_the_active_background():
+    """NOTE-034：Ambient 隨**室內光**變動，且**不隨** active pass 的背景變動。"""
     axis = _time_axis()
     dim = map_ambient_rate(
-        extract_observables(_toy_transient(background=0.2), axis),
+        extract_observables(_toy_transient(), axis, ambient_transient=_ambient_pass(0.2)),
         PLACEHOLDER_SMOKE_CALIBRATION, _rng(4),
     )
     bright = map_ambient_rate(
-        extract_observables(_toy_transient(background=8.0), axis),
+        extract_observables(_toy_transient(), axis, ambient_transient=_ambient_pass(8.0)),
         PLACEHOLDER_SMOKE_CALIBRATION, _rng(4),
     )
     assert bright > dim
+
+    # 反向：active pass 的背景是雷射多重反射，它變動時 Ambient 必須不動。
+    same = _ambient_pass(0.2)
+    quiet = map_ambient_rate(
+        extract_observables(_toy_transient(background=0.2), axis, ambient_transient=same),
+        PLACEHOLDER_SMOKE_CALIBRATION, _rng(4),
+    )
+    noisy = map_ambient_rate(
+        extract_observables(_toy_transient(background=8.0), axis, ambient_transient=same),
+        PLACEHOLDER_SMOKE_CALIBRATION, _rng(4),
+    )
+    assert quiet == pytest.approx(noisy)
 
 
 def test_ambient_must_jitter_between_acquisitions():
     """SRC-SAI §10：每類固定常數無 jitter 是禁止做法。"""
     axis = _time_axis()
-    observables = extract_observables(_toy_transient(), axis)
+    observables = extract_observables(
+        _toy_transient(), axis, ambient_transient=_ambient_pass()
+    )
     rng = _rng(5)
     samples = [
         map_ambient_rate(observables, PLACEHOLDER_SMOKE_CALIBRATION, rng)
@@ -307,7 +331,8 @@ def test_single_acquisition_produces_exactly_four_values():
     """SRC-SAI §10：一次 optical transient 對應恰好一筆 observation。"""
     surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
     vector = surrogate.map_single_acquisition(
-        _toy_transient(), _time_axis(), _rng(9)
+        _toy_transient(), _time_axis(), _rng(9),
+        ambient_transient=_ambient_pass(),
     )
     assert vector.shape == (4,)
     assert np.all(np.isfinite(vector))
@@ -317,15 +342,17 @@ def test_single_acquisition_follows_canonical_column_order():
     """欄序必須經 TOF_SCHEMA 取得（NOTE-001），不得依模組宣告順序。"""
     axis = _time_axis()
     surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
-    vector = surrogate.map_single_acquisition(_toy_transient(), axis, _rng(10))
-    observables = surrogate.observe(_toy_transient(), axis)
+    vector = surrogate.map_single_acquisition(
+        _toy_transient(), axis, _rng(10), _ambient_pass()
+    )
+    observables = surrogate.observe(_toy_transient(), axis, _ambient_pass())
 
     # 背景遠小於主回波，因此 ambient 必然小於 signal；
     # 若欄序被寫反，這條斷言會失敗。
     assert vector[tof_index("ambient_rate_mcps")] < vector[tof_index("signal_rate_mcps")]
     # distance 為毫米量級，sigma 為次毫米到毫米量級。
     assert vector[tof_index("distance_mm")] > vector[tof_index("sigma_like")]
-    assert observables.main_energy > observables.background_energy
+    assert observables.main_energy > observables.out_of_window_energy
 
 
 def test_signal_is_not_derived_from_distance():
@@ -337,10 +364,12 @@ def test_signal_is_not_derived_from_distance():
     axis = _time_axis()
     surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
     weak = surrogate.map_single_acquisition(
-        _toy_transient(peak_bin=40, amplitude=10.0), axis, _rng(11)
+        _toy_transient(peak_bin=40, amplitude=10.0), axis, _rng(11),
+        ambient_transient=_ambient_pass(),
     )
     strong = surrogate.map_single_acquisition(
-        _toy_transient(peak_bin=40, amplitude=500.0), axis, _rng(11)
+        _toy_transient(peak_bin=40, amplitude=500.0), axis, _rng(11),
+        ambient_transient=_ambient_pass(),
     )
     d = tof_index("distance_mm")
     s = tof_index("signal_rate_mcps")
@@ -362,6 +391,7 @@ def test_recording_has_the_canonical_shape():
         _toy_transient(), _time_axis(),
         sample_interval_s=0.082, sample_interval_source="frozen_temporal_config",
         seed=42,
+        ambient_transient=_ambient_pass(),
     )
     assert recording.values.shape == (500, len(TOF_SCHEMA))
     assert recording.n_samples == 500
@@ -380,6 +410,8 @@ def test_recording_length_is_independent_of_transient_bins():
             _toy_transient(peak_bin=bins // 3, bins=bins), _time_axis(bins),
             sample_interval_s=0.082, sample_interval_source="frozen_temporal_config",
             seed=1, n_samples=500,
+            # ambient pass 必須與 active pass 同 binning（NOTE-034）。
+            ambient_transient=_ambient_pass(bins=bins),
         )
         assert recording.n_samples == 500
 
@@ -397,6 +429,7 @@ def test_non_positive_interval_is_rejected(bad):
         _model().generate_recording(
             _toy_transient(), _time_axis(),
             sample_interval_s=bad, sample_interval_source="x", seed=1,
+            ambient_transient=_ambient_pass(),
         )
 
 
@@ -405,6 +438,7 @@ def test_interval_source_is_mandatory():
         _model().generate_recording(
             _toy_transient(), _time_axis(),
             sample_interval_s=0.082, sample_interval_source="", seed=1,
+            ambient_transient=_ambient_pass(),
         )
 
 
@@ -415,11 +449,13 @@ def test_two_datasets_can_carry_different_intervals():
         _toy_transient(), _time_axis(),
         sample_interval_s=0.082, sample_interval_source="edge_impulse_12.19512Hz",
         seed=1,
+        ambient_transient=_ambient_pass(),
     )
     offset = model.generate_recording(
         _toy_transient(), _time_axis(),
         sample_interval_s=0.0624, sample_interval_source="offset_test_recording",
         seed=1,
+        ambient_transient=_ambient_pass(),
     )
     assert main.duration_s != offset.duration_s
     assert main.to_provenance()["sample_interval_source"] != (
@@ -433,6 +469,7 @@ def test_recording_samples_vary_between_acquisitions():
         _toy_transient(), _time_axis(),
         sample_interval_s=0.082, sample_interval_source="frozen_temporal_config",
         seed=7,
+        ambient_transient=_ambient_pass(),
     )
     for column in range(len(TOF_SCHEMA)):
         assert np.std(recording.values[:, column]) > 0
@@ -441,7 +478,7 @@ def test_recording_samples_vary_between_acquisitions():
 def test_same_seed_reproduces_the_recording():
     kwargs = dict(
         sample_interval_s=0.082, sample_interval_source="frozen_temporal_config",
-        seed=99,
+        seed=99, ambient_transient=_ambient_pass(),
     )
     first = _model().generate_recording(_toy_transient(), _time_axis(), **kwargs)
     second = _model().generate_recording(_toy_transient(), _time_axis(), **kwargs)
@@ -456,6 +493,7 @@ def test_realizations_mode_requires_one_transient_per_sample():
             [_toy_transient()] * 3, _time_axis(),
             sample_interval_s=0.082, sample_interval_source="x", seed=1,
             n_samples=8, mode=RecordingMode.REALIZATIONS,
+            ambient_transient=_ambient_pass(),
         )
 
 
@@ -466,6 +504,7 @@ def test_realizations_mode_accepts_matching_transients():
         transients, _time_axis(),
         sample_interval_s=0.082, sample_interval_source="x", seed=1,
         n_samples=8, mode=RecordingMode.REALIZATIONS,
+        ambient_transient=_ambient_pass(),
     )
     assert recording.values.shape == (8, 4)
     assert recording.mode is RecordingMode.REALIZATIONS
@@ -477,6 +516,7 @@ def test_provenance_marks_the_measurement_time_axis():
         _toy_transient(), _time_axis(),
         sample_interval_s=0.082, sample_interval_source="frozen_temporal_config",
         seed=3,
+        ambient_transient=_ambient_pass(),
     ).to_provenance()
     assert provenance["time_axis"] == "measurement_time"
     assert provenance["tof_schema"] == list(TOF_SCHEMA)

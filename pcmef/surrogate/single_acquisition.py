@@ -56,15 +56,23 @@ class SensorSurrogate:
             self.calibration.assert_formal_ready()
 
     def observe(
-        self, transient: np.ndarray, time_axis_s: np.ndarray
+        self,
+        transient: np.ndarray,
+        time_axis_s: np.ndarray,
+        ambient_transient: np.ndarray | None = None,
     ) -> TransientObservables:
-        """只抽物理量，不做校準映射。供診斷與 calibration 使用。"""
+        """只抽物理量，不做校準映射。供診斷與 calibration 使用。
+
+        `transient` 為 active pass、`ambient_transient` 為 ambient pass
+        （NOTE-034）。
+        """
         return extract_observables(
             transient,
             time_axis_s,
             main_window_halfwidth_bins=int(
                 self.calibration.analysis.get("main_window_halfwidth_bins", 8)
             ),
+            ambient_transient=ambient_transient,
         )
 
     def map_single_acquisition(
@@ -72,6 +80,7 @@ class SensorSurrogate:
         transient: np.ndarray,
         time_axis_s: np.ndarray,
         rng: np.random.Generator,
+        ambient_transient: np.ndarray | None = None,
     ) -> np.ndarray:
         """一次 optical transient -> 恰好一筆 [Distance, Ambient, Signal, Sigma-like]。
 
@@ -79,7 +88,7 @@ class SensorSurrogate:
         SRC-SAI §10 明令禁止「只用 Distance 推算 Signal」這類做法，
         因為那會讓兩個模態的分歧度 D 被人為壓低。
         """
-        observables = self.observe(transient, time_axis_s)
+        observables = self.observe(transient, time_axis_s, ambient_transient)
 
         mapped: dict[str, float] = {
             "distance_mm": map_distance(

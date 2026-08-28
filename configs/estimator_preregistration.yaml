@@ -22,7 +22,7 @@
 #   - v0.1.0 新增：首版預註冊（NOTE-035）。
 # 驗證方式:
 #   - py -3.10 -m pcmef.cli surrogate estimator-select --out outputs/estimator_select
-#   - py -3.10 -m pytest tests/surrogate/test_estimator_selection.py -v
+#   - py -3.10 -m pytest tests/surrogate/test_ambient_and_estimator.py -v
 # ------------------------------------------------------------
 
 preregistration_version: v0.1.0

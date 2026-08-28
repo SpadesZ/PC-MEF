@@ -540,7 +540,7 @@ def live_values() -> dict[str, Any]:
         "geometry.wall_thickness_mm": geometry.wall_thickness_mm,
         "geometry.lateral_offset_mm": geometry.lateral_offset_mm,
         "_INTERIOR_BASE_IOR": ma._INTERIOR_BASE_IOR,
-        "_ROOM_LIGHT_RATIO": ma._ROOM_LIGHT_RATIO,
+        "_ROOM_LIGHT_RADIANCE": ma._ROOM_LIGHT_RADIANCE,
         "_BOTTLE_SURFACE_ALPHA": ma._BOTTLE_SURFACE_ALPHA,
         "_FOIL_GAP_TO_BOTTLE_RATIO": ma._FOIL_GAP_TO_BOTTLE_RATIO,
         "_FOIL_SIZE_TO_DIAMETER_RATIO": ma._FOIL_SIZE_TO_DIAMETER_RATIO,

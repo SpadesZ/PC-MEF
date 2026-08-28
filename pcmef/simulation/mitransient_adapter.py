@@ -52,6 +52,7 @@ import numpy as np
 
 from pcmef.simulation.mitsuba_adapter import (
     DEFAULT_VARIANT,
+    Illumination,
     SimulationDependencyError,
     build_scene_dict,
     require_mitsuba,
@@ -130,13 +131,14 @@ def build_transient_scene_dict(
     start_opl_m: float,
     bin_width_opl_m: float,
     max_depth: int = 12,
+    illumination: Illumination = Illumination.BOTH,
 ) -> dict[str, Any]:
     """在共用場景上替換成 transient integrator 與 film。
 
     刻意重用 build_scene_dict()：SRC-SAI FR-005 要求同一 scenario 產出的
     RGB 與 transient 必須來自同一個場景，各建一份場景會讓兩者悄悄分歧。
     """
-    scene = build_scene_dict(mi, config)
+    scene = build_scene_dict(mi, config, illumination)
     # NOTE(NOTE-026): 帶參與介質的場景必須用 volumetric 積分器。
     # transient_path 會**靜默忽略** interior medium —— 算得出圖、能量也正常，
     # 但四類的散射差異完全不見（實測：加介質前後總能量到小數點都相同）。
@@ -228,6 +230,24 @@ class MiTransientAdapter:
             )
         return float(start), float(bin_width)
 
+    @staticmethod
+    def _render_pass(mi, scene_dict: dict[str, Any], config: ScenarioConfig):
+        """算一個照明條件下的 transient。
+
+        非有限值一律 fail-fast（SRC-SAI §28）：那代表積分器參數已經不合理，
+        截掉它只會把問題藏起來。
+        """
+        scene = mi.load_dict(scene_dict)
+        mi.render(scene, spp=int(config.spp), seed=int(config.seed))
+        transient = np.array(scene.sensors()[0].film().develop_transient_())
+        if not np.all(np.isfinite(transient)):
+            raise SimulationDependencyError(
+                "the transient render produced NaN/Inf values. SRC-SAI §28 requires "
+                "fail-fast here: it means the integrator parameters are already "
+                "unphysical, and clipping them would hide that."
+            )
+        return transient
+
     def render_transient(
         self,
         config: ScenarioConfig,
@@ -251,21 +271,24 @@ class MiTransientAdapter:
         target_dir = Path(out_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        scene_dict = build_transient_scene_dict(
-            mi, config, temporal_bins, start_opl_m, bin_width_opl_m
-        )
         started = time.perf_counter()
-        scene = mi.load_dict(scene_dict)
-        mi.render(scene, spp=int(config.spp), seed=int(config.seed))
-        transient = np.array(scene.sensors()[0].film().develop_transient_())
-        runtime = time.perf_counter() - started
 
-        if not np.all(np.isfinite(transient)):
-            raise SimulationDependencyError(
-                "the transient render produced NaN/Inf values. SRC-SAI §28 requires "
-                "fail-fast here: it means the integrator parameters are already "
-                "unphysical, and clipping them would hide that."
-            )
+        # NOTE(NOTE-034): 兩個 pass，同一組 binning、同一個 seed、同一份幾何，
+        # 只有光源不同。
+        #   active  —— VCSEL on / 室內光 off  -> Signal / Distance / Sigma-like
+        #   ambient —— VCSEL off / 室內光 on  -> Ambient Rate
+        # 共用 binning 是必要的：兩條波形若落在不同時間軸上就無法相加也無法比較。
+        scene_dict = build_transient_scene_dict(
+            mi, config, temporal_bins, start_opl_m, bin_width_opl_m,
+            illumination=Illumination.ACTIVE_ONLY,
+        )
+        transient = self._render_pass(mi, scene_dict, config)
+        ambient_dict = build_transient_scene_dict(
+            mi, config, temporal_bins, start_opl_m, bin_width_opl_m,
+            illumination=Illumination.AMBIENT_ONLY,
+        )
+        ambient_transient = self._render_pass(mi, ambient_dict, config)
+        runtime = time.perf_counter() - started
 
         # 截斷偵測。波形若在窗邊仍在上升，代表光還在抵達時窗就關了；
         # 這種 transient 找不到右側半高點，surrogate 的 FWHM 恆為 0，
@@ -290,6 +313,8 @@ class MiTransientAdapter:
 
         transient_path = target_dir / f"{stem}.npy"
         np.save(transient_path, transient.astype(np.float32))
+        ambient_path = target_dir / f"{stem}_ambient.npy"
+        np.save(ambient_path, ambient_transient.astype(np.float32))
 
         # 時間軸取每個 bin 的中心。這是 optical transient time，
         # 與 measurement time 是兩條不同的軸（SRC-D03）。
@@ -312,6 +337,7 @@ class MiTransientAdapter:
             runtime_s=runtime,
             output_paths={
                 "optical_transient": transient_path.as_posix(),
+                "optical_transient_ambient": ambient_path.as_posix(),
                 "optical_transient_time_axis": time_path.as_posix(),
             },
             extra={
@@ -324,6 +350,12 @@ class MiTransientAdapter:
                 "temporal_filter": "box",
                 "scene_units": "metre",
                 "total_energy": float(transient.sum()),
+                # NOTE(NOTE-034): active 與 ambient 分開記錄。兩者的比值是
+                # 「這個場景裡感測器自己的光佔多少」的直接證據，
+                # 也是 Ambient 觀測量沒有被 active 汙染的可稽核依據。
+                "illumination": "split_active_ambient",
+                "active_total_energy": float(transient.sum()),
+                "ambient_total_energy": float(ambient_transient.sum()),
                 "nonzero_bin_ratio": float(np.mean(waveform > 0.0)),
                 # 截斷診斷。peak_bin 貼在窗邊或 edge_fraction 偏高，
                 # 就代表時間窗沒涵蓋完整回波（v0.2.0 新增）。

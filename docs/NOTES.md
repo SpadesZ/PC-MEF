@@ -324,6 +324,220 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-036 initial_simulation 的凍結判準與 formal-run 防線刻意不同
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/audit/initial_simulation.py`（新增）；
+`pcmef/cli.py` 的 `audit initial-simulation`；
+`configs/parameter_registry.yaml` 的 `resolution.allowed_range`。
+
+**決策**：
+
+1. 新增獨立稽核 **IS-01..IS-06**，判定 `initial_simulation.lock` 可否凍結。
+2. **不得**以 `params audit` 的 exit code 作為凍結判準。
+3. IS-06 只要求「未校準值有明確狀態與搜尋邊界」，**不要求已校準**。
+4. IS-04 不接受「尚未選定」的 estimator。
+
+**原因**：
+
+**其一，兩條線問的是不同問題，混用會讓 initial freeze 永遠不可能發生。**
+
+| | `params audit` | `audit initial-simulation` |
+|---|---|---|
+| 問題 | 這組參數可否進 **formal run** | 這個 **pre-calibration 狀態**可否凍結 |
+| 對 placeholder 的態度 | 阻塞 | **預期狀態** |
+| 時序 | calibration **之後** | calibration **之前** |
+
+`initial_simulation.lock` 的定義就是「校準開始前的起點」。若沿用 formal-run
+的判準，就會要求「參數全部校準完才能凍結校準前的狀態」—— 循環。
+本專案的 lock 相依鏈把 `initial_simulation` 放在
+`calibrated_simulation` 之前，正是這個意思。
+
+**其二，「未校準」與「未受管制」必須分開。** 前者可接受，後者不可。
+IS-05 管的是後者（每個旋鈕都在 registry 內、綁得到程式、無漂移、
+confounded group 全部裁決），IS-06 管的是前者的**表達方式**
+（狀態明確、可校準者有搜尋邊界）。目前 26 個值仍未校準而 IS-06 PASS，
+這是正確結果。
+
+**其三，estimator 未定案時凍結等於凍了一個會變的東西。** estimator 是
+surrogate 身分的一部分，`surrogate_hash` 會涵蓋它。因此 IS-04 只接受
+`SELECTED`；`TIE_BREAK_REQUIRED` 與 `NO_ESTIMATOR_SELECTED` 都是 FAIL。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli audit initial-simulation
+  IS-01 PASS  IS-02 PASS  IS-03 PASS  IS-04 FAIL  IS-05 PASS  IS-06 PASS
+  initial_simulation freezable: NO        -> exit code 2
+```
+
+IS-06 上線第一次跑就抓到一個真實缺口：`resolution` 是 `calibration_only`
+卻 `allowed_range: null`，等於一個沒有搜尋邊界的可校準參數。已補為
+**逐軸** [32, 512] 並在 note 說明它是每一軸的像素數而非 [width, height]。
+
+**維護邊界**：
+- 不得為了讓 IS-04 過關而在預註冊之外選定 estimator。
+- 不得把「模擬距離接近真實分佈」加進本稽核；initial simulation
+  **不要求**貼近真實，那是 calibration 之後的事。
+- 凍結後本稽核的判準不得再更動。
+
+相關：[NOTE-030]、[NOTE-034]、[NOTE-035]、[NOTE-014]
+
+---
+
+## NOTE-035 distance estimator 先預註冊再比較，且比較結果為「尚未選定」
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`configs/estimator_preregistration.yaml`（新增）；
+`pcmef/surrogate/estimator_selection.py`（新增）；
+`pcmef/surrogate/distance.py` 的 `DistanceEstimator`／`find_returns`／
+`map_distance`；`pcmef/cli.py` 的 `surrogate estimator-select`。
+
+**決策**：
+
+1. 候選 estimator、可調參數、判準與**套用順序**，在跑任何比較之前凍結。
+   預註冊檔以**獨立 commit** 先進版控，commit 內不含任何結果。
+   `preregistration_hash = 27ff55e2332ba8f7…`
+2. 判準只有三種來源：physics、synthetic sanity、獨立 offset anchors。
+   四類 real class mean 明列為**禁止輸入**。
+3. 本次比較結果為 **TIE_BREAK_REQUIRED**，estimator **尚未選定**。
+4. stage 3 經評估**不可執行**，理由見下。不得因此放寬門檻重跑。
+
+**原因**：
+
+**其一，先註冊後比較必須在 git 歷史上看得出來。** 一份和結果同時出現的
+「判準」無法與事後合理化區分。因此預註冊單獨 commit（`68b21eb`），
+其內容不含任何候選的實測數字。
+
+**其二，硬門檻確實淘汰了東西，而且淘汰的正是最誘人的那一個。**
+
+| 候選 | P1-P4 | S1 幾何單調 | S2 增益不變 | S3 四類可算 | 結果 |
+|---|---|---|---|---|---|
+| PEAK | ok | +11.62 mm | 0.0 | ok | **存活** |
+| ENERGY_CENTROID | ok | **+16.96 mm** | 0.0 | ok | **淘汰** |
+| LEADING_EDGE | ok | +9.70 mm | 0.0 | ok | **存活** |
+| STRONGEST_RETURN_CENTROID | ok | +12.21 mm | 0.0 | ok | **存活** |
+
+S1 把 `sensor_to_bottle_mm` 由 50 增到 60 mm（純幾何掃描），要求估計距離
+增加 5–15 mm。`ENERGY_CENTROID` 增加 16.96 mm —— 它跟著整條波形的一階矩跑，
+不是在量距離。**這正是先前被標記為陷阱的那個候選**：它在 Bubbly／Misty 上
+看起來最接近真實均值。用預註冊的物理判準淘汰它，與「因為它看起來準所以選它」
+是相反方向的兩件事。
+
+**其三，stage 3 不可執行，這是實測結論不是藉口。** 偏移錨點為
+normal 98.53 / left 90.91 / right 88.73 mm，即 Δleft = **−7.62**、
+Δright = **−9.80** mm。三個獨立問題：
+
+1. **自變數量級對不上。** `configs/base.yaml` 把兩側記為 `±0.1 cm`，
+   即 ±1 mm。瓶半徑 28.5 mm 上橫移 1 mm 的弓形高只有
+   `28.5 − sqrt(28.5² − 1²) = 0.018 mm`，比觀測到的 7.6–9.8 mm 小**三個數量級**。
+2. **符號不可能。** 兩側**都變小**。對凸面前表面而言，橫移只會讓最近點變遠，
+   不可能兩側都變近。場景本身鏡像對稱，物理上產生不出這個型態。
+3. **模擬在該位移下沒有鑑別力。** 實測橫移 ±1 mm 時，三個存活候選的估計值
+   變化**全部為 0.00 mm**（低於 3.12 mm 的 distance bin 寬）。
+
+因此偏移錨點在目前的場景模型下無法區分這三個候選。強行使用它，只能靠
+挑一個能讓某候選勝出的位移量 —— 那就是預註冊要防的事。
+
+**其四，順帶量到一個尚未列入判準的不穩定性。** 橫移 +5 mm 時 `PEAK` 由
+145.88 跳到 45.82 mm（−100.06），`STRONGEST_RETURN_CENTROID` 同樣跳
+−101.06；橫移 −5 mm 則幾乎不動（+1.70 / +1.15）。場景鏡像對稱卻得到
+不對稱結果，代表這不是幾何響應而是 **path family 之間的模式切換** ——
+箔片家族與前玻璃家族能量接近，取樣雜訊決定誰是全域最大。
+**本次不得用它選 estimator**：它不在預註冊的判準內，事後拿來用就是
+發明新規則。記錄於此供未來 amendment 引用。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli surrogate estimator-select --out outputs/estimator_select
+  preregistration_hash 27ff55e2332ba8f7...
+  survivors: PEAK / LEADING_EDGE / STRONGEST_RETURN_CENTROID
+  outcome: TIE_BREAK_REQUIRED     -> exit code 2
+  real_data_consulted: false
+```
+
+**維護邊界**：
+- 不得在比較之後修改 `configs/estimator_preregistration.yaml`；
+  要改判準必須開 amendment 並重跑。
+- 不得以「反正三個裡面挑一個」為由隨意選定；未選定就是未選定。
+- 解除路徑有二：(a) 取得偏移量測試的實際位移與符號慣例，使 stage 3 可執行；
+  (b) 開 amendment 新增一條**物理性**判準（例如 path-family 穩定性），
+  理由必須獨立於本次已知的結果。
+
+相關：[NOTE-034]、[NOTE-036]、[NOTE-028]、[NOTE-014]
+
+---
+
+## NOTE-034 Ambient 改由獨立 ambient pass 取得，並與 VCSEL 功率解耦
+
+**決策日期**：2026-08-28
+
+**適用範圍**：`pcmef/simulation/mitsuba_adapter.py` 的 `Illumination`、
+`_ROOM_LIGHT_RADIANCE`、`build_scene_dict()`；
+`pcmef/simulation/mitransient_adapter.py` 的雙 pass 算圖；
+`pcmef/simulation/ambient_audit.py`（新增）；
+`pcmef/surrogate/features.py` 的 `out_of_window_energy`／`ambient_energy`；
+`pcmef/surrogate/ambient.py`；`configs/parameter_registry.yaml` 的 `CG-3_ambient`。
+
+**決策**：
+
+1. 場景新增 `Illumination` 三態；每次 acquisition 算**兩個 pass**：
+   `ACTIVE_ONLY`（VCSEL on／室內光 off）與 `AMBIENT_ONLY`（VCSEL off／室內光 on），
+   共用同一組 binning 與 seed。
+2. **Ambient Rate 只由 ambient pass 取得**；缺 ambient pass 時直接拒絕產出，
+   不退回舊行為。
+3. `background_energy` 更名 `out_of_window_energy`，只供 SNR 與 multipath 使用。
+4. `_ROOM_LIGHT_RATIO` 更名 `_ROOM_LIGHT_RADIANCE` 並與 `lighting.irradiance`
+   **解耦**；預設值下數值完全相同（1.0 × 0.02 = 0.02）。
+5. CG-3 由 BLOCKED 改判 **RESOLVED**：固定 `_ROOM_LIGHT_RADIANCE`（gauge），
+   校準 `ambient_energy_to_mcps`。
+
+**原因**：
+
+**其一，舊定義量的不是 ambient。** `background_energy = total − 主窗` 的內容
+實測 99.97%（Empty）／99.996%（Water）是 VCSEL 自己的多重反射，
+室內光只佔 0.033%／0.004%（NOTE-032）。名字叫 background，量的是 multipath。
+更名是為了讓下一個人看到欄位名就知道它不是 ambient —— 這個誤解已經
+花掉整整一輪。
+
+**其二，室內光不該綁在 VCSEL 功率上。** 舊式 `radiance = irradiance × ratio`
+等於宣稱「把雷射調亮，房間就跟著變亮」。除了物理上錯誤，它還讓
+「改變 VCSEL 功率不應等比改變 Ambient」這條驗收條件**在結構上不可能成立**。
+解耦後數值刻意保持不變，因此這次改動只解開耦合，不改變任何既有結果。
+
+**其三，缺 ambient pass 時必須拒絕，不能退回舊行為。** 一個算得出來但量錯
+東西的 Ambient，比一個算不出來的 Ambient 危險得多 —— 前者不會有任何症狀。
+
+**驗證** —— `sim ambient-check`（Empty，32×32／spp=16／128 bins）：
+
+| 檢查 | 量到的 |
+|---|---|
+| A1 室內光遞增 → Ambient 單調遞增 | radiance [0.005, 0.02, 0.08, 0.32] → [0.9008, 3.6034, 14.4134, 57.6537]；增益線性度 **4.0003 / 4.0000 / 4.0000** |
+| A2 VCSEL 功率 1.0→4.0 | ambient **3.603355 → 3.603355**（完全相同）；active 38675.7 → 154702.9（×4.0000） |
+| A3 VCSEL 關閉 | 主窗內 ambient 殘留 **恰為 0**（殘留比 0.000e+00） |
+| A4 室內光關閉 | ambient 能量 **恰為 0** |
+
+A1 的線性度證實 `_ROOM_LIGHT_RADIANCE` 是 Ambient 上的**精確純增益**，
+與 `ambient_energy_to_mcps` 精確簡併；A2 證實 `lighting.irradiance` 對
+Ambient 的影響**恰為 0**，因此它已不屬於 CG-3。本組由三項降為兩項精確簡併，
+依 CG-2 同一套理由固定 scene 端、校準 MCPS 端（NOTE-031）。
+
+**維護邊界**：
+- 不得再由 active pass 的主窗外能量推導 Ambient，任何形式都不行。
+- 不得把 `_ROOM_LIGHT_RADIANCE` 接回 `lighting.irradiance`；
+  A2 會立刻 FAIL。
+- 不得放寬 A3/A4 的容忍值；A4 要求**恰為零**，非零代表有第三個光源漏進
+  ambient pass。
+- 本節的通過只表示 Ambient 與 Signal 分得開，**不表示** Ambient 數值
+  接近真實感測器讀值。
+
+相關：[NOTE-026]、[NOTE-031]、[NOTE-032]、[NOTE-005]
+
+---
+
 ## NOTE-033 角度慣例實測：fov 是全角、cutoff_angle 是半角，且硬編值一律參數化
 
 **決策日期**：2026-08-28

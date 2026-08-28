@@ -26,7 +26,7 @@
 #   - 不得把 _BOTTLE_SURFACE_ALPHA 設為 0：會退回 delta BSDF，與 delta 光源
 #     之間的鏡面路徑採樣機率為零，瓶子完全不回光，且不會有任何錯誤訊息
 #     （NOTE-027）。
-#   - 本檔的 _ROOM_LIGHT_RATIO / _BOTTLE_SURFACE_ALPHA /
+#   - 本檔的 _ROOM_LIGHT_RADIANCE / _BOTTLE_SURFACE_ALPHA /
 #     _SIGMA_T_REFERENCE_PER_M / _ALBEDO_BY_PRESET 皆為未校準建模常數。
 #     它們現已納入 configs/parameter_registry.yaml 並由 core.parameters 的
 #     formal 防線攔截；**新增任何建模常數都必須同時登記**，否則
@@ -54,6 +54,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -61,12 +62,30 @@ from pcmef.simulation.scenario import ScenarioConfig
 
 __all__ = [
     "SimulationDependencyError",
+    "Illumination",
     "RenderResult",
     "require_mitsuba",
     "build_scene_dict",
     "scene_path_bounds",
     "MitsubaAdapter",
 ]
+
+
+class Illumination(str, Enum):
+    """場景要點亮哪一種光源。
+
+    NOTE(NOTE-034): 真實 VL53L0X 的 Ambient Rate 量的是**沒有 VCSEL 貢獻**
+    的光子速率，Signal 量的是主動照明的回波。兩者是**兩次不同的量測**，
+    不是同一條波形的兩個切片。因此場景必須能分別建出這兩種照明條件。
+    """
+
+    #: VCSEL + 室內光。RGB 呈現用；ToF 觀測量**不得**由此推導。
+    BOTH = "both"
+    #: VCSEL on、室內光 off。Signal / Distance / Sigma-like 的來源。
+    ACTIVE_ONLY = "active"
+    #: VCSEL off、室內光 on。Ambient Rate 的**唯一**來源。
+    AMBIENT_ONLY = "ambient"
+
 
 # CPU 後端。cuda_ad_rgb 需要 NVIDIA GPU，本機為 Intel 內顯，因此不列為預設。
 DEFAULT_VARIANT = "llvm_ad_rgb"
@@ -176,10 +195,15 @@ def scene_path_bounds(config: ScenarioConfig) -> tuple[float, float]:
     return float(shortest), float(extent)
 
 
-#: 室內環境光相對於感測器 VCSEL 的強度比。**建模常數，尚未校準** ——
-#: 真實比例必須由 E1 calibration 決定。取小值是因為 ToF 感測器的
-#: signal rate 應由自己的發射器主導，ambient 只是背景。
-_ROOM_LIGHT_RATIO = 0.02
+#: 室內環境光的**絕對** radiance。**建模常數，尚未校準**。
+#:
+#: NOTE(NOTE-034): 先前寫成 `irradiance * _ROOM_LIGHT_RATIO`，也就是把室內光
+#: 綁在 VCSEL 功率上 —— 那等於宣稱「把雷射調亮，房間就跟著變亮」。
+#: 物理上室內光與感測器發射功率完全獨立，而且那個耦合會讓
+#: 「改變 VCSEL 功率不應等比改變 Ambient」這條驗收條件不可能成立。
+#: 改為獨立常數；**數值刻意取 0.02，與舊式在預設 irradiance=1.0 下完全相同**，
+#: 因此這次改動不改變任何既有數值，只解開耦合。
+_ROOM_LIGHT_RADIANCE = 0.02
 
 #: 瓶壁表面的 GGX 粗糙度。**建模常數，尚未校準** ——
 #: 真值須由 E1 calibration 決定（NOTE-027）。取小值代表「接近光滑但不是理想
@@ -281,11 +305,19 @@ def _look_at(mi, origin, target, up):
     raise SimulationDependencyError("this mitsuba build exposes no look_at transform")
 
 
-def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
+def build_scene_dict(
+    mi,
+    config: ScenarioConfig,
+    illumination: Illumination = Illumination.BOTH,
+) -> dict[str, Any]:
     """把 ScenarioConfig 組成 Mitsuba 場景描述。
 
     單位一律為公尺：transient 渲染的時間軸由光在場景中的行進距離決定，
     尺度錯了時間軸就整體錯。幾何取自 SRC-PLAN §2.1 的前研究錨點。
+
+    `illumination` 只切換**光源**，幾何與材質完全相同 —— 兩個 pass 必須是
+    同一個物理場景的兩種照明條件，否則 Signal 與 Ambient 就不是可比較的量
+    （NOTE-034）。
     """
     geometry = config.geometry
     outer_r = geometry.outer_radius_mm / _MM_PER_M
@@ -365,12 +397,11 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
         # 也就是室內光。少了它，四特徵中的 ambient 這一欄不具意義。
         # 比例為建模常數，尚未校準：真實室內光與 VCSEL 的相對強度
         # 必須由 E1 calibration 決定。
+        # NOTE(NOTE-034): radiance 不再乘 config.lighting.irradiance。
+        # 室內光與 VCSEL 功率互相獨立，這是 Ambient 能與 Signal 分離的前提。
         "room_light": {
             "type": "constant",
-            "radiance": {
-                "type": "rgb",
-                "value": [config.lighting.irradiance * _ROOM_LIGHT_RATIO] * 3,
-            },
+            "radiance": {"type": "rgb", "value": [_ROOM_LIGHT_RADIANCE] * 3},
         },
         # NOTE(NOTE-029): far-side aluminum foil reflector。
         # 這裡取代了原本的 `backdrop` —— 那是一塊 reflectance 0.5 的漫反射板，
@@ -424,6 +455,14 @@ def build_scene_dict(mi, config: ScenarioConfig) -> dict[str, Any]:
     if medium is not None:
         interior["interior"] = medium
     scene["bottle_interior"] = interior
+
+    # NOTE(NOTE-034): 只移除光源，幾何一律不動。刻意在最後才移除而不是
+    # 一開始就不建 —— 這樣兩個 pass 的其餘內容由同一段程式產生，
+    # 不可能因為分支而悄悄長成兩個不同的場景。
+    if illumination is Illumination.ACTIVE_ONLY:
+        del scene["room_light"]
+    elif illumination is Illumination.AMBIENT_ONLY:
+        del scene["light"]
     return scene
 
 
