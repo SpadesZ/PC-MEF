@@ -780,24 +780,64 @@ Ambient 由改動前的 12,111–173,643 降到 5.9–14.2 —— 三到四個�
 
 ---
 
-## E：`initial_simulation.lock` —— **不可凍結**，唯一阻塞是 IS-04
+## E：`initial_simulation.lock` —— **已凍結**（2026-08-28）
 
-依指示未進入正式 E1，也未凍結任何 lock，未開啟 held-out。
+```
+payload hash       dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335
+code_version       56c54dd7abe907a72fd4b1c57d3fcbca8ce28c9e   （工作區乾淨）
+scene_hash         f60b2a0ce12792fd43a03e26ba629b435584e02b65269f24ed7142e2c6f7d2b6
+parameter_set_hash 3bd65b50264413e6249d1d19cc900a8487673f073a4e531b3c456b760a39ff69
+surrogate_hash     62be141b213605dad6ccca29e9438b908af4bfa88927a5bb44ab35560b64a713
+estimator          leading_edge  (preregistration 172b82058460bdb0)
+amendments         AMD-001 553e2dfa… / AMD-002 9742eab8…
+readiness          IS-01..06 全 PASS
+reproducibility    RP-01..04 全 PASS，容忍值全 0.0
+parameter_ranges   26 項
+```
 
-**唯一阻塞是 estimator 尚未選定**（IS-04）。其餘五條 closure 條件全部通過。
-解除後即可凍結 —— 不需要模擬距離貼近真實分佈。
+凍結前**重新執行**兩份稽核而非採信既有 artifact，並要求工作區乾淨
+（NOTE-039）。lock 內含 claim boundary：**這是 pre-calibration 模型，
+不宣稱接近真實分佈**。
 
-本 session 只改了 lock **契約**：`initial_simulation` 的 `required_keys`
-新增 **`parameter_set_hash`**。理由是 `scene_hash` 只涵蓋 scenario 內容 ——
-把 27 個未校準建模常數全部換掉，`scene_hash` 可以一個位元都不變，
-lock 因此無法回答「這次凍的是哪一組參數」。
+### 已知缺陷：lock 的 environment 欄位記錯
 
-**現在改契約是安全的**：`initial_simulation` 仍為 pending，沒有任何已凍結的
-檔案會因此失效（唯一已凍的 `real_split_policy` 未被觸及）。
-**一旦凍結就不得再動。**
+首版 freeze 在 freeze 行程內重新探測相依版本，而該行程沒有 `set_variant`，
+mitransient 因此被記成 `"unavailable"` —— 但被凍結的 run 實際用的是 **1.3.0**
+（manifest 與每個 scenario 都記著 1.3.0）。程式已改為讀取被凍結那次 run 的
+`manifest["dependencies"]`，但 **lock 不可覆寫，既有那份無法就地更正**。
 
-凍結前必須全部成立：`params audit` exit 0、CG-3 脫離 BLOCKED、
-第 3 條的遠壁回波存在、estimator 依預註冊準則選定。
+**處置尚待裁決**（見 NOTE-039）：刪除重凍會拿到正確環境但違反
+「lock 不可覆寫」紅線；保留並登記勘誤則遵守紅線但留下不足以重建環境的 lock。
+**在裁決之前不得逕自刪除。**
+
+---
+
+## Phase E/F/G —— **未進行**
+
+E1 狀態：**NOT_READY**。以下為真正的 blocker，未繞過任何一項。
+
+| 階段 | 狀態 | 真正的 blocker |
+|---|---|---|
+| E calibration | 未開始 | **校準目標與 optimizer 未預註冊**（見下） |
+| F 校準後重現 | 未開始 | 依賴 E |
+| G metric/E1 前置 lock | 未開始 | `metric_config` / `e1_scientific_rule` 未凍；依賴 E |
+
+**Phase E 的結構性 blocker：沒有校準目標規格。**
+全 repo（`configs/`、`docs/NOTES.md`、`pcmef/`）查不到任何 calibration
+objective / optimizer 的規格，也沒有 `pcmef/experiments/calibration.py`。
+依本專案對 estimator 已經確立的做法（NOTE-035：先預註冊、後比較），
+校準目標、optimizer、收斂準則與失敗處置**必須先預註冊再跑**，
+否則 26 個參數的擬合結果無法與事後合理化區分。
+
+在該預註冊存在之前開始 calibration，會重蹈 estimator 那一輪的錯誤，
+而且代價更大 —— calibration 會消耗 frozen real split 的 calibration partition。
+
+**已就緒、不構成 blocker 的部分**：`calibrated_simulation` 的前置
+（`real_split_policy` + `initial_simulation`）皆已凍結，鏈條結構上已打通；
+26 個可校準參數的 allowed range 已全部登記並寫進 lock；
+CG-1/2/3 的 gauge ruling 已裁決，fixed member 清單明確。
+
+---
 
 ---
 

@@ -839,7 +839,6 @@ def cmd_freeze_initial_simulation(args: argparse.Namespace) -> int:
     )
     from pcmef.audit.result import CheckStatus
     from pcmef.core.parameters import ParameterRegistry
-    from pcmef.simulation.controller import dependency_versions
     from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
     from pcmef.surrogate.distance import (
         DEFAULT_DETECTION_THRESHOLD_SIGMA,
@@ -931,7 +930,10 @@ def cmd_freeze_initial_simulation(args: argparse.Namespace) -> int:
             "selection_artifact": "outputs/estimator_select/estimator_selection.json",
         },
         "surrogate": PLACEHOLDER_SMOKE_CALIBRATION.to_dict(),
-        "environment": dependency_versions(),
+        # 環境取自**被凍結的那次 run** 的 manifest，不是 freeze 行程自己探測的。
+        # freeze 行程沒有 set_variant，mitransient 在那裡 import 不起來，
+        # 會把實際用了 1.3.0 的 run 記成 "unavailable"（NOTE-039 維護邊界）。
+        "environment": manifest["dependencies"],
         "reproducibility": {
             "verified": True,
             "tolerance": dict(REPRODUCIBILITY_TOLERANCE),

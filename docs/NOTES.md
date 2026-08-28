@@ -375,10 +375,33 @@ py -3.10 -m pcmef.cli freeze initial-simulation
 
 以不同內容重凍已由 `LockStore.write()` 的既有契約擋下（locks are immutable）。
 
+**已知缺陷（首次凍結的 lock 帶有錯誤的環境記錄）**
+
+首版 `freeze initial-simulation` 呼叫 `dependency_versions()` 在**freeze 行程**
+內重新探測相依版本。freeze 行程沒有 `set_variant`，而 mitransient 在未設
+variant 時 import 會拋例外，因此被記成 `"unavailable"` —— 但被凍結的那次 run
+實際使用的是 **mitransient 1.3.0**（manifest 的 `dependencies` 與每個 scenario
+的 `transient.mitransient_version` 都記著 1.3.0）。
+
+`freeze/initial_simulation.lock.json`（payload_hash `dc15c9543a3aecac…`）
+因此帶有一個**事實錯誤的 environment 欄位**。程式已修正為改讀
+`manifest["dependencies"]`（被凍結那次 run 自己的記錄），但 lock 不可覆寫，
+既有那一份無法就地更正。
+
+處置**尚待裁決**，兩條路各有代價：
+1. 刪除該 lock 重新凍結 —— 會拿到正確的 environment，但刪除 lock 本身
+   違反「lock 不可覆寫」這條紅線，即使該 lock 只存在數分鐘且無任何下游引用。
+2. 保留該 lock 並登記勘誤 —— 遵守紅線，但留下一份不足以重建環境的 lock。
+
+在裁決之前**不得**逕自刪除。這一節存在的目的就是讓這個選擇被看見，
+而不是被某一棒順手處理掉。
+
 **維護邊界**：
 - 凍結後**不得**再修改 initial model；要改就是新的 run。
 - 不得為了通過而使用 `--allow-dirty`；那個旗標是為了記錄例外，不是繞過。
 - 不得把 `parameter_ranges` 之外的參數交給 calibration 調整。
+- environment 一律取自被凍結那次 run 的 manifest，**不得**在 freeze 行程
+  重新探測；探測環境與執行環境不是同一個。
 
 相關：[NOTE-036]、[NOTE-037]、[NOTE-038]、[NOTE-014]
 
