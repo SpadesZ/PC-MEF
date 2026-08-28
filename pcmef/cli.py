@@ -907,9 +907,8 @@ def cmd_freeze_initial_simulation(args: argparse.Namespace) -> int:
                     "seed": s["transient"]["seed"],
                     "spp": s["transient"]["spp"],
                     "integrator": s["transient"]["integrator"],
-                    "temporal_bins": s["transient"]["temporal_bins"],
-                    "start_opl_m": s["transient"]["start_opl_m"],
-                    "bin_width_opl_m": s["transient"]["bin_width_opl_m"],
+                    "illumination": s["transient"]["illumination"],
+                    "binning": s["transient"]["binning"],
                 }
                 for s in manifest["scenarios"]
                 if s.get("status") == "OK"

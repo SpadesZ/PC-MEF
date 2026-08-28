@@ -80,9 +80,13 @@ SCENARIO_IDENTITY_FIELDS: tuple[str, ...] = (
     "transient.seed",
     "transient.spp",
     "transient.integrator",
-    "transient.temporal_bins",
-    "transient.start_opl_m",
-    "transient.bin_width_opl_m",
+    "transient.illumination",
+    # binning 在 manifest 內是巢狀的。先前這三條寫成 transient.temporal_bins
+    # 等平鋪路徑，兩邊都解析成 None 而「相等」—— 檢查形式上通過，實際什麼
+    # 都沒比到。缺欄位因此一律視為 FAIL，見下方的 None 判定（NOTE-038）。
+    "transient.binning.temporal_bins",
+    "transient.binning.start_opl_m",
+    "transient.binning.bin_width_opl_m",
     "rgb.integrator",
     "rgb.max_depth",
 )
@@ -192,7 +196,13 @@ def audit_reproducibility(run_a: str | Path, run_b: str | Path) -> AuditReport:
         for field in SCENARIO_IDENTITY_FIELDS:
             value_a = _dig(scenarios_a[name], field)
             value_b = _dig(scenarios_b[name], field)
-            if value_a != value_b:
+            # 兩邊都是 None 代表欄位路徑寫錯或 manifest 少了它 —— 那不是
+            # 「相等」，那是沒比到。缺欄位一律 FAIL，否則檢查會空過。
+            if value_a is None or value_b is None:
+                scenario_issues.append(
+                    f"{name}.{field}: missing (a={value_a!r}, b={value_b!r})"
+                )
+            elif value_a != value_b:
                 scenario_issues.append(f"{name}.{field}: {value_a!r} != {value_b!r}")
     results.append(
         CheckResult(

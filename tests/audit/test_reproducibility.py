@@ -62,8 +62,12 @@ def _manifest(run_name: str, runtime: float) -> dict:
                         "outputs": {"rgb_exr": f"outputs/{run_name}/rgb.exr"}},
                 "transient": {
                     "seed": 1001, "spp": 16, "integrator": "transient_path",
-                    "temporal_bins": 128, "start_opl_m": 0.0729,
-                    "bin_width_opl_m": 0.0033875, "runtime_s": runtime,
+                    "illumination": "split_active_ambient",
+                    "binning": {
+                        "temporal_bins": 128, "start_opl_m": 0.0729,
+                        "bin_width_opl_m": 0.0033875,
+                    },
+                    "runtime_s": runtime,
                     "outputs": {"optical_transient": f"outputs/{run_name}/t.npy"},
                 },
             }
@@ -159,6 +163,27 @@ def test_identity_field_mismatch_fails(tmp_path, selection):
     checks = {c.identifier: c for c in report.results}
     assert checks["RP-01"].status is CheckStatus.FAIL
     assert any("parameter_set_hash" in f for f in checks["RP-01"].findings)
+
+
+def test_a_missing_identity_field_is_not_a_silent_pass(tmp_path, selection):
+    """兩邊都缺同一個欄位不是「相等」，是沒比到 —— 必須 FAIL。
+
+    這條測試來自一個真實缺陷：SCENARIO_IDENTITY_FIELDS 原本把 binning 寫成
+    平鋪路徑，兩邊都解析成 None 而「相等」，於是三個欄位形式上通過、
+    實際完全沒有比對（NOTE-038）。
+    """
+    a = _build(tmp_path, "run_a")
+    b = _build(tmp_path, "run_b")
+    for run in (a, b):
+        path = run / "simulation_smoke_manifest.json"
+        payload = json.loads(path.read_text("utf-8"))
+        del payload["scenarios"][0]["transient"]["binning"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = audit_reproducibility(a, b)
+    checks = {c.identifier: c for c in report.results}
+    assert checks["RP-02"].status is CheckStatus.FAIL
+    assert any("missing" in f for f in checks["RP-02"].findings)
 
 
 def test_seed_mismatch_fails(tmp_path, selection):
