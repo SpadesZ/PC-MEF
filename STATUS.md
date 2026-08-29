@@ -3,7 +3,7 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-08-29
+最後更新：2026-08-30
 
 ---
 
@@ -865,14 +865,20 @@ parameter / estimator / seed / scene / config，且**禁區檢查先跑、完全
 | F 校準後重現 | 未開始 | 依賴 E |
 | G metric/E1 前置 lock | 未開始 | `metric_config` / `e1_scientific_rule` 未凍；依賴 E |
 
+**操作版本是 CAL-PREREG-002。** CAL-PREREG-001 保留但**不得執行** ——
+它記錄的 v0.1.0 協定帶有 AMD-003 所列的三項缺陷（見下一節）。
+
 ```
-CAL-PREREG-001   a17dd93982e496b7a5faa538aa0c99b72a5067ac61e901e3a299258576b3254a
-protocol_hash    77365cc30413d4eaa940fcc224ac9b344d92f8ace6780b0d2f369a592e0900bf
-code_version     a9fe7212927e5b6d53b71adb9b876227c1f0bc4b   （工作區乾淨）
+CAL-PREREG-002   e7e2a298cfa364eb210ac56a414d72183e33a7f4b6974867fe06cb20482db99e
+protocol_hash    c6a0de86e866cc0dbd426e77fe407d9659f46fc8888f2955e02820abd6a2316d
+code_version     6370482382d81ca422b64d612f0b0b4ccb05515c   （工作區乾淨）
+supersedes       CAL-PREREG-001  a17dd93982e496b7…（protocol 77365cc30413d4ea…）
+amendments       AMD-003  612dabf1b323a730…
 calibration_set  4bda77f6412afbaa…      parameter_set   3bd65b50264413e6…
 initial lock     dc15c9543a3aecac…      ERR-001         363b06c1de6ec961…
-optimizer seed   20260829               heldout access  0
-CP-01..CP-12     全 PASS
+bounds_hash      c71c39995d7a64ab…      optimizer seed  20260829
+heldout access   0                      calibration access  0
+CP-01..CP-16     全 PASS
 ```
 
 ### 目標函數
@@ -897,9 +903,15 @@ CP-01..CP-12     全 PASS
 | 5 sigma 映射 | 3 | 波形已固定，只擬合由波形算 sigma 的映射 | 結構性 |
 
 **stage 0 可辨識性探測**（純模擬，不碰真實資料）先於全部擬合：
-leverage 以 s_f 為單位，掃過整個登記範圍造成的 observable 變化 < 0.5 者
-**gauge-fix 而非擬合**。這是 NOTE-032 的教訓 —— `_ROOM_LIGHT_RATIO` 比例
-拉 25 倍、總能量只變 0.058%，那是「可以 fit、但 fit 出來由雜訊決定」。
+leverage 以 **σ_MC**（模擬自身的種子間標準差，8 組種子）為單位，
+掃過整個登記範圍造成的變化 < **K = 10** 者**gauge-fix 而非擬合**，
+落在 [5, 20] 者停止等待裁決。這是 NOTE-032 的教訓 ——
+`_ROOM_LIGHT_RATIO` 比例拉 25 倍、總能量只變 0.058%，
+那是「可以 fit、但 fit 出來由雜訊決定」。
+
+> v0.1.0 的分母原為 s_f，而 s_f 需要先讀 calibration partition ——
+> 一個宣稱 simulation-only 的階段在原理上不可能執行。已由 AMD-003 更正，
+> 見下一節。
 
 **18 項進入擬合，8 項宣告不擬合**：`spp` / `resolution` / `temporal_bins` /
 `max_depth` / `bounce_budget` / `_LEADING_MARGIN_BINS` 是**數值與離散化設定**
@@ -921,10 +933,31 @@ distance，物理振幅則經 LEADING_EDGE 的 range walk 移動它）。這個�
 
 ### optimizer
 
-scalar 階段 `minimize_scalar(bounded)`；多變數階段
-`differential_evolution`（`seed=20260829`、`init=sobol`、**`polish=false`**，
-polish 走 L-BFGS-B、對雜訊目標取數值梯度沒有意義）。初始族群第 0 個個體
-**強制**為 lock 的 initial 值，因此「資料沒有要求任何改變」是可達成的結局。
+**單一求解路徑**：每個階段一律 `differential_evolution`
+（`seed=20260829`、`init=sobol`、`popsize=15`、`maxiter=100`、
+**`polish=false`**，polish 走 L-BFGS-B、對雜訊目標取數值梯度沒有意義）。
+初始族群第 0 個個體**強制**為 lock 的 initial 值，
+因此「資料沒有要求任何改變」是可達成的結局。
+
+預算由公式導出並由程式強制（`EvaluationBudget` 在第 budget+1 次評估中止）：
+
+```
+P(N) = 2**ceil(log2(popsize*N))     per_restart = P(N)*(maxiter+1)
+per_stage = restarts * per_restart
+```
+
+| 階段 | 維度 | P | /restart | /stage |
+|---|---|---|---|---|
+| AMBIENT | 2 | 32 | 3,232 | 9,696 |
+| SIGNAL_SCALE | 2 | 32 | 3,232 | 9,696 |
+| GEOMETRY_SURFACE_FOIL | 7 | 128 | 12,928 | 38,784 |
+| PARTICIPATING_MEDIA | **6** | 128 | 12,928 | 38,784 |
+| SENSOR_SURROGATE | 3 | 64 | 6,464 | 19,392 |
+| **合計** | **20** | | | **116,352** |
+
+約 65 小時單執行緒（每次評估約 2 秒）。這個成本寫進協定，是為了讓
+「預算不夠用」在開始之前就被看見。`PARTICIPATING_MEDIA` 是 6 維而非 4 維，
+因為 `_ALBEDO_BY_PRESET` 是三個 class-specific 純量。
 
 同階段內全部評估共用同一組模擬種子（CRN，1001/1002/1042/1004），
 收斂後另以一組**驗證種子**（2001/2002/2042/2004）重算一次，
@@ -957,6 +990,94 @@ float。**該值已凍進 lock，且 `parameter_ranges` 在勘誤的禁區內**�
 - 未讀取 calibration partition 的任何數值（`raw_data_hash` 留待執行當下計算）
 - 未開啟 held-out（access count 仍為 0）
 - 未凍結 `calibrated_simulation` / `metric_config` / `e1_scientific_rule`
+
+---
+
+## AMD-003 —— CAL-PREREG-001 的三項 pre-execution 缺陷（2026-08-30，NOTE-042）
+
+全部在**第一次讀取 calibration partition 之前**處理完畢。
+`AMD-003` payload hash `612dabf1b323a730…`，九條契約變更。
+
+| # | 缺陷 | 裁決 |
+|---|---|---|
+| **P0-1** | stage 0 宣告 `reads_calibration_partition: false`，判準卻是 `\|Δo\|/s_f`，而 s_f 是 calibration split 真實值的 pooled IQR —— **照字面執行不可能** | 取 **A**：分母改為 σ_MC，stage 0 真的只用模擬 |
+| **P0-2** | `max_evaluations_per_stage: 3000` 與 `maxiter: 200` **在任何階段都不可能同時成立**；實測低估 **8.6–25.7 倍** | 預算改由公式導出並由程式強制 |
+| **P1-3** | stage 3 的 Empty 措辭與 NOTE-029 描述**缺陷**的句子雷同 | 稽核確認**程式正確**，僅更正措辭 |
+
+### P0-1：為什麼選 A 不選 B
+
+| | 選 B（把 stage 0 正名為會讀資料的階段）的後果 |
+|---|---|
+| **Leakage** | 「要擬合哪些參數」會由真實資料決定 —— 一個位於所有階段上游的**資料相依模型選擇**。現有守衛攔不到它：verification seeds 查的是種子過擬合，不是選擇偏誤。而且會把 first access 提前卻換不到科學上的好處。 |
+| **Identifiability** | stage 0 要問的是「optimizer 看不看得見這個參數」。對 MC 模擬器而言雜訊底線是它自己的種子間離散度，不是真實資料的 IQR。s_f 回答的是另一個問題（對 J 重不重要）—— 適合當診斷，不適合當入場券。 |
+
+σ_MC = 在凍結 initial 值上以 8 組獨立種子各算一次的樣本標準差。
+K = 10（約 10√8 ≈ 28 個平均值標準誤）。共線性檢查同樣改以 σ_MC 逐分量正規化
+—— 原本對不同單位的分量取餘弦，那個數字本來就沒定義好。
+s_f 的問題保留為 stage 1 開始時計算、**明文禁止 gating** 的診斷。
+
+### P0-2：實測數字
+
+| N | 族群 P | nfev（單次重啟） | 相對宣稱的 3000 |
+|---|---|---|---|
+| 2 | 32 | 4,192 | 1.4× |
+| 3 | 64 | 11,584 | 3.9× |
+| 4 | 64 | 12,864 | 4.3× |
+| 7 | 128 | **25,728** | **8.6×**（三次重啟 25.7×） |
+
+根因：`popsize` 是**乘數**不是族群大小，且 `init='sobol'` 會把族群補到 2 的冪。
+順帶消掉兩個相關歧義 —— `scalar_stages.applies_to` 列的是**參數**而非階段
+（整條路徑移除），`_ALBEDO_BY_PRESET` 佔 1 還是 3 個維度
+（新增 `dimension_expansion` 明文宣告）。
+
+### P1-3：Empty 拓樸稽核結論
+
+```
+bottle_interior 無條件建立，四類皆然（只有 interior["interior"] = medium 是條件式）
+_DENSITY_KEY_BY_PRESET 沒有 "empty" 鍵 -> _medium_dict() 回 None
+_INTERIOR_BASE_IOR["empty"] = "air"
+實測：四類 r_in 26.5 mm / r_out 28.5 mm（壁厚 2.0 mm）
+      Empty  int_ior=air  ext_ior=bk7  has_participating_medium=False
+```
+
+**Empty 是玻璃殼＋空氣＋玻璃殼，沒有回歸。** 不觸發 STOP，
+`initial_simulation.lock` 不受影響。`tests/simulation/test_empty_topology.py`
+逐次確認，不靠記憶。
+
+### bounds 唯一性
+
+`resolve_numeric_bounds()` 是**唯一**路徑：原生數值取自 lock，字串界線必須
+有宣告解讀且 `float(凍結字面值)` **恰好等於**宣告值。20 個維度，
+`bounds_resolution_hash = c71c39995d7a64ab…`，凍進 AMD-003 與 CAL-PREREG-002。
+不存在第二套未凍結的 bounds。
+
+### calibration access ledger
+
+held-out 有 access count，calibration 沒有，於是「還沒讀」只是一句話。
+新增 append-only `data/splits/calibration_access_ledger.json`，明訂什麼算
+一次 access（讀 recording **數值**算；對 id 集合取雜湊不算）、
+first access 在 stage 1 開始，以及順序規則。**目前為 0。**
+
+---
+
+## 已知的既有測試缺陷（**不是**本次造成）
+
+`tests/simulation/test_simulation.py::test_surrogate_can_consume_the_rendered_transient`
+在 **LLVM 在 PATH 上時失敗**，沒有 LLVM 時則靜默 skip —— 因此一直沒被發現。
+已確認在 commit `2129153`（本輪工作之前）同樣失敗，非回歸。
+
+```
+CalibrationError: leading_edge defines its detection threshold in units of the
+measured ambient noise level, so it requires a dedicated ambient pass (NOTE-034).
+```
+
+該測試只餵 active pass 就呼叫 `surrogate.observe()`，而 NOTE-034 已要求
+Ambient 必須來自獨立 ambient pass、NOTE-037 選定的 LEADING_EDGE 門檻又以
+ambient 雜訊為單位 —— 測試從那兩個決策之後就沒更新過。**拒絕是正確行為，
+測試才是舊的。**
+
+> **交接提醒**：跑全套測試時請**把 LLVM 放進 PATH**，否則會有一批
+> 模擬測試靜默 skip，而 exit code 0 會讓人以為全過了。
 
 ---
 
