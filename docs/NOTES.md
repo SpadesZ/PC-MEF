@@ -324,6 +324,163 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-042 CAL-PREREG-001 的三項 pre-execution 缺陷與 AMD-003 的裁決
+
+**決策日期**：2026-08-30
+
+**適用範圍**：`configs/calibration_preregistration.yaml` v0.2.0；
+`pcmef/experiments/calibration_plan.py`（新增）；
+`pcmef/experiments/calibration_prereg.py` 的 CP-13..CP-16；
+`configs/amendments/AMD-003.yaml`、`freeze/amendments/AMD-003.amendment.json`；
+`data/splits/calibration_access_ledger.json`（新增）；
+`tests/unit/test_calibration_plan.py`、`tests/simulation/test_empty_topology.py`；
+`pcmef/cli.py` 的 `amendment freeze` / `amendment status`。
+
+**決策**：
+
+在**第一次讀取 calibration partition 之前**，以 AMD-003 修正三項 pre-execution
+缺陷，並把操作版本凍結為 **CAL-PREREG-002**。CAL-PREREG-001 保留不刪除
+（append-only），但標記為**不得執行**。
+
+1. **P0-1**：stage 0 的入場分母由 `s_f` 改為 **σ_MC**（模擬自身的種子間標準差），
+   使它真的只用模擬。門檻 K = 10，BORDERLINE 帶 [5, 20] 停止等待裁決。
+   原本以 s_f 提的問題降為 stage 1 開始時計算的**不具決定權**診斷。
+2. **P0-2**：評估預算改由公式導出並由程式強制（`maxiter` 100，合計
+   **116,352** 次評估）；移除第二條求解路徑；新增 `dimension_expansion`。
+3. **P1-3**：Empty 拓樸經稽核確認**程式正確**，僅更正預註冊措辭。
+4. 新增 `resolve_numeric_bounds()` 作為 bounds 的唯一重建路徑，
+   並凍結 `bounds_resolution_hash`。
+5. 新增 calibration partition 的 append-only access ledger。
+
+**原因**：
+
+**其一（P0-1）：stage 0 的判準在原理上不可能是 simulation-only。**
+v0.1.0 一邊宣告 `reads_calibration_partition: false`，一邊把入場門檻寫成
+`leverage = |Δo| / s_f`，而 `s_f` 在同一份文件裡的定義就是
+**calibration split 真實值**的 pooled IQR。照字面執行必須先讀真實資料。
+
+裁決取 **A（讓 stage 0 真的只用模擬）**，不取 B（把它正名為會讀資料的階段）。
+兩個獨立理由：
+
+| | 選 B 的後果 |
+|---|---|
+| **Leakage** | 「要擬合哪些參數」會由真實資料決定 —— 一個位於所有階段上游的**資料相依模型選擇**步驟。現有的守衛都攔不到它：verification seeds 查的是種子過擬合，不是選擇偏誤。而且它會把 first access 提前，卻換不到任何科學上的好處。 |
+| **Identifiability** | stage 0 要問的是「optimizer 看不看得見這個參數」。對 Monte Carlo 模擬器而言，相關的雜訊底線是它自己的**種子間離散度**，不是真實資料的 IQR。s_f 回答的是另一個問題（這個參數對 J 重不重要）—— 合理，但那是診斷，不是入場券。 |
+
+新分母為 **σ_MC**：在凍結的 initial 值上以 **R = 8** 組獨立種子各算一次，
+取每個 observable 的樣本標準差。門檻 **K = 10**（約 10√8 ≈ 28 個平均值標準誤），
+落在 **[5, 20]** 者標為 BORDERLINE 並**停止**等待裁決，不自動歸類 ——
+與 estimator 那一輪的 TIE_BREAK_REQUIRED 是同一條規則。
+
+共線性檢查同樣改以 σ_MC 逐分量正規化。原本對「原始響應向量」取餘弦，
+而各分量單位不同（mm、MCPS…），那個餘弦會隨單位改變而改變，
+0.98 這個門檻本來就沒有定義好。
+
+s_f 的問題沒有被丟掉：降為 `s_f_relative_leverage_diagnostic`，
+在 stage 1 開始、s_f 已合法產生之後計算，**明文禁止**用它改變任何階段的參數集合。
+
+**其二（P0-2）：預算三個數字互相矛盾，且低估 8.6–25.7 倍。**
+v0.1.0 同時寫了 `max_evaluations_per_stage: 3000` 與 `maxiter: 200`。
+實測 scipy 1.15.3：
+
+| N | 族群 P | nfev（單次重啟） | 相對 3000 |
+|---|---|---|---|
+| 2 | 32 | 4,192 | 1.4× |
+| 3 | 64 | 11,584 | 3.9× |
+| 4 | 64 | 12,864 | 4.3× |
+| 7 | 128 | **25,728** | **8.6×**（三次重啟 25.7×） |
+
+根因是把 `popsize` 當成族群大小，但它是**乘數**，而 `init='sobol'` 還會把族群
+補到 2 的冪（`n_s = int(2 ** np.ceil(np.log2(...)))`）。改為由公式導出：
+
+```
+P(N)                  = 2 ** ceil(log2(popsize * N))
+budget_per_restart(N) = P(N) * (maxiter + 1)
+budget_per_stage(N)   = restarts * budget_per_restart(N)
+```
+
+`maxiter` 降為 100，展開後：AMBIENT 2d/P32/9,696；SIGNAL_SCALE 2d/P32/9,696；
+GEOMETRY_SURFACE_FOIL 7d/P128/38,784；PARTICIPATING_MEDIA **6d**/P128/38,784；
+SENSOR_SURROGATE 3d/P64/19,392。**合計 116,352 次評估**，
+以每次約 2 秒估算約 65 小時 —— 這個成本寫進協定，
+是為了讓「預算不夠用」在開始之前就被看見。
+
+順帶消掉兩個相關的歧義：`scalar_stages.applies_to` 列的是**參數**而非階段，
+於是「stage 1 的兩個參數要不要逐一純量搜尋」沒有答案 —— 整條路徑移除，
+每個階段一律 DE；`_ALBEDO_BY_PRESET` 是三個 class-specific 純量，
+究竟佔 1 還是 3 個維度會直接改變族群大小 —— 新增 `dimension_expansion`
+明文宣告，未宣告的多值參數一律拒絕。**PARTICIPATING_MEDIA 因此是 6 維而非 4 維。**
+
+**其三（P1-3）：Empty 拓樸是措辭缺陷，不是程式回歸。**
+v0.1.0 寫「`build_scene_dict()` 只在 `medium_preset != "empty"` 時建立內部介質」，
+與 NOTE-029 當初描述**缺陷**的句子幾乎相同，容易被讀成「Empty 不建內圓柱」。
+逐行核對與實際建構後確認：
+
+```
+bottle_interior 無條件建立，四類皆然（只有 interior["interior"] = medium 是條件式）
+_DENSITY_KEY_BY_PRESET 沒有 "empty" 鍵 -> _medium_dict() 回 None
+_INTERIOR_BASE_IOR["empty"] = "air"
+實測：四類 r_in 26.5 mm / r_out 28.5 mm（壁厚 2.0 mm）
+      Empty int_ior=air ext_ior=bk7 has_participating_medium=False
+```
+
+**Empty 是玻璃殼＋空氣＋玻璃殼，沒有回歸。** 因此不觸發 STOP，
+`initial_simulation.lock` 不受影響。措辭已更正並附程式碼引用，
+另立 `tests/simulation/test_empty_topology.py` 逐次確認，不靠記憶。
+
+**其四：bounds 唯一性。** 新增 `resolve_numeric_bounds()` 作為**唯一**路徑：
+原生數值取自 lock，字串界線必須有宣告的解讀且
+`float(凍結字面值)` 必須**恰好等於**宣告值（不符即拒絕 —— 那等於在不改 lock
+的情況下放寬界線）。結果為 20 個維度，
+`bounds_resolution_hash = c71c39995d7a64ab…`，凍進 AMD-003 與 CAL-PREREG-002。
+
+**其五：calibration 也要有 access count。** held-out 有，calibration 沒有，
+於是「還沒讀」只是一句話。新增 append-only
+`data/splits/calibration_access_ledger.json`，明訂什麼算一次 access
+（讀 recording **數值**算；對 recording id 集合取雜湊不算），
+first access 在 stage 1 開始，以及順序規則：帳上 count > 0 而 stage 0 artifact
+不存在，代表順序反了，流程必須停止。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-003.yaml
+  AMD-003  612dabf1b323a730…   9 contracts changed
+  heldout access 0   calibration access 0
+py -3.10 -m pcmef.cli calibration preregister --validate
+  CP-01..CP-16 全 PASS      protocol_hash c6a0de86e866cc0d…
+py -3.10 -m pytest tests/unit/test_calibration_plan.py \
+                   tests/simulation/test_empty_topology.py -q   # 39 passed
+py -3.10 -m pytest tests/unit/test_calibration_prereg.py -q     # 49 passed
+```
+
+`test_population_matches_scipy` 對 N=1,2,3,4,6,7 **實際呼叫 scipy**，
+斷言 `nfev == P × (nit + 1)`；scipy 換版而規則改變時它必須失敗。
+`test_a_real_de_run_that_exceeds_its_budget_fails` 把預算調到實際需要的四分之一，
+DE 必須被 `BudgetExceeded` 中止；其對偶
+`test_the_preregistered_budget_is_actually_sufficient` 防止守衛反過來
+把合法執行擋掉（少了它，前者可以靠 `limit=0` 通過）。
+
+驗證器上線後又抓到本次修訂自身的兩個缺口：`optimizer.seeds` 因插入
+`evaluation_budget` 區塊而被縮排成它的子鍵（CP-07 FAIL）；
+CP-15 原本掃整個 stage_0 區塊，把 `why_not_s_f` 這種**說明為什麼不用 s_f**
+的欄位也判成違規（與 CP-04 守衛自我指涉是同一類錯誤），已改為只掃操作性欄位。
+
+**維護邊界**：
+- 不得把 stage 0 的分母改回 s_f，或讓 `s_f_relative_leverage_diagnostic`
+  變成 gating。
+- 不得手改 `evaluation_budget.resolved`；CP-13 逐項比對公式。
+- 不得讓 `scalar_stages` 復活；求解路徑必須唯一。
+- 不得在 `resolve_numeric_bounds()` 之外另算一次 bounds。
+- 不得刪除 `tests/simulation/test_empty_topology.py`；stage 3 的整個
+  可辨識性論證建立在它驗的那兩件事上。
+- 本次仍**未**執行 stage 0、未讀 calibration partition、未開 held-out。
+
+相關：[NOTE-041]、[NOTE-040]、[NOTE-035]、[NOTE-029]、[NOTE-032]、
+[NOTE-037]、[NOTE-028]、[NOTE-012]
+
+---
+
 ## NOTE-041 校準先預註冊：26 個參數拆成五個各自可辨識的階段
 
 **決策日期**：2026-08-29

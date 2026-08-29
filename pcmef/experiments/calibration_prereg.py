@@ -41,6 +41,12 @@ from typing import Any
 
 from pcmef.audit.result import AuditReport, CheckResult, CheckStatus
 from pcmef.core.hash import hash_object
+from pcmef.experiments.calibration_plan import (
+    CalibrationPlanError,
+    bounds_resolution_hash,
+    resolve_numeric_bounds,
+    stage_budgets,
+)
 
 __all__ = [
     "PREREGISTRATION_PATH",
@@ -56,11 +62,11 @@ __all__ = [
 PREREGISTRATION_PATH = (
     Path(__file__).resolve().parents[2] / "configs" / "calibration_preregistration.yaml"
 )
-PREREGISTRATION_ID = "CAL-PREREG-001"
+PREREGISTRATION_ID = "CAL-PREREG-002"
 
 #: 凍結前必須全部 PASS。NOT_PRODUCED 在這裡不是可接受狀態 ——
 #: 預註冊的每一項都是**現在就該寫完**的，沒有「之後補」的欄位。
-REQUIRED_CHECKS: tuple[str, ...] = tuple(f"CP-{n:02d}" for n in range(1, 13))
+REQUIRED_CHECKS: tuple[str, ...] = tuple(f"CP-{n:02d}" for n in range(1, 17))
 
 #: optimizer 在任何階段都不得觸碰的參數。前三個是 CG-1/2/3 的 gauge 固定項。
 FORBIDDEN_IN_SEARCH_SPACE: frozenset[str] = frozenset(
@@ -360,15 +366,18 @@ def validate_preregistration(
     optimizer = protocol.get("optimizer", {})
     findings = []
     multivariate = optimizer.get("multivariate_stages", {})
-    for key, container, label in (
-        ("method", multivariate, "optimizer.multivariate_stages"),
-        ("seed", multivariate, "optimizer.multivariate_stages"),
-        ("initialization", multivariate, "optimizer.multivariate_stages"),
-        ("max_evaluations_per_stage", multivariate, "optimizer.multivariate_stages"),
-        ("method", optimizer.get("scalar_stages", {}), "optimizer.scalar_stages"),
-    ):
-        if not container.get(key):
-            findings.append(f"{label}.{key} 缺漏")
+    for key in ("method", "seed", "initialization", "maxiter"):
+        if not multivariate.get(key):
+            findings.append(f"optimizer.multivariate_stages.{key} 缺漏")
+    # AMD-003：只能有一條求解路徑。留著一份列「參數」的 scalar_stages，
+    # 會讓「stage 1 的兩個參數要不要逐一純量搜尋」永遠沒有答案。
+    if not optimizer.get("method_rule"):
+        findings.append("optimizer.method_rule 缺漏：求解路徑必須唯一且寫明")
+    if "scalar_stages" in optimizer:
+        findings.append(
+            "optimizer.scalar_stages 仍存在：它列的是參數而非階段，"
+            "會讓每個階段用哪一種求解器變成沒有答案（AMD-003）"
+        )
     if not optimizer.get("common_random_numbers", {}).get("seeds"):
         findings.append("optimizer.common_random_numbers.seeds 缺漏：不共用種子會讓 optimizer 追雜訊")
     if not optimizer.get("verification_seeds", {}).get("seeds"):
@@ -396,8 +405,8 @@ def validate_preregistration(
         if findings
         else _ok(
             "CP-07", req,
-            f"scalar={optimizer['scalar_stages']['method']} / "
-            f"multivariate={multivariate['method']} seed={multivariate['seed']}；"
+            f"{multivariate['method']} seed={multivariate['seed']} "
+            f"maxiter={multivariate['maxiter']}；單一求解路徑；"
             "CRN、驗證種子、重啟、平手與失敗處置齊備",
         )
     )
@@ -509,7 +518,167 @@ def validate_preregistration(
         else _ok("CP-12", req, "尚無 calibration artifact，預註冊確實在擬合之前")
     )
 
+    # -- CP-13 評估預算必須與公式導出的值逐項相符（AMD-003）---------------
+    req = "evaluation_budget.resolved 必須與 calibration_plan 的公式逐項相符"
+    findings = []
+    detail = ""
+    try:
+        computed = stage_budgets(protocol, registry)
+        declared = protocol.get("evaluation_budget", {}).get("resolved") or {}
+        if not declared:
+            findings.append("evaluation_budget.resolved 缺漏：預算未被具體寫出")
+        for stage_id, values in computed.items():
+            entry = declared.get(stage_id)
+            if entry is None:
+                findings.append(f"evaluation_budget.resolved 缺少階段 {stage_id}")
+                continue
+            for key in ("dimensions", "population", "per_restart", "per_stage"):
+                expected = values[
+                    {"per_restart": "evaluations_per_restart",
+                     "per_stage": "evaluations_per_stage"}.get(key, key)
+                ]
+                if int(entry.get(key, -1)) != int(expected):
+                    findings.append(
+                        f"{stage_id}.{key}：預註冊寫 {entry.get(key)!r}，"
+                        f"公式導出 {expected}"
+                    )
+        total_declared = protocol.get("evaluation_budget", {}).get("total_evaluations")
+        total_computed = sum(v["evaluations_per_stage"] for v in computed.values())
+        if int(total_declared or -1) != total_computed:
+            findings.append(
+                f"total_evaluations：預註冊寫 {total_declared!r}，公式導出 {total_computed}"
+            )
+        detail = (
+            f"{len(computed)} 個階段預算與公式相符；合計 {total_computed} 次評估"
+        )
+    except CalibrationPlanError as exc:
+        findings.append(str(exc))
+    results.append(
+        _bad("CP-13", req, findings) if findings else _ok("CP-13", req, detail)
+    )
+
+    # -- CP-14 數值界線必須可由凍結物唯一重建（AMD-003）-------------------
+    req = "optimizer 的數值界線必須由 frozen lock + frozen protocol 唯一重建"
+    findings = []
+    detail = ""
+    if lock_payload:
+        try:
+            resolved_bounds = resolve_numeric_bounds(protocol, lock_payload, registry)
+            digest = bounds_resolution_hash(protocol, lock_payload, registry)
+            if bounds_resolution_hash(protocol, lock_payload, registry) != digest:
+                findings.append("bounds_resolution_hash 不是決定性的")
+            if not protocol.get("bounds", {}).get("uniqueness", {}).get("resolver"):
+                findings.append("bounds.uniqueness.resolver 未指名唯一的解析路徑")
+            detail = f"{len(resolved_bounds)} 個維度；bounds_resolution_hash {digest[:16]}…"
+        except CalibrationPlanError as exc:
+            findings.append(str(exc))
+    else:
+        findings.append("initial_simulation.lock 不存在，界線無從重建")
+    results.append(
+        _bad("CP-14", req, findings) if findings else _ok("CP-14", req, detail)
+    )
+
+    # -- CP-15 stage 0 必須是真正的 simulation-only（AMD-003）-------------
+    req = "stage 0 的入場判準不得依賴任何由真實資料導出的量"
+    stage0 = protocol.get("stage_0", {})
+    findings = []
+    normaliser = stage0.get("normaliser", {})
+    if normaliser.get("symbol") != "sigma_MC":
+        findings.append(
+            "stage_0.normaliser.symbol 不是 sigma_MC；以 s_f 為分母會讓一個"
+            "宣稱 simulation-only 的階段必須先讀 calibration partition"
+        )
+    if not normaliser.get("replicates") or not normaliser.get("seed_set"):
+        findings.append("stage_0.normaliser 未寫出重複次數與種子集合")
+    if stage0.get("reads_calibration_partition") is not False:
+        findings.append("stage_0.reads_calibration_partition 必須為 false")
+    if stage0.get("calibration_first_access") is not False:
+        findings.append("stage_0.calibration_first_access 必須為 false")
+    if stage0.get("collinearity_check", {}).get("normalised_by") != "sigma_MC":
+        findings.append("collinearity_check 未以 sigma_MC 正規化：未正規化的餘弦隨單位改變")
+    # 只掃**操作性**欄位，不掃說明性欄位。`normaliser.why_not_s_f` 與
+    # `threshold_rationale` 的工作就是解釋為什麼不用 s_f，把它們算成違規，
+    # 等於逼人刪掉理由才能過關 —— 與 CP-04 的守衛自我指涉是同一類錯誤。
+    operative = {
+        "method": stage0.get("method"),
+        "admission_threshold.rule": stage0.get("admission_threshold", {}).get("rule"),
+        "collinearity_check.rule": stage0.get("collinearity_check", {}).get("rule"),
+        "normaliser.definition": normaliser.get("definition"),
+    }
+    for location, text in operative.items():
+        if text and "s_f" in str(text):
+            findings.append(
+                f"stage_0.{location} 仍以 s_f 表述；stage 0 的操作性欄位不得"
+                "依賴任何由真實資料導出的量"
+            )
+    diagnostic = protocol.get("s_f_relative_leverage_diagnostic", {})
+    if diagnostic.get("gating") is not False:
+        findings.append(
+            "s_f_relative_leverage_diagnostic.gating 必須為 false："
+            "事後依真實資料剔除參數就是資料相依的模型選擇"
+        )
+    results.append(
+        _bad("CP-15", req, findings)
+        if findings
+        else _ok(
+            "CP-15", req,
+            f"分母為 sigma_MC（{normaliser.get('replicates')} 組種子）；"
+            "s_f 相對槓桿降為不具決定權的診斷",
+        )
+    )
+
+    # -- CP-16 calibration partition 尚未被讀取（AMD-003）-----------------
+    req = "凍結時 calibration partition access count 必須為 0"
+    ledger_path = root / "data" / "splits" / "calibration_access_ledger.json"
+    findings = []
+    calibration_access: Any = None
+    if ledger_path.exists():
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        calibration_access = ledger.get("calibration_access_count")
+        if calibration_access != 0:
+            findings.append(
+                f"calibration_access_count = {calibration_access}；"
+                "預註冊必須早於第一次讀取"
+            )
+        if ledger.get("entries"):
+            findings.append(f"access ledger 已有 {len(ledger['entries'])} 筆記錄")
+    else:
+        findings.append(f"找不到 {ledger_path}，無法證明 calibration partition 未被讀取")
+    if data.get("first_access", {}).get("ledger") != "data/splits/calibration_access_ledger.json":
+        findings.append("data.first_access.ledger 未指向 access ledger")
+    results.append(
+        _bad("CP-16", req, findings)
+        if findings
+        else _ok("CP-16", req, f"calibration_access_count = {calibration_access}；帳上無記錄")
+    )
+
     return AuditReport(name="calibration_preregistration", results=tuple(results))
+
+
+def _amendment_hashes(protocol: dict[str, Any], freeze_dir: str | Path) -> dict[str, str]:
+    """取回協定所宣告的每一份 amendment 的 payload_hash。
+
+    未凍結即拋錯，不回填 None —— 一份宣稱「依 AMD-003 修訂」但 AMD-003
+    根本不存在的預註冊，等於沒有修訂記錄。
+    """
+    from pcmef.core.amendments import AmendmentStore
+
+    store = AmendmentStore(freeze_dir)
+    out: dict[str, str] = {}
+    for entry in protocol.get("amendments", []) or []:
+        amendment_id = str(entry["id"])
+        if not store.exists(amendment_id):
+            raise PreregistrationError(
+                f"the protocol declares amendment {amendment_id!r} but it is not "
+                f"frozen under {Path(freeze_dir) / 'amendments'}. A protocol that "
+                "cites an amendment which does not exist has no amendment record."
+            )
+        document = json.loads(
+            store.path_for(amendment_id).read_text(encoding="utf-8")
+        )
+        store.load(amendment_id)  # 重算雜湊，被改過即拋錯
+        out[amendment_id] = str(document["payload_hash"])
+    return out
 
 
 def _scan_for_real_means(root: Path, protocol_path: str | Path | None) -> list[str]:
@@ -588,6 +757,8 @@ def freeze_preregistration(
         "preregistration_version": protocol["preregistration_version"],
         "protocol_path": "configs/calibration_preregistration.yaml",
         "protocol_hash": hash_object(protocol),
+        "supersedes": protocol.get("supersedes"),
+        "amendments": _amendment_hashes(protocol, freeze_dir),
         "code_version": code_version,
         "code_dirty_at_freeze": bool(code_dirty),
         "split": {
@@ -597,6 +768,8 @@ def freeze_preregistration(
             "eligible_set_hash": protocol["data"]["eligible_set_hash"],
             "heldout_opened": False,
             "heldout_access_count": 0,
+            "calibration_access_count": 0,
+            "calibration_access_ledger": protocol["data"]["first_access"]["ledger"],
         },
         "registry": {
             "version": registry.registry_version,
@@ -612,7 +785,7 @@ def freeze_preregistration(
             for erratum_id in erratum_store.list_ids()
         },
         "optimizer": {
-            "scalar": optimizer["scalar_stages"],
+            "method_rule": optimizer["method_rule"],
             "multivariate": optimizer["multivariate_stages"],
             "optimizer_seed": optimizer["seeds"]["optimizer_seed"],
             "seed_derivation": optimizer["seeds"]["seed_derivation"],
@@ -622,6 +795,28 @@ def freeze_preregistration(
             "convergence": protocol["convergence"],
             "tie_break": protocol["tie_break"],
             "failure_handling": protocol["failure_handling"],
+        },
+        # AMD-003：預算與界線由公式/解析器導出並在此凍結，
+        # 讓「optimizer 用了哪組界線、多少預算」不必信任任何人的記憶。
+        "evaluation_budget": stage_budgets(protocol, registry),
+        "bounds_resolution_hash": bounds_resolution_hash(
+            protocol, resolved.payload, registry
+        ),
+        "resolved_bounds": {
+            name: list(bound)
+            for name, bound in resolve_numeric_bounds(
+                protocol, resolved.payload, registry
+            ).items()
+        },
+        "stage_0": {
+            "normaliser": protocol["stage_0"]["normaliser"]["symbol"],
+            "replicates": protocol["stage_0"]["normaliser"]["replicates"],
+            "seed_set": protocol["stage_0"]["normaliser"]["seed_set"],
+            "threshold": protocol["stage_0"]["admission_threshold"]["threshold_value"],
+            "borderline_band": protocol["stage_0"]["admission_threshold"][
+                "borderline_band"
+            ],
+            "reads_calibration_partition": False,
         },
         "objective": {
             "id": protocol["objective"]["id"],

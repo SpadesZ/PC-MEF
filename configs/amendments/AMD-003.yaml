@@ -1,0 +1,273 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 的 amendment freeze 讀取，寫成
+#         freeze/amendments/AMD-003.amendment.json；其 payload_hash 進
+#         CAL-PREREG-002 的 amendments 區塊。
+# 檔案路徑: configs/amendments/AMD-003.yaml
+# 產生時間: 2026-08-30 10:40 +08:00
+# 版本: v0.1.0
+# 功能說明: 記錄 CAL-PREREG-001 的三項 pre-execution 缺陷、各自的裁決，
+#           以及裁決對 leakage 與可辨識性的影響。
+# 模組定位: AMD-003 的**輸入規格**。凍結後的權威記錄是
+#           freeze/amendments/AMD-003.amendment.json；本檔留在版控是為了
+#           讓修訂內容可被 review，而不是被 CLI 參數帶過。
+# 主要責任:
+#   1. 逐項寫出被修改的契約（before / after）
+#   2. 記下修訂當下的前提證據，特別是兩個 access count
+#   3. 說明選 A 不選 B 的理由與其 leakage / identifiability 後果
+#   4. 列出本次修訂**沒有**改變的不變式
+# 維護提醒:
+#   - 不得在 AMD-003 凍結後修改本檔；要再改就開 AMD-004。
+#   - 不得把 precondition_evidence 的 access count 寫成「應該是 0」；
+#     那兩個數字必須是凍結當下實際讀到的值，它們是本記錄唯一能證明
+#     「不是看到結果才改規則」的東西。
+#   - 不得藉本修訂放寬任何邊界或改變目標函數；本次只消歧義與更正措辭。
+#   - v0.1.0 新增：首版（NOTE-042）。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-003.yaml
+#   - py -3.10 -m pytest tests/unit/test_calibration_plan.py -v
+# ------------------------------------------------------------
+
+amendment_id: AMD-003
+title: >
+  Fix three pre-execution defects in the calibration preregistration: a
+  stage-0 criterion that secretly required calibration data, an optimizer
+  budget that understated the real cost by 8.6-25.7x, and wording that
+  echoed the already-fixed Empty solid-glass topology bug
+
+supersedes: >
+  configs/calibration_preregistration.yaml v0.1.0
+  (protocol hash 77365cc30413d4eaa940fcc224ac9b344d92f8ace6780b0d2f369a592e0900bf,
+  frozen as CAL-PREREG-001 record hash
+  a17dd93982e496b7a5faa538aa0c99b72a5067ac61e901e3a299258576b3254a)
+
+authority: >
+  researcher decision under the preregistration's own amendment clause,
+  taken before the calibration partition was read and before Stage 0 was run
+
+changed_contracts:
+
+  calibration_preregistration.stage_0.admission_threshold:
+    before: >
+      leverage(p, o) = |delta o| / s_f(o), admit if >= 0.5, where s_f is the
+      pooled IQR of the CALIBRATION SPLIT's real values -- while the same
+      stage declared reads_calibration_partition: false
+    after: >
+      leverage_sim(p, o) = |o(p=hi) - o(p=lo)| / sigma_MC(o), admit if >= 10,
+      where sigma_MC is the seed-to-seed standard deviation of the observable
+      over R=8 independent simulation seeds at the frozen initial parameter
+      values. Values in [5, 20] are BORDERLINE and halt with
+      STAGE0_ADJUDICATION_REQUIRED rather than being auto-classified.
+      Stage 0 is now simulation-only in fact, not only in its declaration.
+
+  calibration_preregistration.stage_0.collinearity_check:
+    before: cosine similarity of raw observable response vectors (unit-dependent)
+    after: >
+      response vectors normalised component-wise by sigma_MC before the cosine,
+      making the number unit-free. An unnormalised cosine over components with
+      different physical units changes value when the units change, so the
+      0.98 threshold was not well defined.
+
+  calibration_preregistration.s_f_relative_leverage_diagnostic:
+    before: (did not exist; the s_f question was the admission gate)
+    after: >
+      Retained as a NON-GATING diagnostic computed at stage 1 start, after
+      s_f has been legitimately produced by calibration first access. It is
+      recorded in artifacts and may never change any stage's parameter set.
+
+  calibration_preregistration.optimizer.method_rule:
+    before: >
+      scalar_stages.applies_to listed three PARAMETERS
+      (ambient_energy_to_mcps, signal_energy_to_mcps, sigma_width_to_mm)
+      while multivariate_stages applied to STAGES, leaving no answer to
+      "is stage 1, which has two parameters, solved scalar-wise or jointly?"
+    after: >
+      Exactly one solver path: every stage is solved by
+      differential_evolution over all of that stage's expanded dimensions.
+      The scalar path is removed entirely; CP-07 fails if scalar_stages reappears.
+
+  calibration_preregistration.optimizer.evaluation_budget:
+    before: >
+      max_evaluations_per_stage: 3000 together with maxiter: 200 and
+      restarts: 3 -- mutually unsatisfiable for every stage. Measured on
+      scipy 1.15.3: N=2 -> 4192, N=3 -> 11584, N=4 -> 12864, N=7 -> 25728
+      function evaluations, i.e. up to 8.6x the stated per-stage budget for a
+      single restart and 25.7x across three. Root cause: popsize was treated
+      as the population size, but it is a MULTIPLIER, and init='sobol'
+      additionally rounds the population up to a power of two.
+    after: >
+      maxiter: 100 and the budget is DERIVED, not estimated:
+      P(N) = 2**ceil(log2(popsize * N));
+      budget_per_restart(N) = P(N) * (maxiter + 1);
+      budget_per_stage(N) = restarts * budget_per_restart(N).
+      Resolved: AMBIENT 2d/P32/9696, SIGNAL_SCALE 2d/P32/9696,
+      GEOMETRY_SURFACE_FOIL 7d/P128/38784, PARTICIPATING_MEDIA 6d/P128/38784,
+      SENSOR_SURROGATE 3d/P64/19392; total 116352 evaluations.
+      The runner counts evaluations itself and aborts the stage with
+      NOT_CONVERGED on the (budget+1)-th call.
+
+  calibration_preregistration.dimension_expansion:
+    before: >
+      (did not exist) Stages listed registry parameter names only, so
+      _ALBEDO_BY_PRESET -- three independent class-specific scalars -- was
+      ambiguous between 1 and 3 search dimensions, which directly changes the
+      population size and therefore the budget.
+    after: >
+      Explicit expansion map. _ALBEDO_BY_PRESET expands to
+      {.water, .bubbly, .misty} with shared_bounds: true. Any fitted
+      parameter whose initial value is a dict or list and has no declared
+      expansion is REFUSED, so this class of ambiguity cannot recur silently.
+      PARTICIPATING_MEDIA is therefore 6 dimensions, not 4.
+
+  calibration_preregistration.bounds.uniqueness:
+    before: >
+      (did not exist) The three string upper bounds frozen in the lock had
+      declared numeric interpretations, but nothing guaranteed that the
+      optimizer's bounds came from that declaration rather than from some
+      second computation.
+    after: >
+      resolve_numeric_bounds() is the single path. Native numeric bounds come
+      from the lock; string bounds require a declared interpretation whose
+      value must EXACTLY equal float(frozen literal). The resulting 20-dimension
+      map is hashed as bounds_resolution_hash and frozen, so the bounds the
+      optimizer uses are reconstructible from frozen artifacts alone.
+
+  calibration_preregistration.stagewise.GEOMETRY_SURFACE_FOIL.identifiability:
+    before: >
+      "build_scene_dict() only builds the interior medium when
+      medium_preset != 'empty'" -- wording nearly identical to the sentence
+      NOTE-029 used to describe the SOLID-GLASS-CYLINDER DEFECT, and therefore
+      readable as "Empty has no interior cylinder".
+    after: >
+      Corrected wording plus a line-by-line code citation. The audit finding
+      is that the CODE IS CORRECT: scene["bottle_interior"] is built
+      UNCONDITIONALLY for all four classes; only interior["interior"] = medium
+      is conditional, via _medium_dict(), and _DENSITY_KEY_BY_PRESET has no
+      "empty" key. _INTERIOR_BASE_IOR["empty"] = "air". Measured construction:
+      all four classes carry bottle_interior with r_in = 26.5 mm, r_out =
+      28.5 mm (wall 2.0 mm); Empty has int_ior=air, ext_ior=bk7 and no
+      participating medium. Empty is glass shell + air + glass shell.
+      This was a PREREGISTRATION WORDING DEFECT, not a code regression, so
+      the frozen initial_simulation.lock is unaffected.
+
+  calibration_preregistration.data.first_access:
+    before: >
+      (did not exist) held-out had an auditable access_count; the calibration
+      partition had only the sentence "not read yet".
+    after: >
+      Append-only ledger data/splits/calibration_access_ledger.json with an
+      explicit definition of what counts as an access (reading recording
+      VALUES counts; hashing the recording-id set does not), the point of
+      first access (stage 1 start), and an ordering rule: a count > 0 with no
+      frozen stage 0 artifact means the preregistered order was violated and
+      the run must stop. CP-16 checks the count is 0 at freeze time.
+
+rationale: >
+  ## P0-1: why option A (make stage 0 genuinely simulation-only), not option B
+  (redefine stage 0 as calibration-data-consuming).
+
+  The defect is real and structural: v0.1.0 declared
+  stage_0.reads_calibration_partition = false while its only admission rule
+  divided by s_f, which is defined in the same document as the pooled IQR of
+  the calibration split's REAL values. The stage could not have been executed
+  as written without first reading the partition.
+
+  Option B was rejected on two independent grounds.
+
+  (1) LEAKAGE. Under B, the SET OF PARAMETERS THAT GET FITTED would be chosen
+  using real calibration data. That is a data-dependent model-selection step
+  sitting upstream of every subsequent stage, and its effect is not captured
+  by any of the existing guards -- the verification-seed check tests seed
+  overfitting, not selection bias. It would also move calibration first
+  access earlier for no scientific gain, since nothing in stage 0's actual
+  question requires real data.
+
+  (2) IDENTIFIABILITY. The question stage 0 must answer is "can the optimizer
+  distinguish this parameter's effect from noise?". For a Monte-Carlo
+  simulator the relevant noise floor is its own seed-to-seed dispersion, not
+  the real data's IQR. Under CRN the within-stage objective is deterministic,
+  so a parameter whose full-range effect is below sigma_MC produces a fitted
+  value that is an artefact of the chosen seeds -- exactly the failure that
+  verification seeds would flag as SEED_OVERFIT only AFTER an entire stage's
+  budget had been spent. sigma_MC pre-empts it. Using s_f would instead have
+  answered "does this parameter matter to J", which is a legitimate but
+  DIFFERENT question, and one that belongs in a diagnostic rather than a gate.
+
+  The s_f question is therefore not discarded: it survives as
+  s_f_relative_leverage_diagnostic, computed at stage 1 start and explicitly
+  forbidden from changing any parameter set.
+
+  Threshold choice: K = 10 with R = 8 replicates means a full-range sweep must
+  move an observable by ten seed-to-seed standard deviations, i.e. about
+  10*sqrt(8) ~= 28 standard errors of the mean. K was fixed before any
+  measurement. The [5, 20] borderline band halts rather than rounding, on the
+  same principle as the estimator round's TIE_BREAK_REQUIRED: if the probe
+  cannot separate, the honest output is that it cannot separate.
+
+  ## P0-2: why the budget is derived rather than stated.
+
+  v0.1.0's three budget numbers could not all be true at once, and the error
+  was not small -- it was a factor of 8.6 to 25.7. A stated budget that the
+  optimizer silently blows through is worse than no budget, because
+  "evaluations used" then carries no information. The remedy is to derive the
+  budget from scipy's actual population rule, publish the resolved table in
+  the protocol, have CP-13 compare the table against the formula item by item,
+  and have the runner enforce it with a guard that aborts on the
+  (budget+1)-th call rather than reporting the overrun afterwards.
+  The honest consequence -- roughly 65 single-threaded hours at ~2 s per
+  evaluation -- is disclosed in the protocol so that "the budget is not
+  affordable" is discovered before the run, not during it.
+
+  ## P1-3: the code was audited, not assumed.
+
+  The wording defect was found by reading build_scene_dict() line by line and
+  then constructing all four scenes and inspecting the resulting dictionaries.
+  Empty is a glass shell with an air interior. No STOP condition applies, no
+  calibration is blocked, and the frozen initial_simulation.lock is unaffected.
+
+precondition_evidence:
+  heldout_access_count: 0
+  calibration_access_count: 0
+  calibration_access_ledger_entries: 0
+  stage_0_executed: false
+  any_calibration_stage_executed: false
+  calibration_artifacts_present: false
+  e1_outcome_lock_exists: false
+  initial_simulation_lock_hash: dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335
+  err_001_payload_hash: 363b06c1de6ec9613178074689dc23d2da443ac9657b62740023b141cbed4c15
+  bounds_resolution_hash: c71c39995d7a64ab85054767aaf4c729145ae78e9f6775e2a68d02542ed8bdd9
+  measured_scipy_version: 1.15.3
+  measured_nfev_before_amendment:
+    N2: 4192
+    N3: 11584
+    N4: 12864
+    N7: 25728
+  measured_empty_topology:
+    bottle_interior_built_for_all_four_classes: true
+    inner_radius_mm: 26.5
+    outer_radius_mm: 28.5
+    empty_int_ior: air
+    empty_ext_ior: bk7
+    empty_has_participating_medium: false
+  disclosure_no_results_exist: >
+    No calibration objective value has ever been computed, for any parameter
+    setting, so there is no result this amendment could have been shaped to
+    favour. The three defects were found by auditing the frozen protocol
+    against the code and against scipy's measured behaviour.
+
+invariants_preserved:
+  objective_unchanged: true
+  weights_unchanged: UNIFORM 1.0 over 16 class x feature terms
+  s_f_definition_unchanged: calibration-only pooled IQR, computed once and frozen
+  bounds_unchanged: >
+    every fitted parameter's [lo, hi] is still exactly the frozen
+    initial_simulation.lock range; this amendment resolves how the three
+    string bounds are read, it does not widen or narrow any bound
+  fitted_parameter_set_unchanged: 18 registry parameters (now stated as 20 optimizer dimensions)
+  not_fitted_set_unchanged: 8 members
+  gauge_members_still_forbidden: [_SIGMA_T_REFERENCE_PER_M, lighting.irradiance, _ROOM_LIGHT_RADIANCE]
+  estimator_still_forbidden: true
+  real_class_means_remain_forbidden: true
+  held_out_remains_unopened: true
+  calibration_partition_remains_unread: true
+  stagewise_structure_unchanged: 5 stages in the same order with the same identifiability arguments
+  initial_simulation_lock_untouched: true

@@ -1,27 +1,32 @@
 # PC-MEF Research System source maintenance contract
-# 上下游: 驗證 pcmef.experiments.calibration_prereg 的 CP-01..CP-12 與凍結契約；
+# 上下游: 驗證 pcmef.experiments.calibration_prereg 的 CP-01..CP-16 與凍結契約；
 #         以 repo 內真實的 configs/calibration_preregistration.yaml 為基準，
 #         逐項複製後刻意破壞，確認每一條檢查都會咬人。
 # 檔案路徑: tests/unit/test_calibration_prereg.py
-# 產生時間: 2026-08-29 13:20 +08:00
-# 版本: v0.1.0
+# 產生時間: 2026-08-30 12:10 +08:00
+# 版本: v0.2.0
 # 功能說明: 確認「26 個參數不能一起 fit」這件事是被程式擋住的，而不是靠
 #           預註冊檔上寫了一段文字。
 # 模組定位: 校準預註冊驗證器的行為契約測試。重點是每一條 CP 檢查都有一個
 #           對應的、**會失敗的**破壞情境 —— 少了它們，驗證器可能整條都是
 #           空轉而沒有人會發現。
 # 主要責任:
-#   1. 真實預註冊檔必須 12/12 PASS（基準線）
+#   1. 真實預註冊檔必須 16/16 PASS（基準線）
 #   2. 每一條 CP 檢查各有至少一個對應的破壞情境會 FAIL
 #   3. gauge 固定項與 estimator 參數進入搜尋空間必須被擋
 #   4. real class mean 掃描器本身必須真的抓得到植入的字面值
 #   5. 未通過檢查時不得凍結；已凍結後不得覆寫
+#   6. stage 0 退回以 s_f 為分母、或預算表被手改，皆必須 FAIL
 # 維護提醒:
 #   - 不得刪除 test_the_real_protocol_passes_every_check：少了基準線，
 #     其餘負向測試會在「驗證器永遠拒絕一切」的情況下全部通過。
+#   - 不得刪除 test_cp15_allows_explaining_why_s_f_was_rejected：它擋的是
+#     「守衛過嚴逼人刪掉理由」這個相反方向的失敗。
 #   - 不得為了讓測試變簡單而把驗證器改成只檢查欄位存在；
 #     CP-02 與 CP-03 比對的是內容，不是欄位有沒有寫。
 #   - 不得在本檔內讀取 calibration partition 的任何數值。
+#   - v0.2.0 新增 CP-13..CP-16 的負向測試，並補上 amendment 綁定檢查
+#     （NOTE-042 / AMD-003）。
 #   - v0.1.0 新增：對應 NOTE-041 / CAL-PREREG-001。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_calibration_prereg.py -v
@@ -31,6 +36,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -357,6 +363,10 @@ def test_freeze_binds_every_required_hash(tmp_path):
     (errata_dir / "ERR-001.erratum.json").write_bytes(
         (FREEZE_DIR / "errata" / "ERR-001.erratum.json").read_bytes()
     )
+    amendments_dir = freeze_dir / "amendments"
+    amendments_dir.mkdir()
+    for amendment in sorted((FREEZE_DIR / "amendments").glob("*.amendment.json")):
+        (amendments_dir / amendment.name).write_bytes(amendment.read_bytes())
 
     _, document = freeze_preregistration(
         PREREGISTRATION_PATH, freeze_dir, REPO_ROOT, code_version="deadbeef"
@@ -386,9 +396,127 @@ def test_refreezing_is_refused(tmp_path):
     (errata_dir / "ERR-001.erratum.json").write_bytes(
         (FREEZE_DIR / "errata" / "ERR-001.erratum.json").read_bytes()
     )
+    amendments_dir = freeze_dir / "amendments"
+    amendments_dir.mkdir()
+    for amendment in sorted((FREEZE_DIR / "amendments").glob("*.amendment.json")):
+        (amendments_dir / amendment.name).write_bytes(amendment.read_bytes())
 
     freeze_preregistration(PREREGISTRATION_PATH, freeze_dir, REPO_ROOT)
     with pytest.raises(PreregistrationError, match="already frozen"):
+        freeze_preregistration(PREREGISTRATION_PATH, freeze_dir, REPO_ROOT)
+
+
+# ---------------------------------------------------------------------------
+# CP-13..CP-16（AMD-003）
+# ---------------------------------------------------------------------------
+
+
+def test_cp13_fails_when_the_budget_table_is_hand_edited(protocol, tmp_path):
+    """預算表由公式導出；手改一個數字就代表預註冊與程式分家了。"""
+    protocol["evaluation_budget"]["resolved"]["GEOMETRY_SURFACE_FOIL"]["per_stage"] = 3000
+    assert _status(protocol, tmp_path, "CP-13") is CheckStatus.FAIL
+
+
+def test_cp13_fails_when_the_total_does_not_add_up(protocol, tmp_path):
+    protocol["evaluation_budget"]["total_evaluations"] = 3000
+    assert _status(protocol, tmp_path, "CP-13") is CheckStatus.FAIL
+
+
+def test_cp13_fails_when_maxiter_changes_without_re_deriving(protocol, tmp_path):
+    """改 maxiter 卻不重導預算表，正是 CAL-PREREG-001 的那個缺陷。"""
+    protocol["optimizer"]["multivariate_stages"]["maxiter"] = 200
+    assert _status(protocol, tmp_path, "CP-13") is CheckStatus.FAIL
+
+
+def test_cp14_fails_when_a_string_bound_loses_its_interpretation(protocol, tmp_path):
+    protocol["bounds"]["declared_numeric_interpretations"] = []
+    assert _status(protocol, tmp_path, "CP-14") is CheckStatus.FAIL
+
+
+def test_cp14_fails_when_the_resolver_is_not_named(protocol, tmp_path):
+    """沒指名唯一的解析路徑，就可能有第二條路徑算出第二套 bounds。"""
+    protocol["bounds"]["uniqueness"]["resolver"] = ""
+    assert _status(protocol, tmp_path, "CP-14") is CheckStatus.FAIL
+
+
+def test_cp15_fails_when_stage_0_goes_back_to_s_f(protocol, tmp_path):
+    """把 s_f 放回 stage 0 的判準，simulation-only 的宣告就再次變成假的。"""
+    protocol["stage_0"]["admission_threshold"]["rule"] = (
+        "leverage(p, o) = |delta o| / s_f(o); admit if >= 0.5"
+    )
+    assert _status(protocol, tmp_path, "CP-15") is CheckStatus.FAIL
+
+
+def test_cp15_fails_when_the_normaliser_is_not_sigma_mc(protocol, tmp_path):
+    protocol["stage_0"]["normaliser"]["symbol"] = "s_f"
+    assert _status(protocol, tmp_path, "CP-15") is CheckStatus.FAIL
+
+
+def test_cp15_fails_when_stage_0_declares_it_reads_calibration(protocol, tmp_path):
+    protocol["stage_0"]["reads_calibration_partition"] = True
+    assert _status(protocol, tmp_path, "CP-15") is CheckStatus.FAIL
+
+
+def test_cp15_fails_when_the_s_f_diagnostic_becomes_gating(protocol, tmp_path):
+    """事後依真實資料剔除參數，就是資料相依的模型選擇。"""
+    protocol["s_f_relative_leverage_diagnostic"]["gating"] = True
+    assert _status(protocol, tmp_path, "CP-15") is CheckStatus.FAIL
+
+
+def test_cp15_allows_explaining_why_s_f_was_rejected(protocol, tmp_path):
+    """說明性欄位提到 s_f 不算違規 —— 否則等於逼人刪掉理由才能過關。"""
+    assert "s_f" in protocol["stage_0"]["normaliser"]["why_not_s_f"]
+    assert _status(protocol, tmp_path, "CP-15") is CheckStatus.PASS
+
+
+def test_cp16_fails_once_the_calibration_partition_has_been_read(protocol, tmp_path):
+    """帳上出現第一筆讀取之後，預註冊就不再是「先寫完再讀」。"""
+    fake_root = tmp_path / "root"
+    (fake_root / "data" / "splits").mkdir(parents=True)
+    (fake_root / "data" / "splits" / "calibration_access_ledger.json").write_text(
+        json.dumps({"calibration_access_count": 1, "entries": [{"purpose": "s_f"}]}),
+        encoding="utf-8",
+    )
+    (fake_root / "pcmef").mkdir()
+    # ERR-001 的證據以 repo_root 為基準，因此假根目錄也要有那兩份 manifest。
+    for run in ("repro_a", "repro_b"):
+        source = REPO_ROOT / "outputs" / run / "simulation_smoke_manifest.json"
+        target = fake_root / "outputs" / run
+        target.mkdir(parents=True)
+        (target / source.name).write_bytes(source.read_bytes())
+
+    report = validate_preregistration(_write(tmp_path, protocol), FREEZE_DIR, fake_root)
+    assert report.get("CP-16").status is CheckStatus.FAIL
+
+
+def test_amendment_003_is_frozen_and_bound():
+    """協定宣稱依 AMD-003 修訂；那份修訂必須真的存在且雜湊可重算。"""
+    from pcmef.core.amendments import AmendmentStore
+
+    protocol = load_protocol()
+    declared = [entry["id"] for entry in protocol["amendments"]]
+    assert "AMD-003" in declared
+    store = AmendmentStore(FREEZE_DIR)
+    payload = store.load("AMD-003")
+    assert payload["precondition_evidence"]["heldout_access_count"] == 0
+    assert payload["precondition_evidence"]["calibration_access_count"] == 0
+    assert payload["precondition_evidence"]["stage_0_executed"] is False
+    assert payload["invariants_preserved"]["objective_unchanged"] is True
+
+
+def test_freeze_is_refused_when_a_declared_amendment_is_missing(tmp_path):
+    """引用一份不存在的 amendment，等於沒有修訂記錄。"""
+    freeze_dir = tmp_path / "freeze"
+    freeze_dir.mkdir()
+    for name in ("real_split_policy.lock.json", "initial_simulation.lock.json"):
+        (freeze_dir / name).write_bytes((FREEZE_DIR / name).read_bytes())
+    errata_dir = freeze_dir / "errata"
+    errata_dir.mkdir()
+    (errata_dir / "ERR-001.erratum.json").write_bytes(
+        (FREEZE_DIR / "errata" / "ERR-001.erratum.json").read_bytes()
+    )
+    # 刻意不複製 freeze/amendments/
+    with pytest.raises(PreregistrationError, match="not frozen"):
         freeze_preregistration(PREREGISTRATION_PATH, freeze_dir, REPO_ROOT)
 
 

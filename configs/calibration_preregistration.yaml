@@ -4,8 +4,8 @@
 #         ERR-001 hash 一併凍進 freeze/preregistrations/CAL-PREREG-001.prereg.json；
 #         calibration 執行器日後只能照本檔跑，不得自行加減參數或判準。
 # 檔案路徑: configs/calibration_preregistration.yaml
-# 產生時間: 2026-08-29 12:20 +08:00
-# 版本: v0.1.0
+# 產生時間: 2026-08-30 10:10 +08:00
+# 版本: v0.2.0
 # 功能說明: 在**讀取 calibration partition 之前**寫死校準的全部規格 ——
 #           目標函數、正規化、分階段參數分組與各階段的可辨識性論證、
 #           固定/gauge/derived 成員、optimizer 與種子、邊界、收斂與評估上限、
@@ -29,16 +29,41 @@
 #   - 不得跳階段，也不得把後面階段的參數提前放進前面階段一起 fit；
 #     階段順序就是可辨識性論證的順序。
 #   - 不得因為某階段不收斂就放寬邊界或改權重重跑；NOT_CONVERGED 是合法結局。
+#   - 不得在 stage 0 引入任何由真實資料導出的量；它的分母必須是 sigma_MC，
+#     不是 s_f。這條是 AMD-003 的核心，改回去就會讓 stage 0 的
+#     simulation-only 宣告再次變成假的。
+#   - 不得手改 evaluation_budget.resolved 的數字；它由 calibration_plan 的
+#     公式導出，CP-13 逐項比對，改一個就會 FAIL。
+#   - v0.2.0 依 AMD-003 修正 stage 0 的 s_f 矛盾、消歧義 optimizer 預算、
+#     新增 dimension_expansion 與 bounds.uniqueness，並更正 stage 3 的
+#     Empty 拓樸措辭（NOTE-042）。
 #   - v0.1.0 新增：首版校準預註冊（NOTE-041）。
 # 驗證方式:
 #   - py -3.10 -m pcmef.cli calibration preregister --validate
 #   - py -3.10 -m pytest tests/unit/test_calibration_prereg.py -v
+#   - py -3.10 -m pytest tests/unit/test_calibration_plan.py -v
 # ------------------------------------------------------------
 
-preregistration_id: CAL-PREREG-001
-preregistration_version: v0.1.0
-registered_on: "2026-08-29"
+preregistration_id: CAL-PREREG-002
+preregistration_version: v0.2.0
+registered_on: "2026-08-30"
 status: FROZEN_BEFORE_READING_CALIBRATION_PARTITION
+
+supersedes:
+  preregistration_id: CAL-PREREG-001
+  record_hash: a17dd93982e496b7a5faa538aa0c99b72a5067ac61e901e3a299258576b3254a
+  protocol_hash: 77365cc30413d4eaa940fcc224ac9b344d92f8ace6780b0d2f369a592e0900bf
+  note: >
+    CAL-PREREG-001 保留不刪除（append-only）。它記錄的 v0.1.0 協定帶有
+    AMD-003 所列的三項缺陷，因此**不得**用於執行；操作版本是本檔。
+
+amendments:
+  - id: AMD-003
+    adds: [stage_0.normaliser, evaluation_budget, dimension_expansion, bounds.uniqueness]
+    fixes:
+      - stage 0 的 s_f 矛盾（宣稱 simulation-only 卻要先讀 calibration）
+      - optimizer 預算三處互相矛盾且低估 8.6-25.7 倍
+      - stage 3 Empty 拓樸的措辭與 NOTE-029 的缺陷描述雷同
 
 # ===========================================================================
 # 0. 資料來源
@@ -60,6 +85,21 @@ data:
     對 calibration partition 內每一筆 recording 的 canonical 陣列取
     core.hash.hash_array，依 recording_id 排序後 combine_hashes。
     該值必須寫入每一份 stage artifact 與最終的 calibrated_simulation.lock。
+
+  # AMD-003：held-out 有 access_count，calibration 沒有。「還沒讀」因此
+  # 只是一句話而不是一個可稽核的數字。補上獨立的 append-only 帳。
+  first_access:
+    ledger: data/splits/calibration_access_ledger.json
+    count_now: 0
+    definition: >
+      一次 access = 讀取 calibration partition 內任何一筆 recording 的
+      **數值**。計算 recording id 集合的雜湊不算（那是 split 結構，
+      不揭露任何分佈資訊）；讀取數值以計算 raw_data_hash 或 s_f **算**。
+    first_access_happens_at: stage 1 開始時，一次讀入並同時算出 raw_data_hash 與 s_f
+    ordering_rule: >
+      stage 0 必須在 first access **之前**完整跑完並凍結其 artifact。
+      若帳上 count > 0 而 stage 0 artifact 不存在，代表順序已經反了，
+      流程必須停止。
 
   forbidden_sources:
     - heldout_real（168 筆；E1 final 之前 access_count 必須維持 0）
@@ -201,6 +241,40 @@ bounds:
     optimizer 提出界外點時直接回傳 +inf 並記錄，不做 clip。
     clip 會讓最佳點落在邊界上而看不出它其實想往外走。
 
+  # AMD-003：唯一重建的要求。
+  uniqueness:
+    resolver: pcmef.experiments.calibration_plan.resolve_numeric_bounds
+    rule: >
+      optimizer 使用的數值界線只能由**一條路徑**產生：先讀已凍結 lock 的
+      `parameter_ranges`；原生為數字者直接使用，為字串者必須有本檔宣告的
+      numeric interpretation，且 `float(凍結字面值)` 必須**恰好等於**宣告值。
+      宣告與字面值不符即拒絕 —— 那等於在不改 lock 的情況下放寬界線，
+      也就是第二套沒有被凍結的 bounds。
+    recorded_as: bounds_resolution_hash（凍進 AMD-003 與 CAL-PREREG-002）
+    maintenance_bound: >
+      不得在 resolver 之外另算一次 bounds。只要有兩條路徑算得出 bounds，
+      就會有兩套 bounds，而其中一套不在任何凍結物裡。
+
+# ---------------------------------------------------------------------------
+# 維度展開
+# ---------------------------------------------------------------------------
+# AMD-003：v0.1.0 只列參數名，於是 `_ALBEDO_BY_PRESET`（三類各一個純量）
+# 究竟佔 1 個還是 3 個搜尋維度沒有答案，而它直接決定族群大小與預算。
+# 未宣告展開的多值參數一律拒絕，不得隱含地佔一個維度。
+dimension_expansion:
+  _ALBEDO_BY_PRESET:
+    kind: class_specific_scalars
+    dimensions:
+      - _ALBEDO_BY_PRESET.water
+      - _ALBEDO_BY_PRESET.bubbly
+      - _ALBEDO_BY_PRESET.misty
+    shared_bounds: true
+    why: >
+      三類的單次散射反照率各自獨立（water 0.60 / bubbly 0.92 / misty 0.88），
+      共用同一組登記界線 [0.0, 1.0]，但**不是**同一個自由度。
+      把它算成一個維度會讓三類被迫共用同一個反照率，那是一條沒有人裁決過的
+      物理假設。
+
 # ===========================================================================
 # 4. Stage 0 —— 可辨識性探測（純模擬，不碰 calibration partition）
 # ===========================================================================
@@ -210,32 +284,81 @@ bounds:
 stage_0:
   name: identifiability probe
   reads_calibration_partition: false
+  calibration_first_access: false
+
+  # AMD-003：v0.1.0 的門檻以 s_f 為單位，而 s_f 是 **calibration split 的真實值**
+  # 池化 IQR。那讓一個宣稱 simulation-only 的階段在原理上必須先讀真實資料 ——
+  # 宣告與規格自相矛盾。改用模擬自身的雜訊底線，見 normaliser。
+  normaliser:
+    symbol: sigma_MC
+    definition: >
+      在**凍結的 initial 參數值**下，以 R 組獨立模擬種子各算一次，
+      取每一個 observable 的樣本標準差。純模擬，完全不需要真實資料。
+    replicates: 8
+    seed_set: [3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008]
+    why_not_s_f: >
+      s_f 由 calibration split 的真實值算出，用它當 stage 0 的分母會使
+      「要擬合哪些參數」這件事取決於真實資料，形成一個**資料相依的模型選擇**
+      步驟，且會把 first access 提前到沒有科學必要的時點。
+      sigma_MC 回答的才是 stage 0 真正要問的問題：**optimizer 看不看得見
+      這個參數**。在 CRN 下階段內目標函數是決定性的，因此效應小於 sigma_MC
+      的參數，其擬合值只是所選種子的產物 —— 那正是 verification seeds 會在
+      燒掉一整個階段預算之後才判為 SEED_OVERFIT 的情況。stage 0 提前擋掉它。
+
   method: >
-    對每一個候選 fit 參數，在其登記邊界內取低/中/高三點（其餘參數維持
-    initial 值），量它在**每一個 observable** 上造成的相對變化。
-    使用與 calibration 相同的 CRN 種子，因此變化不含取樣雜訊。
+    對每一個候選 fit 參數，把它設到登記邊界的下界與上界各算一次
+    （其餘參數維持 initial 值），量它在**每一個 observable** 上造成的變化。
+    另以 R 組種子在 initial 值上量 sigma_MC。全程只用模擬。
+
   admission_threshold:
     rule: |
-      leverage(p, o) = |Δo| / (o 在 calibration split 上的 s_f)
-      max_o leverage(p, o) >= 0.5  -> ADMITTED（可進入其所屬階段擬合）
-      max_o leverage(p, o) <  0.5  -> GAUGE_FIXED（固定於 initial 值，不擬合）
-    threshold_value: 0.5
+      leverage_sim(p, o) = |o(p=hi) - o(p=lo)| / sigma_MC(o)
+      max_o leverage_sim(p, o) >= K  -> ADMITTED（可進入其所屬階段擬合）
+      max_o leverage_sim(p, o) <  K  -> GAUGE_FIXED（固定於 initial 值，不擬合）
+      落在 [K/2, 2K] 者 -> BORDERLINE，**不得自動歸類**
+    threshold_value: 10.0
+    borderline_band: [5.0, 20.0]
+    borderline_outcome: STAGE0_ADJUDICATION_REQUIRED
     threshold_rationale: >
-      門檻以 s_f 為單位：leverage < 0.5 代表把該參數掃過**整個**登記範圍，
-      造成的 observable 變化還不到真實資料四分位距的一半。這種參數的
-      最佳值由雜訊決定，不是由資料決定。0.5 是事前選定，且結論應對它不敏感
-      —— 若某參數落在 0.4–0.6 之間，必須在 artifact 中特別標記為 BORDERLINE
-      並在 NOTE 中說明，不得逕自歸類。
+      門檻以模擬自身的種子間標準差為單位。K = 10 表示「把參數掃過整個登記
+      範圍」造成的變化是雜訊底線的十倍；以 R = 8 個重複計，那相當於
+      10*sqrt(8) ≈ 28 個平均值標準誤，不存在模稜兩可。K 事前選定且未經調校。
+
+      落在 [5, 20] 者標為 BORDERLINE 並**停止流程**等待裁決，而不是四捨五入
+      到某一邊 —— 這與 estimator 那一輪的 TIE_BREAK_REQUIRED 是同一條規則：
+      分不出來就是分不出來，不得為了讓流程往前走而擇一。
+
   collinearity_check:
     rule: >
-      對每一階段內的參數兩兩計算 observable 響應向量的餘弦相似度。
+      對每一階段內的參數兩兩計算響應向量的餘弦相似度。響應向量的每一個
+      分量先除以該 observable 的 sigma_MC，因此向量是無單位的 ——
+      未正規化的餘弦會隨 observable 的單位改變而改變，那個數字沒有意義。
       |cos| >= 0.98 視為該階段內的簡併對，必須在開始擬合前依 CG-1/CG-2 的
       同一套理由（provenance 決定固定哪一個，不是「哪個好 fit」）擇一固定，
       並把裁決寫成新的 confounded group 記錄。
     threshold_value: 0.98
+    normalised_by: sigma_MC
+
   outcome_is_binding: >
     stage 0 的結論**改變後續階段的參數集合**，因此它必須在讀取 calibration
     partition 之前執行完畢並凍結其 artifact。不得在看過擬合結果後重跑 stage 0。
+
+# ---------------------------------------------------------------------------
+# s_f 相對槓桿：保留為**不具決定權**的診斷
+# ---------------------------------------------------------------------------
+# v0.1.0 想用 s_f 問的那個問題（這個參數對目標函數重不重要）本身是合理的，
+# 只是它不能當 stage 0 的入場券。改列為 stage 1 開始時計算並記錄的診斷。
+s_f_relative_leverage_diagnostic:
+  computed_at: stage 1 start（s_f 已由 calibration first access 合法算出之後）
+  gating: false
+  rule: >
+    對每一個 **已由 stage 0 admitted** 的參數，記錄
+    leverage_sf(p, o) = |o(p=hi) - o(p=lo)| / s_f(o)。
+  forbidden_use: >
+    **不得**以本診斷改變任何階段的參數集合。參數集合在 stage 0 就已定案，
+    而 stage 0 沒有看過真實資料。事後依真實資料剔除參數，就是資料相依的
+    模型選擇，且它會發生在已經看過資料之後 —— 那正是預註冊要防的事。
+  permitted_use: 寫進 artifact，供論文說明各參數對目標函數的相對重要性
 
 # ===========================================================================
 # 5. 分階段參數群組
@@ -319,11 +442,28 @@ stagewise:
       - "**Empty 類**的 signal_rate_mcps 分佈形狀（已由 stage 2 固定位置）"
       - Empty 的 sigma_like 分佈（作為波形寬度的間接觀測）
     identifiability: >
-      **關鍵結構事實：Empty 沒有介質。** `build_scene_dict()` 只在
-      `medium_preset != "empty"` 時建立內部介質，因此 Empty 的全部
-      observable 只是幾何 / 表面 / 箔片參數的函數，**與 stage 4 的三個密度
-      與三個 albedo 完全無關**。本階段因此只用 Empty 一類擬合 ——
-      這不是為了省事，而是唯一能讓幾何與介質不互相污染的切法。
+      **關鍵結構事實：Empty 沒有參與介質，但它有完整的殼＋空氣＋殼幾何。**
+
+      AMD-003 更正 v0.1.0 的措辭。原文「只在 `medium_preset != "empty"` 時
+      建立內部介質」與 NOTE-029 當初描述**缺陷**時的句子幾乎相同，容易被讀成
+      「Empty 不建內圓柱」—— 那正是已經修掉的實心玻璃柱錯誤。逐行核對後的
+      事實是：
+
+      * `build_scene_dict()` 的 `scene["bottle_interior"]` **無條件建立**，
+        四類皆然（mitsuba_adapter.py，NOTE-029 的註解就寫在該段上方）。
+      * 只有 `interior["interior"] = medium` 這一行是條件式的，由
+        `_medium_dict()` 決定；`_DENSITY_KEY_BY_PRESET` 沒有 "empty" 這個鍵，
+        因此 Empty 取不到密度、回傳 None、不掛參與介質。
+      * `_INTERIOR_BASE_IOR["empty"] = "air"`，內圓柱是
+        `int_ior=air / ext_ior=bk7`。
+      * 實測建構結果：四類的 `bottle_interior` 皆存在，
+        r_in = 26.5 mm、r_out = 28.5 mm（壁厚 2.0 mm），
+        Empty 的 `int_ior=air` 且 `has_participating_medium=False`。
+
+      因此 Empty 的全部 observable 是幾何 / 表面 / 箔片參數的函數，
+      **與 stage 4 的三個密度與三個 albedo 完全無關**。本階段只用 Empty
+      一類擬合 —— 這不是為了省事，而是唯一能讓幾何與介質不互相污染的切法。
+      這條由 `tests/simulation/test_empty_topology.py` 逐次確認，不靠記憶。
 
       各參數的獨立簽名：
       * `_FOIL_GAP_TO_BOTTLE_RATIO` 移動箔片**位置** -> 移動遠側回波的
@@ -469,13 +609,13 @@ optimizer:
     verification_tolerance: 0.10
     used_once_per_stage: true
 
-  # 一維且恰好可辨識的增益不做隨機搜尋：那只會用 200 次評估去找一個
-  # 一維凸問題的最小值，並讓「用了哪個 optimizer」變成沒有意義的細節。
-  scalar_stages:
-    applies_to: [ambient_energy_to_mcps, signal_energy_to_mcps, sigma_width_to_mm]
-    method: scipy.optimize.minimize_scalar
-    options: {method: bounded, xatol: 1.0e-4}
-    max_evaluations: 60
+  # AMD-003：v0.1.0 的 `scalar_stages.applies_to` 列的是**參數**而不是階段，
+  # 於是「stage 1 有兩個參數，要不要逐一純量搜尋」沒有答案。現在只有一條路：
+  # 每個階段一律以 differential_evolution 在該階段的全部維度上求解。
+  # 目前沒有任何階段只有一個維度；即使有，DE 一樣適用（P = 16）。
+  method_rule: >
+    每個階段一律使用 scipy.optimize.differential_evolution，在該階段展開後的
+    全部維度上同時求解。不存在逐參數的純量搜尋路徑。
 
   multivariate_stages:
     method: scipy.optimize.differential_evolution
@@ -489,18 +629,78 @@ optimizer:
       polish: false          # polish 用 L-BFGS-B，對雜訊目標取數值梯度沒有意義
       updating: deferred     # 與 workers 平行化相容且結果與序列一致
     seed: 20260829
+    maxiter: 100
     initialization: >
       Sobol 序列覆蓋整個邊界盒，另**強制**把 initial_simulation.lock 的
       initial 值放進初始族群第 0 個個體 —— 這保證優化結果不會比凍結的起點更差,
       且讓「資料沒有要求任何改變」是一個可達成的結局。
-    max_evaluations_per_stage: 3000
-    maxiter: 200
+    parallelism: >
+      允許以 workers 平行化。`updating: deferred` 下平行與序列產生**相同**的
+      評估序列與相同的結果，因此平行化只影響時間，不影響科學。
+      若某次平行執行的 nfev 或最終參數與序列不同，該次執行作廢並必須查明原因。
 
   seeds:
     optimizer_seed: 20260829
     seed_derivation: >
       重啟第 k 次使用 optimizer_seed + 1000*k，k 由 0 起算。
       種子由公式決定而非逐次挑選，因此「換個種子直到結果好看」留得下痕跡。
+
+# -------------------------------------------------------------------
+# 評估預算 —— 由公式決定，不是由人估
+# -------------------------------------------------------------------
+# AMD-003：v0.1.0 同時寫了 `max_evaluations_per_stage: 3000` 與 `maxiter: 200`，
+# 兩者**在任何階段都不可能同時成立**。實測 scipy 1.15.3：
+#   N=2 -> nfev 4192 / N=3 -> 11584 / N=4 -> 12864 / N=7 -> 25728
+# 其中 N=7 已是宣稱預算的 8.6 倍，再乘 3 次重啟則是 25.7 倍。
+# 根因是把 `popsize` 當成族群大小，但它是**乘數**，而 init='sobol' 還會把
+# 族群補到 2 的冪。預算因此改為由公式導出，並由程式強制。
+evaluation_budget:
+  population_rule: |
+    P(N) = 2 ** ceil(log2(popsize * N))        # scipy init='sobol' 的實際規則
+    來源：scipy/optimize/_differentialevolution.py
+          n_s = int(2 ** np.ceil(np.log2(self.num_population_members)))
+  per_restart_rule: |
+    budget_per_restart(N) = P(N) * (maxiter + 1)
+    scipy 先評估整個初始族群，之後每一代至多再評估一個族群量。
+  per_stage_rule: |
+    budget_per_stage(N) = restarts * budget_per_restart(N)
+
+  # 以 popsize=15、maxiter=100、restarts=3 展開。這張表是**規範性**的：
+  # 執行器算出來的值必須與它逐項相符，否則預註冊與程式已經分家。
+  resolved:
+    AMBIENT:             {dimensions: 2, population: 32,  per_restart: 3232,  per_stage: 9696}
+    SIGNAL_SCALE:        {dimensions: 2, population: 32,  per_restart: 3232,  per_stage: 9696}
+    GEOMETRY_SURFACE_FOIL: {dimensions: 7, population: 128, per_restart: 12928, per_stage: 38784}
+    PARTICIPATING_MEDIA: {dimensions: 6, population: 128, per_restart: 12928, per_stage: 38784}
+    SENSOR_SURROGATE:    {dimensions: 3, population: 64,  per_restart: 6464,  per_stage: 19392}
+  total_evaluations: 116352
+
+  counting:
+    unit: 一次目標函數呼叫（= 一次四類 x 兩 pass 的模擬與一次 J 計算）
+    counted_by: 執行器自己計數，**不採信** scipy 回報的 nfev
+    counted_even_when: [NON_FINITE, CRASHED]
+    rationale: >
+      預算的意義是「這個階段最多能消耗多少模擬」。失敗的評估一樣花了時間、
+      一樣可能被用來探索地形，不計入的話預算就不是上限。
+      不採信 nfev 是因為那是函式庫事後回報的數字，而守衛必須在**超出的當下**
+      就中止，不是跑完才發現。
+
+  exhaustion:
+    outcome: NOT_CONVERGED
+    behaviour: >
+      守衛在第 (budget + 1) 次評估被要求時立即拋出並中止該階段。
+      記錄 best-so-far 但階段標記 NOT_CONVERGED，且 calibrated_simulation
+      不得凍結。
+    forbidden:
+      - 取 best-so-far 並宣稱收斂
+      - 提高 maxiter / popsize / restarts 後重跑並只保留後者
+      - 縮小邊界讓搜尋變容易
+
+  cost_disclosure: >
+    以每次評估約 2 秒估算（64x64、spp=16、128 bins、四類各兩 pass），
+    全部五階段 116,352 次評估約需 65 小時單執行緒。這個數字寫在這裡是為了
+    讓「預算不夠用」在開始之前就被看見。若實際不可行，正確處置是開 amendment
+    調整 maxiter/popsize 並重新導出本表，**不是**在執行中途悄悄改參數。
 
 convergence:
   criterion: >

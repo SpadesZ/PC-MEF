@@ -970,6 +970,76 @@ def cmd_freeze_initial_simulation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_amendment_freeze(args: argparse.Namespace) -> int:
+    """依 spec 凍結一份協定修訂（NOTE-028 的機制）。
+
+    AMD-001/002 當初以臨時腳本凍結，腳本沒有留下；本指令讓修訂的產生方式
+    與其記錄一樣可重跑。
+    """
+    import yaml
+
+    from pcmef.core.amendments import AmendmentError, AmendmentStore, ProtocolAmendment
+
+    spec = yaml.safe_load(Path(args.spec).read_text(encoding="utf-8"))
+    amendment = ProtocolAmendment(
+        amendment_id=spec["amendment_id"],
+        title=spec["title"],
+        supersedes=spec["supersedes"],
+        rationale=spec["rationale"],
+        changed_contracts=spec["changed_contracts"],
+        precondition_evidence=spec["precondition_evidence"],
+        invariants_preserved=spec["invariants_preserved"],
+        authority=spec["authority"],
+    )
+    store = AmendmentStore(args.freeze_dir)
+    try:
+        path = store.freeze(amendment)
+    except AmendmentError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    print(f"{amendment.amendment_id} frozen")
+    print(f"  path         : {path.resolve()}")
+    print(f"  payload hash : {document['payload_hash']}")
+    print(f"  supersedes   : {_squash(amendment.supersedes)}")
+    print(f"  contracts    : {len(amendment.changed_contracts)} changed")
+    evidence = amendment.precondition_evidence
+    print(f"  heldout access     : {evidence.get('heldout_access_count')}")
+    print(f"  calibration access : {evidence.get('calibration_access_count')}")
+    return 0
+
+
+def cmd_amendment_status(args: argparse.Namespace) -> int:
+    """列出已凍結的協定修訂並重驗其雜湊。"""
+    from pcmef.core.amendments import AmendmentError, AmendmentStore
+
+    store = AmendmentStore(args.freeze_dir)
+    ids = store.list_ids()
+    if not ids:
+        print("no amendments frozen")
+        return 0
+    failures = 0
+    for amendment_id in ids:
+        try:
+            payload = store.load(amendment_id)
+        except AmendmentError as exc:
+            failures += 1
+            print(f"{amendment_id}  FAIL  {exc}")
+            continue
+        document = json.loads(
+            store.path_for(amendment_id).read_text(encoding="utf-8")
+        )
+        print(f"{amendment_id}  {document['payload_hash']}")
+        print(f"  {_squash(payload['title'])}")
+        evidence = payload.get("precondition_evidence", {})
+        print(
+            f"  heldout access {evidence.get('heldout_access_count')}  "
+            f"calibration access {evidence.get('calibration_access_count', 'n/a')}"
+        )
+    return 2 if failures else 0
+
+
 def cmd_erratum_freeze(args: argparse.Namespace) -> int:
     """凍結一份 metadata 勘誤（NOTE-040）。
 
@@ -2096,6 +2166,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="容許工作區有未提交變更（lock 將標記 code_dirty_at_freeze）",
     )
     freeze_initial.set_defaults(func=cmd_freeze_initial_simulation)
+
+    amendment_parser = subparsers.add_parser(
+        "amendment", help="協定修訂記錄（append-only）"
+    )
+    amendment_sub = amendment_parser.add_subparsers(
+        dest="amendment_command", required=True
+    )
+    amendment_freeze = amendment_sub.add_parser(
+        "freeze", help="依 spec 凍結一份修訂；已存在即拒絕"
+    )
+    amendment_freeze.add_argument("--spec", required=True)
+    amendment_freeze.add_argument("--freeze-dir", default="freeze")
+    amendment_freeze.set_defaults(func=cmd_amendment_freeze)
+
+    amendment_status = amendment_sub.add_parser(
+        "status", help="列出已凍結的修訂並重驗雜湊"
+    )
+    amendment_status.add_argument("--freeze-dir", default="freeze")
+    amendment_status.set_defaults(func=cmd_amendment_status)
 
     erratum_parser = subparsers.add_parser(
         "erratum", help="已凍結 lock 的 metadata 勘誤（append-only）"
