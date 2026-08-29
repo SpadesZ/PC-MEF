@@ -3,7 +3,7 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-08-28
+最後更新：2026-08-29
 
 ---
 
@@ -70,6 +70,9 @@ py -3.10 -m pcmef.cli provenance resolve-sigma `
     --paired-source data/raw_real/edge_impulse_export --export-decimals 4
 py -3.10 -m pcmef.cli audit e1-gates                 # Batch 7：十二個 gate
 py -3.10 -m pcmef.cli audit heldout-firewall         # Appendix B 洩漏防線
+py -3.10 -m pcmef.cli erratum status                 # 勘誤層：重驗 lock/erratum/evidence
+py -3.10 -m pcmef.cli locks resolve --lock initial_simulation   # formal 讀取入口
+py -3.10 -m pcmef.cli calibration preregister --validate        # CP-01..CP-12
 py -3.10 -m pcmef.cli audit real-split-policy        # Appendix H1 政策契約
 py -3.10 -m pytest tests/unit/test_amendments.py     # 協定修訂記錄（AMD-001）
 py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inventory
@@ -114,13 +117,16 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~E1/E2 bootstrap 四值~~ | — | **已核定** 10000 / 20260826 / 20260827（NOTE-015） |
 | ~~Sigma register 未定阻擋 E1-G08~~ | — | **已由 AMD-001 拆解**：channel/scale 為 CONFIRMED，位址獨立為 CONFLICT 且不再擋 gate（NOTE-028） |
 | 10 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
-| **27 個參數未解決** | 全部 formal run | `params audit`（exit 2）有完整清單。**防線已上線**（NOTE-030），不再需要人工數 |
+| **26 個參數未解決** | 全部 formal run | `params audit`（exit 2）有完整清單。**防線已上線**（NOTE-030），不再需要人工數。**校準協定已預註冊凍結**（NOTE-041），可以開始跑 |
 | ~~CG-3 / Ambient 觀測量定義錯誤~~ | — | **已解除**：Ambient 改為獨立 ambient pass（NOTE-034） |
-| **M2 場景保真度** | `initial_simulation.lock`，其下游 19 個 lock | **關鍵路徑。** 見下方「M2 場景保真度」一節 |
+| ~~M2 場景保真度~~ | — | **已解除**：`initial_simulation.lock` 已凍結（NOTE-039） |
+| ~~lock 的 environment 記錯~~ | — | **已解除**：ERR-001 勘誤層（NOTE-040） |
+| ~~沒有校準目標規格~~ | — | **已解除**：CAL-PREREG-001 已凍結（NOTE-041） |
 
-**唯一的關鍵路徑是 M2。** `locks status` 的鏈頭是 `initial_simulation`（pending），
-22 個 lock 只凍了 1 個、19 個 BLOCKED。繞過 M2 去做 M4/M5 只會得到一堆
-跑得動但一個 lock 都凍不了的模組，與「lock 不可跳步」的紅線方向相反。
+**目前的關鍵路徑是 Phase E calibration 的執行。** `locks status` 顯示
+22 個 lock 已凍 2 個（`real_split_policy` / `initial_simulation`）、
+`calibrated_simulation` 與 `metric_config` 為 pending、其餘 18 個 BLOCKED。
+下一棒可以直接開始跑 stage 0 —— 協定已凍，範圍已定，不需要再做裁決。
 
 ### 動手前必讀
 
@@ -799,43 +805,158 @@ parameter_ranges   26 項
 （NOTE-039）。lock 內含 claim boundary：**這是 pre-calibration 模型，
 不宣稱接近真實分佈**。
 
-### 已知缺陷：lock 的 environment 欄位記錯
+### 已知缺陷 → **已裁決並更正（ERR-001，2026-08-29）**
 
 首版 freeze 在 freeze 行程內重新探測相依版本，而該行程沒有 `set_variant`，
-mitransient 因此被記成 `"unavailable"` —— 但被凍結的 run 實際用的是 **1.3.0**
-（manifest 與每個 scenario 都記著 1.3.0）。程式已改為讀取被凍結那次 run 的
-`manifest["dependencies"]`，但 **lock 不可覆寫，既有那份無法就地更正**。
-
-**處置尚待裁決**（見 NOTE-039）：刪除重凍會拿到正確環境但違反
-「lock 不可覆寫」紅線；保留並登記勘誤則遵守紅線但留下不足以重建環境的 lock。
-**在裁決之前不得逕自刪除。**
+mitransient 因此被記成 `"unavailable"` —— 但被凍結的 run 實際用的是 **1.3.0**。
+NOTE-039 留下的兩條路已裁決：**保留 lock 並登記勘誤**，見下一節。
 
 ---
 
-## Phase E/F/G —— **未進行**
+## ERR-001 —— 勘誤層（2026-08-29，NOTE-040）
 
-E1 狀態：**NOT_READY**。以下為真正的 blocker，未繞過任何一項。
+**`freeze/initial_simulation.lock.json` 不刪除、不重凍，一個位元都沒動。**
+磁碟上那一份仍記著 `"unavailable"`，`payload_hash` 仍是 `dc15c954…`。
+
+```
+erratum        ERR-001   363b06c1de6ec9613178074689dc23d2da443ac9657b62740023b141cbed4c15
+target lock    initial_simulation  dc15c9543a3aecac…
+field          environment.mitransient
+recorded       "unavailable"   ->   corrected "1.3.0"
+evidence       4 sources, all re-hashed and bound to the frozen run
+scientific_state_changed  false
+```
+
+`scientific_state_changed=false` 是可檢查的而非宣稱的：`environment` 不進
+`scene_hash`、不進 `parameter_set_hash`、不進 `surrogate_hash`，也不參與
+IS-01..06 或 RP-01..04 的任何一項。更正前後 RP-03 仍是 12/12 bitwise 相同。
+
+**證據綁回「被凍結的那一次 run」，不只是「某一次 run」。** 每一條證據帶
+`binds` 斷言：manifest 的 `content_hash` 必須等於 lock 的 `scene_hash`、
+`run_identity_hash` 必須相同、scenario 層級另有兩條 `scenario_hash` 綁定。
+少了 binds，任何一份用 1.3.0 跑出來的 manifest 都能當證據。
+
+**formal 讀取一律走 `locks resolve` / `load_formal_lock()`**，每次載入重驗
+original lock + erratum + source evidence 三者。lock 身分永遠是原始
+`payload_hash`；勘誤**不產生**新的 lock hash。
+
+```powershell
+py -3.10 -m pcmef.cli erratum status
+py -3.10 -m pcmef.cli locks resolve --lock initial_simulation `
+    --field environment.mitransient
+  payload_hash : dc15c9543a3aecac…   (original, unchanged)
+  original  environment.mitransient = 'unavailable'
+  resolved  environment.mitransient = '1.3.0'
+```
+
+**可更正範圍是成對鎖。** 白名單目前只有 `environment.*`；禁區另涵蓋
+parameter / estimator / seed / scene / config，且**禁區檢查先跑、完全不看
+白名單** —— 放寬白名單是一行改動，那一行不該足以讓改參數偽裝成修筆誤。
+`tests/unit/test_errata.py` **31 條**，含八種禁區路徑的 parametrized 拒絕。
+
+---
+
+## Phase E —— 校準**預註冊已凍結**，校準本身未開始（2026-08-29，NOTE-041）
 
 | 階段 | 狀態 | 真正的 blocker |
 |---|---|---|
-| E calibration | 未開始 | **校準目標與 optimizer 未預註冊**（見下） |
+| E0 校準預註冊 | **已凍結** | — |
+| E calibration | **未開始**（可以開始） | — |
 | F 校準後重現 | 未開始 | 依賴 E |
 | G metric/E1 前置 lock | 未開始 | `metric_config` / `e1_scientific_rule` 未凍；依賴 E |
 
-**Phase E 的結構性 blocker：沒有校準目標規格。**
-全 repo（`configs/`、`docs/NOTES.md`、`pcmef/`）查不到任何 calibration
-objective / optimizer 的規格，也沒有 `pcmef/experiments/calibration.py`。
-依本專案對 estimator 已經確立的做法（NOTE-035：先預註冊、後比較），
-校準目標、optimizer、收斂準則與失敗處置**必須先預註冊再跑**，
-否則 26 個參數的擬合結果無法與事後合理化區分。
+```
+CAL-PREREG-001   a17dd93982e496b7a5faa538aa0c99b72a5067ac61e901e3a299258576b3254a
+protocol_hash    77365cc30413d4eaa940fcc224ac9b344d92f8ace6780b0d2f369a592e0900bf
+code_version     a9fe7212927e5b6d53b71adb9b876227c1f0bc4b   （工作區乾淨）
+calibration_set  4bda77f6412afbaa…      parameter_set   3bd65b50264413e6…
+initial lock     dc15c9543a3aecac…      ERR-001         363b06c1de6ec961…
+optimizer seed   20260829               heldout access  0
+CP-01..CP-12     全 PASS
+```
 
-在該預註冊存在之前開始 calibration，會重蹈 estimator 那一輪的錯誤，
-而且代價更大 —— calibration 會消耗 frozen real split 的 calibration partition。
+### 目標函數
 
-**已就緒、不構成 blocker 的部分**：`calibrated_simulation` 的前置
-（`real_split_policy` + `initial_simulation`）皆已凍結，鏈條結構上已打通；
-26 個可校準參數的 allowed range 已全部登記並寫進 lock；
-CG-1/2/3 的 gauge ruling 已裁決，fixed member 清單明確。
+`J = Σ_{c,f} w[c,f] · NW(real[c,f], sim[c,f])`，逐 class × feature 共 16 項。
+`NW = W1 / s_f`，`s_f` 為 **calibration split 真實值**的 pooled IQR，
+**只算一次並凍結**（逐階段重算會讓 optimizer 靠放大模擬離散度稀釋誤差）。
+權重事前固定為 **UNIFORM = 1.0**。
+
+**四類 real class mean 不得出現在 `pcmef/` 或預註冊檔內**，CP-04 逐行掃描。
+每階段只最佳化自己那一組項，但 16 項全部記錄 —— 否則「修好 signal、
+悄悄弄壞 distance」不會有人看見（回歸容忍值 0.10）。
+
+### 五個階段與其解耦依據
+
+| 階段 | 參數 | 解耦依據 | 性質 |
+|---|---|---|---|
+| 1 Ambient | 2 | ambient pass 的 VCSEL 是關的；實測 irradiance 1.0→4.0 時 ambient 3.603355→3.603355 | **精確** |
+| 2 Signal scale | 2 | 增益作用在 estimator **之後**；S2 實測距離變化 0.0 | **精確** |
+| 3 幾何/表面/箔片 | 7 | **Empty 沒有介質** —— `build_scene_dict()` 只在 `medium_preset != "empty"` 時建介質，故只用 Empty 擬合 | **程式碼可驗證** |
+| 4 參與介質 | 4 | 幾何已由 Empty 釘死；三類各有自己的密度與 albedo，無交叉項 | 結構性 |
+| 5 sigma 映射 | 3 | 波形已固定，只擬合由波形算 sigma 的映射 | 結構性 |
+
+**stage 0 可辨識性探測**（純模擬，不碰真實資料）先於全部擬合：
+leverage 以 s_f 為單位，掃過整個登記範圍造成的 observable 變化 < 0.5 者
+**gauge-fix 而非擬合**。這是 NOTE-032 的教訓 —— `_ROOM_LIGHT_RATIO` 比例
+拉 25 倍、總能量只變 0.058%，那是「可以 fit、但 fit 出來由雜訊決定」。
+
+**18 項進入擬合，8 項宣告不擬合**：`spp` / `resolution` / `temporal_bins` /
+`max_depth` / `bounce_budget` / `_LEADING_MARGIN_BINS` 是**數值與離散化設定**
+不是物理量（spp 調高只是變異變小，不是更像真實感測器）；
+`foil_orientation` 只有一個朝向有實作；`distance_offset_mm` 是 CG-4 的 gauge。
+
+### 順帶裁決的新簡併：CG-4_absolute_distance
+
+`_FOIL_GAP_TO_BOTTLE_RATIO` 與 `distance_offset_mm` 都讓四類的 distance
+**一起平移**，在 distance 位置上精確簡併 —— registry 的 CG-1/2/3 都沒涵蓋它。
+依 CG-1/CG-2 同一套理由（固定沒有物理內容的那一個）裁決：
+**固定 `distance_offset_mm = 0.0`，擬合 `_FOIL_GAP_TO_BOTTLE_RATIO`**。
+一個非零的 distance offset 等於宣稱「光程算對了但讀數要平移」。
+
+另記下一組**近似**簡併：`signal_energy_to_mcps` 與三個箔片振幅參數在
+signal 位準上難以區分，唯一區分來自 distance 通道（post-hoc 增益不移動
+distance，物理振幅則經 LEADING_EDGE 的 range walk 移動它）。這個區分**很弱**，
+因此三者能否進入擬合交由 stage 0 的門檻決定，不是假設。
+
+### optimizer
+
+scalar 階段 `minimize_scalar(bounded)`；多變數階段
+`differential_evolution`（`seed=20260829`、`init=sobol`、**`polish=false`**，
+polish 走 L-BFGS-B、對雜訊目標取數值梯度沒有意義）。初始族群第 0 個個體
+**強制**為 lock 的 initial 值，因此「資料沒有要求任何改變」是可達成的結局。
+
+同階段內全部評估共用同一組模擬種子（CRN，1001/1002/1042/1004），
+收斂後另以一組**驗證種子**（2001/2002/2042/2004）重算一次，
+檢出種子專屬過擬合。重啟固定三次、種子由 `seed + 1000k` 決定。
+平手（相對差 < 1e-3）取**在正規化邊界空間中離 initial 值最近**的那一組 ——
+資料分不出來的時候就不要動。
+
+**NOT_CONVERGED 是合法結局**，此時記錄 best-so-far 但
+`calibrated_simulation` 不得凍結。不得放寬 tol、邊界或權重重跑。
+
+### 驗證器上線第一次跑抓到的四個缺口
+
+| 缺口 | 事實 |
+|---|---|
+| `distance_offset_mm` 被歸類兩次 | 同時在 stage 3 與 not_fitted，會被 fit 兩次 |
+| 守衛清單自己含有 real class mean | CP-04 掃到自己的定義，若不處理會被整份停用 |
+| artifact 欄位名混入中文說明 | 欄位清單同時是比對對象，混入說明後比對失去意義 |
+| `_as_floats()` 用 `float(v)` 救字串 | `float("1.0e6")` 會成功，於是 lock 內三個**字串**上界被安靜接受，`declared_numeric_interpretations` 形同虛設 |
+
+最後一項是 lock 內的既有事實：`ambient_energy_to_mcps` /
+`signal_energy_to_mcps` / `sigma_width_to_mm` 的上界在
+`parameter_registry.yaml` 寫成 `1.0e6`，而 YAML 1.1 需要 `1.0e+6` 才解析為
+float。**該值已凍進 lock，且 `parameter_ranges` 在勘誤的禁區內**（改它就是
+改實驗本身），因此只能由預註冊逐項宣告數值解讀，並要求解讀與凍結字面值
+表示同一個十進位數。
+
+### 本次**沒有**做的事
+
+- 未執行 stage 0，未執行任何一階段的擬合
+- 未讀取 calibration partition 的任何數值（`raw_data_hash` 留待執行當下計算）
+- 未開啟 held-out（access count 仍為 0）
+- 未凍結 `calibrated_simulation` / `metric_config` / `e1_scientific_rule`
 
 ---
 
