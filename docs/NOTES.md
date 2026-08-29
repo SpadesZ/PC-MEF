@@ -324,6 +324,196 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-041 校準先預註冊：26 個參數拆成五個各自可辨識的階段
+
+**決策日期**：2026-08-29
+
+**適用範圍**：`configs/calibration_preregistration.yaml`（新增）；
+`pcmef/experiments/calibration_prereg.py`（新增）；
+`pcmef/cli.py` 的 `calibration preregister`；
+`freeze/preregistrations/CAL-PREREG-001.prereg.json`。
+
+**決策**：
+
+1. 在**讀取 calibration partition 之前**凍結校準的全部規格：目標函數、
+   正規化、分階段參數分組、optimizer、種子、邊界、收斂、重啟、平手、
+   失敗處置與 artifact 記錄。
+2. 目標函數為 **calibration split 上的 distribution-level 差異**：
+   `J = Σ_{c,f} w[c,f] · NW(real[c,f], sim[c,f])`，
+   `NW = W1 / s_f`，`s_f` 為 calibration-only pooled IQR，**只算一次並凍結**。
+   權重事前固定為 **UNIFORM = 1.0**（16 項）。
+3. **26 個 calibration-only 參數不得一起 fit**，拆為五階段依序進行，
+   每階段結束後其參數即凍結：
+   Ambient → active Signal scale → geometry/surface/foil → 參與介質 →
+   sensor surrogate。另有 **stage 0 可辨識性探測**（純模擬，不碰真實資料）。
+4. 18 項進入擬合、**8 項宣告不擬合**（數值/離散化設定與 gauge 固定項）。
+5. optimizer 不得觸碰 `_SIGMA_T_REFERENCE_PER_M`、`lighting.irradiance`、
+   `_ROOM_LIGHT_RADIANCE`、`optical_path_to_distance`，以及 estimator
+   與其兩個可調參數。
+
+**原因**：
+
+**其一，分階段的依據是「結構性解耦」，不是「這樣比較好跑」。**
+每一階段的可辨識性都建立在一個**已量測或由程式碼可驗證**的事實上：
+
+| 階段 | 解耦的依據 | 性質 |
+|---|---|---|
+| 1 Ambient | ambient pass 的 VCSEL 是關的；實測 irradiance 1.0→4.0 時 ambient 3.603355→3.603355 | **精確**（NOTE-034 A2） |
+| 2 Signal scale | 增益作用在 estimator **之後**；S2 實測距離變化 0.0 | **精確**（NOTE-035） |
+| 3 幾何/箔片 | **Empty 沒有介質** —— `build_scene_dict()` 只在 `medium_preset != "empty"` 時建介質，故 Empty 的 observable 與三個密度無關 | **程式碼可驗證** |
+| 4 參與介質 | 幾何已由 Empty 單獨釘死；三類各有自己的密度與 albedo，無交叉項 | 結構性 |
+| 5 sigma 映射 | 波形已固定，本階段只擬合由波形算 sigma 的映射，不回頭改前三個通道 | 結構性 |
+
+其中第 3 條是關鍵：**只用 Empty 擬合幾何**不是為了省事，而是唯一能讓
+幾何與介質不互相污染的切法。
+
+**其二，做這份分析時發現一組先前未登記的簡併，因此當場裁決。**
+`_FOIL_GAP_TO_BOTTLE_RATIO` 與 `distance_offset_mm` 都讓四類的 distance
+**一起平移**，在 distance 位置這個統計量上精確簡併 —— registry 的
+CG-1/2/3 都沒有涵蓋它。登記為 **CG-4_absolute_distance**，並依 CG-1/CG-2
+同一套理由（固定沒有物理內容的那一個）裁決：
+**固定 `distance_offset_mm = 0.0`，擬合 `_FOIL_GAP_TO_BOTTLE_RATIO`**。
+一個非零的 distance offset 等於宣稱「光程算對了但讀數要平移」，
+那不是物理，是把殘差藏起來。
+
+另記下一組**近似**簡併：`signal_energy_to_mcps` 與三個箔片振幅參數
+在 signal 位準上難以區分，唯一的區分來自 distance 通道 ——
+post-hoc 增益不移動 distance，物理振幅則經 LEADING_EDGE 的 range walk
+移動它（實測振幅 10→500 時距離變動 10.0%，NOTE-037）。這個區分**很弱**，
+因此三者能否進入擬合交由 stage 0 的 leverage 門檻決定，而不是假設。
+
+**其三，stage 0 的存在是 NOTE-032 的教訓。** `_ROOM_LIGHT_RATIO` 當初
+比例拉 25 倍、總能量只變 0.058% —— 一個「可以 fit、但 fit 出來由雜訊決定」
+的參數。與其事後解釋，不如事前量：leverage 以 s_f 為單位，掃過整個登記
+範圍造成的 observable 變化不到真實四分位距的一半（< 0.5）即 gauge-fix，
+不擬合。門檻事前選定，落在 0.4–0.6 者必須標記 BORDERLINE 而非逕自歸類。
+
+**其四，八個參數宣告不擬合，因為它們不是物理量。**
+`spp` / `resolution` / `temporal_bins` / `max_depth` / `bounce_budget` /
+`_LEADING_MARGIN_BINS` 是**數值與離散化設定**：把 spp 調高只是讓估計量的
+變異變小，那不是「更像真實感測器」。用資料去 fit 它們會讓目標函數的改善
+來自降噪而非來自物理。`foil_orientation` 只有一個朝向有實作，換朝向是
+scene-level 變更；`distance_offset_mm` 是 CG-4 的 gauge 固定項。
+
+**其五，NOT_CONVERGED 必須是合法結局，否則唯一的出路就是放寬門檻。**
+這與 NOTE-035「選不出來也是合法結局」是同一條規則。評估上限用盡而未收斂時
+記錄 best-so-far 但標記 NOT_CONVERGED，且 `calibrated_simulation` 不得凍結。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli calibration preregister --validate
+  CP-01..CP-12 全 PASS   26 項全部歸類：fit 18 / not_fitted 8
+  protocol_hash 77365cc30413d4ea…
+  preregistration freezable: YES
+py -3.10 -m pytest tests/unit/test_calibration_prereg.py -q     # 36 passed
+```
+
+驗證器上線第一次跑就抓到本檔自身的三個真實缺口：
+`distance_offset_mm` 同時被列在 stage 3 與 not_fitted（會被 fit 兩次）；
+守衛清單自己含有 real class mean 字面值；artifact 欄位名混入中文說明
+導致比對失去意義。三者都已修正 —— 這正是「規格要能被程式檢查」的意義。
+
+另修掉驗證器自身的一個缺陷：`_as_floats()` 原本以 `float(v)` 救字串，
+而 `float("1.0e6")` 會成功，於是 lock 內三個**字串**上界被安靜接受，
+`declared_numeric_interpretations` 形同虛設。改為只接受原生數值型別後，
+`test_cp03_fails_when_a_string_bound_has_no_declared_interpretation` 才真的會咬人。
+
+**維護邊界**：
+- 不得在讀過 calibration partition 之後修改預註冊；要改開 amendment 並新編號。
+- 不得把四類 real class mean 寫進 `pcmef/` 或本預註冊檔（CP-04 會掃）。
+- 不得讓 gauge 固定項或 estimator 參數進入搜尋空間（CP-02）。
+- 不得放寬邊界；邊界必須與 `initial_simulation.lock` 逐字相同（CP-03）。
+- 不得逐階段重算 `s_f`，也不得由模擬值計算 `s_f`。
+- 不得在預註冊凍結前開始校準；CP-12 檢查尚無 calibration artifact。
+- 本次**只做到預註冊凍結**：未執行 stage 0、未執行任何擬合、未開 held-out。
+
+相關：[NOTE-035]、[NOTE-036]、[NOTE-031]、[NOTE-032]、[NOTE-034]、
+[NOTE-037]、[NOTE-040]、[NOTE-024]、[NOTE-014]
+
+---
+
+## NOTE-040 已凍結 lock 的 metadata 缺陷以 append-only 勘誤更正，不刪除也不重凍
+
+**決策日期**：2026-08-29
+
+**適用範圍**：`pcmef/core/errata.py`（新增）；`pcmef/core/formal_loader.py`（新增）；
+`configs/errata/ERR-001.yaml`（新增）；`freeze/errata/ERR-001.erratum.json`；
+`pcmef/cli.py` 的 `erratum freeze` / `erratum status` / `locks resolve`。
+
+**決策**：
+
+1. NOTE-039 待裁決的兩條路取**保留並登記勘誤**。
+   `freeze/initial_simulation.lock.json` **不刪除、不重凍**，一個位元都不動。
+2. 新增 append-only 勘誤層。**ERR-001** 綁定原 lock 的
+   `payload_hash = dc15c954…`，記錄 `environment.mitransient`
+   recorded `"unavailable"` → corrected `"1.3.0"`，
+   並宣告 `scientific_state_changed = false`。
+3. formal 程式碼**不得**再直接呼叫 `LockStore.load()` 取用內容，
+   一律走 `load_formal_lock()`；它每次載入都重驗
+   **original lock + erratum + source evidence** 三者。
+4. 勘誤可更正的欄位採**白名單**（目前只有 `environment.*`），
+   並另設一層**禁區**涵蓋 parameter / estimator / seed / scene / config。
+   禁區檢查先跑且不看白名單。
+5. lock 的身分永遠是原始 `payload_hash`。勘誤**不產生**新的 lock hash。
+
+**原因**：
+
+**其一，刪除 lock 的代價不在這一份 lock，在先例。** 這份 lock 當時無任何下游
+引用，刪掉它幾乎沒有直接成本 —— 但「凍結過的東西可以在不方便的時候消失」
+一旦成立，後面每一個 lock 的可信度都要打折。而勘誤層的成本只是多一份記錄。
+
+**其二，這個欄位不影響任何已算出的數字，而這一點是可檢查的而非宣稱的。**
+`environment` 不進 `scene_hash`、不進 `parameter_set_hash`、不進
+`surrogate_hash`，也不參與 IS-01..06 或 RP-01..04 的任何一項判定。
+更正前後 RP-03 仍是 12/12 bitwise 相同、readiness 仍是六項全 PASS。
+它的用途是讓後人**重建環境**：記錯讓重建指示失效，改正不改變任何結果。
+
+**其三，「勘誤」與「不重跑就改科學」表面相同，必須在型別上分開。**
+兩者都是「改一個已凍結的值」。差別在於前者改的是**對執行環境的描述**，
+後者改的是**實驗本身**。因此禁區與白名單設計成成對鎖：
+放寬白名單是一行改動，那一行不該足以讓改參數偽裝成修筆誤，所以禁區檢查
+先跑、完全不看白名單，`test_forbidden_region_beats_the_allowlist` 盯著這一點。
+
+**其四，證據必須綁回「被凍結的那一次 run」，不只是「某一次 run」。**
+只比對 `dependencies.mitransient == "1.3.0"` 的話，任何一份用 1.3.0 跑出來的
+manifest 都能當證據。因此每一條證據另帶 `binds` 斷言：
+manifest 的 `content_hash` 必須等於 lock 的 `scene_hash`、
+`run_identity_hash` 必須等於 `scene_topology.run_identity_hash`。
+四條證據中另有兩條指向 scenario 層級的 `transient.mitransient_version`
+（與 `dependencies` 分開寫入，不是同一個探測結果的複本）。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli erratum freeze --spec configs/errata/ERR-001.yaml
+  payload hash  : 363b06c1de6ec961…   evidence: 4 source(s), all verified
+py -3.10 -m pcmef.cli locks resolve --lock initial_simulation \
+    --field environment.mitransient
+  payload_hash : dc15c9543a3aecac…   (original, unchanged)
+  original  environment.mitransient = 'unavailable'
+  resolved  environment.mitransient = '1.3.0'
+py -3.10 -m pytest tests/unit/test_errata.py -q        # 31 passed
+```
+
+三次實際破壞確認負向測試會咬人（改完即還原）：讓
+`FORBIDDEN_PATH_PREFIXES` 變空 → `test_forbidden_region_beats_the_allowlist`
+FAIL；略過證據檔雜湊比對 → `test_tampered_evidence_file_is_refused` FAIL；
+略過「原值必須符合 lock」→ `test_recorded_value_must_match_the_lock` FAIL。
+
+**維護邊界**：
+- 不得刪除或重凍任何 lock；更正一律走新的 erratum id。
+- 不得放寬 `FORBIDDEN_PATH_PREFIXES`。
+- 不得讓 `scientific_state_changed=true` 的記錄凍結成 erratum；
+  那該走 amendment 或開新 run。
+- 不得以更正後的 payload 重算並宣稱那是 lock 的 hash。
+- 不得在證據檔缺失或雜湊不符時退回「就用原始值」繼續跑；
+  fail-closed 是這一層唯一站得住腳的行為。
+
+相關：[NOTE-039]、[NOTE-038]、[NOTE-028]、[NOTE-036]
+
+---
+
 ## NOTE-039 initial_simulation.lock 的內容與「凍結當下重驗」規則
 
 **決策日期**：2026-08-28

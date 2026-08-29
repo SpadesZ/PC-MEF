@@ -1,0 +1,634 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 pcmef.experiments.calibration_prereg 讀取與驗證；其 protocol_hash
+#         連同 code commit / split hash / registry hash / initial lock hash /
+#         ERR-001 hash 一併凍進 freeze/preregistrations/CAL-PREREG-001.prereg.json；
+#         calibration 執行器日後只能照本檔跑，不得自行加減參數或判準。
+# 檔案路徑: configs/calibration_preregistration.yaml
+# 產生時間: 2026-08-29 12:20 +08:00
+# 版本: v0.1.0
+# 功能說明: 在**讀取 calibration partition 之前**寫死校準的全部規格 ——
+#           目標函數、正規化、分階段參數分組與各階段的可辨識性論證、
+#           固定/gauge/derived 成員、optimizer 與種子、邊界、收斂與評估上限、
+#           重啟/平手/失敗處置，以及要留下哪些 artifact。
+# 模組定位: calibration 的**預註冊契約**。它不是校準結果，也不是 lock ——
+#           結果另存 artifact，凍結記錄另存 prereg.json。26 個參數不能一起 fit，
+#           本檔的核心工作是把它們拆成各自可辨識的階段並寫出理由。
+# 主要責任:
+#   1. 界定 calibration 只能用哪一份資料（frozen calibration split，非 held-out）
+#   2. 定義 distribution-level 目標函數、其正規化與事前固定的權重
+#   3. 分五個階段登記參數群組，每一階段寫明「哪些 observable 識別哪些參數」
+#   4. 明列 optimizer 不得碰的固定/gauge/derived 成員
+#   5. 訂定 optimizer、seed、初始化、邊界、收斂、重啟、平手與失敗處置
+# 維護提醒:
+#   - 不得在讀過 calibration partition 之後修改本檔；要改必須開 amendment
+#     並重跑，理由寫進 amendment 而不是改這裡（NOTE-035 的同一條規則）。
+#   - 不得把四類 real class mean 寫成常數。目標函數一律在執行當下由
+#     calibration split 讀出分佈；hard-code 均值等於把答案抄進判準。
+#   - 不得讓 optimizer 觸碰 CG-1/2/3 的 fixed 成員或任何 derived 參數；
+#     那些自由度在原理上不可辨識，動它們只會把簡併重新引入。
+#   - 不得跳階段，也不得把後面階段的參數提前放進前面階段一起 fit；
+#     階段順序就是可辨識性論證的順序。
+#   - 不得因為某階段不收斂就放寬邊界或改權重重跑；NOT_CONVERGED 是合法結局。
+#   - v0.1.0 新增：首版校準預註冊（NOTE-041）。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli calibration preregister --validate
+#   - py -3.10 -m pytest tests/unit/test_calibration_prereg.py -v
+# ------------------------------------------------------------
+
+preregistration_id: CAL-PREREG-001
+preregistration_version: v0.1.0
+registered_on: "2026-08-29"
+status: FROZEN_BEFORE_READING_CALIBRATION_PARTITION
+
+# ===========================================================================
+# 0. 資料來源
+# ===========================================================================
+# calibration 只能看見 real split 的 calibration partition。held-out 的 168 筆
+# 在 E1 final 之前一次都不得開啟 —— 包括「只是看一下有沒有對」。
+data:
+  source_lock: real_split_policy
+  # 取自 freeze/real_split_policy.lock.json，驗證時逐字比對。
+  calibration_set_hash: 4bda77f6412afbaa225f75646f39b683e37de7d82f80ab94c7cb325648e0c22d
+  eligible_set_hash: f76776e4ddd8ad14ade97c2517731963b8bfa6ec5317fd0b248ecf30273d0ac7
+  calibration_counts: {Empty: 98, Water-filled: 98, Bubbly: 98, Misty: 98}
+  total_calibration_recordings: 392
+
+  # 原始資料的 bytes-level 雜湊**刻意留待執行當下計算**。現在去算它就必須
+  # 讀取 calibration partition，而本檔的全部意義是先寫完再讀。
+  raw_data_hash: COMPUTED_AT_CALIBRATION_START
+  raw_data_hash_spec: >
+    對 calibration partition 內每一筆 recording 的 canonical 陣列取
+    core.hash.hash_array，依 recording_id 排序後 combine_hashes。
+    該值必須寫入每一份 stage artifact 與最終的 calibrated_simulation.lock。
+
+  forbidden_sources:
+    - heldout_real（168 筆；E1 final 之前 access_count 必須維持 0）
+    - 偏移量測試那次獨立採集（僅供 estimator 驗證，見 estimator_preregistration）
+    - 任何 synthetic split（M3 尚未開始，且不得早於 E1 outcome）
+
+# ===========================================================================
+# 1. 目標函數
+# ===========================================================================
+objective:
+  id: NW_DISTRIBUTION_DISCREPANCY
+  form: "J = sum over (class c, feature f) of w[c,f] * NW(real[c,f], sim[c,f])"
+
+  discrepancy:
+    statistic: wasserstein_w1
+    implementation: pcmef.stats.metrics.wasserstein_w1
+    level: distribution
+    detail: >
+      逐 class × feature 取真實與模擬**整個分佈**的 1-Wasserstein 距離。
+      比的是分佈，不是四個均值 —— 匹配均值會讓一個離散度完全錯誤的模型
+      拿到滿分。
+
+  # 這一段是本檔最容易被繞過的地方，因此把禁令寫在定義旁邊。
+  forbidden_in_objective:
+    - 把四類 real class mean 寫成常數（任何檔案、任何形式）
+    - 以 |sim_mean - real_mean| 取代分佈距離
+    - 在執行期以外的任何時點讀取 calibration partition 的數值
+    - 針對某一類另設一條加分或減分項
+
+normalization:
+  scale: s_f
+  implementation: pcmef.stats.metrics.feature_scale_iqr
+  computed_from: calibration split 的**真實**值，逐 feature 池化（pooled over classes）
+  computed_when: calibration 開始時計算**一次**，全部階段共用
+  frozen: true
+  rationale: >
+    raw W1 帶物理單位，distance 差 5 mm 與 signal 差 0.005 MCPS 的 raw W1
+    相差 1000 倍但失真程度相同（NOTE-024）。不正規化就等於讓 distance
+    獨佔目標函數。s_f 取真實資料的 IQR，因此它不隨模擬參數改變 ——
+    若每階段重算，optimizer 可以靠放大模擬離散度稀釋自己的誤差。
+  maintenance_bound: >
+    不得逐階段重算 s_f，也不得由模擬值計算 s_f。s_f <= 0 或非有限時
+    必須 BLOCK 而非退回 1.0（feature_scale_iqr 已如此實作）。
+
+weights:
+  scheme: UNIFORM
+  value: 1.0
+  applies_to: 全部 4 classes x 4 features = 16 項
+  fixed_before_seeing_data: true
+  rationale: >
+    NW 已經是無單位量，等權是唯一不需要額外辯護的選擇。任何非均勻權重
+    都會需要「為什麼這一類/這個特徵更重要」的理由，而在看過資料之後
+    才給得出的理由與挑一組讓結果好看的權重無法區分。
+  maintenance_bound: 變更權重必須開 amendment，不得在執行期以參數傳入。
+
+reporting:
+  # 每一階段只**最佳化**自己那一組項，但必須把完整的 J 一併記錄，
+  # 否則「改善了 signal、悄悄弄壞了 distance」不會有人看見。
+  optimized_terms: 各階段 observables 宣告的子集
+  monitored_terms: 全部 16 項（記錄但不最佳化）
+  regression_guard:
+    rule: >
+      若某階段結束後，**未被該階段最佳化**的項的 NW 總和比該階段開始時
+      惡化超過 regression_tolerance，該階段標記 SIDE_EFFECT_REGRESSION
+      並停止流程，不得自動繼續下一階段。
+    regression_tolerance: 0.10       # 相對值，事前固定
+
+# ===========================================================================
+# 2. optimizer 不得觸碰的參數
+# ===========================================================================
+# 這三個是 CG-1/2/3 裁決時選定的 gauge 固定項。它們對應的自由度在原理上
+# 不可辨識（NOTE-031 / NOTE-034），把它們放進搜尋空間會直接重建簡併。
+forbidden_parameters:
+  gauge_fixed:
+    - name: _SIGMA_T_REFERENCE_PER_M
+      group: CG-1_extinction
+      why: 三個密度與參考尺度精確簡併；固定 shared 的那一項，否則三類互相耦合
+    - name: lighting.irradiance
+      group: CG-2_brightness
+      why: 實測為精確全域增益（1.0->2.0 能量比恰為 2.0000，正規化波形逐 bin 差 0.0）
+    - name: _ROOM_LIGHT_RADIANCE
+      group: CG-3_ambient
+      why: 實測為 Ambient 上的精確純增益（線性度 4.0003/4.0000/4.0000）
+
+  derived:
+    - name: optical_path_to_distance
+      why: 由幾何決定（monostatic），不是自由參數；SurrogateCalibration 已拒絕覆寫
+
+  fixed_or_topology:
+    - SPEED_OF_LIGHT_M_PER_S
+    - TOF_RECORDING_POINTS
+    - sample_interval_s
+    - geometry.bottle_diameter_mm
+    - geometry.wall_thickness_mm
+    - geometry.sensor_to_bottle_mm
+    - geometry.lateral_offset_mm
+    - _INTERIOR_BASE_IOR
+
+  # NOTE-037 維護邊界：不得因為 calibration 的結果回頭換 estimator。
+  estimator:
+    members:
+      - SELECTED_ESTIMATOR (LEADING_EDGE)
+      - detection_threshold_sigma (5.0)
+      - min_return_bins (2)
+    why: >
+      estimator 由獨立預註冊以純物理判準選定，且它是 surrogate 身分的一部分
+      （surrogate_hash 涵蓋它）。讓 calibration 動它等於用擬合結果回頭改
+      已經凍結的 initial model。
+
+# ===========================================================================
+# 3. 邊界
+# ===========================================================================
+bounds:
+  source: freeze/initial_simulation.lock.json -> payload.parameter_ranges
+  binding_rule: >
+    每一個被 fit 的參數，其 [lo, hi] 必須與已凍結的 lock **逐字相同**。
+    驗證器逐項比對；不符即 FAIL。calibration 只能在凍結時登記的範圍內移動，
+    這正是 initial freeze 的用途。
+
+  # 已凍結的 lock 內有三個上界被存成**字串**而不是數字：YAML 1.1 的
+  # `1.0e6`（無正負號）不解析為 float。lock 不可覆寫，parameter_ranges 也在
+  # errata 的禁區內（改它就是改實驗本身），因此只能在此宣告數值解讀。
+  declared_numeric_interpretations:
+    - parameter: ambient_energy_to_mcps
+      frozen_as: ["1e-06", "1.0e6"]
+      interpreted_as: [1.0e-6, 1000000.0]
+    - parameter: signal_energy_to_mcps
+      frozen_as: ["1e-06", "1.0e6"]
+      interpreted_as: [1.0e-6, 1000000.0]
+    - parameter: sigma_width_to_mm
+      frozen_as: ["1e-06", "1.0e6"]
+      interpreted_as: [1.0e-6, 1000000.0]
+  interpretation_rule: >
+    只允許「字串經 float() 轉換後，再轉回字串與原值表示同一個十進位數」
+    這一種解讀，且必須逐參數列出。不得對未列出的參數自動轉型 ——
+    一個安靜的轉型會讓「邊界寫錯」與「邊界被改過」看起來一樣。
+
+  out_of_bounds_policy: >
+    optimizer 提出界外點時直接回傳 +inf 並記錄，不做 clip。
+    clip 會讓最佳點落在邊界上而看不出它其實想往外走。
+
+# ===========================================================================
+# 4. Stage 0 —— 可辨識性探測（純模擬，不碰 calibration partition）
+# ===========================================================================
+# 這一階段先於任何擬合，且**不需要真實資料**。它的存在理由是 NOTE-032 的
+# 教訓：`_ROOM_LIGHT_RATIO` 比例拉 25 倍、總能量只變 0.058%，那是一個
+# 「可以 fit、但 fit 出來沒有意義」的參數。與其事後解釋，不如事前量。
+stage_0:
+  name: identifiability probe
+  reads_calibration_partition: false
+  method: >
+    對每一個候選 fit 參數，在其登記邊界內取低/中/高三點（其餘參數維持
+    initial 值），量它在**每一個 observable** 上造成的相對變化。
+    使用與 calibration 相同的 CRN 種子，因此變化不含取樣雜訊。
+  admission_threshold:
+    rule: |
+      leverage(p, o) = |Δo| / (o 在 calibration split 上的 s_f)
+      max_o leverage(p, o) >= 0.5  -> ADMITTED（可進入其所屬階段擬合）
+      max_o leverage(p, o) <  0.5  -> GAUGE_FIXED（固定於 initial 值，不擬合）
+    threshold_value: 0.5
+    threshold_rationale: >
+      門檻以 s_f 為單位：leverage < 0.5 代表把該參數掃過**整個**登記範圍，
+      造成的 observable 變化還不到真實資料四分位距的一半。這種參數的
+      最佳值由雜訊決定，不是由資料決定。0.5 是事前選定，且結論應對它不敏感
+      —— 若某參數落在 0.4–0.6 之間，必須在 artifact 中特別標記為 BORDERLINE
+      並在 NOTE 中說明，不得逕自歸類。
+  collinearity_check:
+    rule: >
+      對每一階段內的參數兩兩計算 observable 響應向量的餘弦相似度。
+      |cos| >= 0.98 視為該階段內的簡併對，必須在開始擬合前依 CG-1/CG-2 的
+      同一套理由（provenance 決定固定哪一個，不是「哪個好 fit」）擇一固定，
+      並把裁決寫成新的 confounded group 記錄。
+    threshold_value: 0.98
+  outcome_is_binding: >
+    stage 0 的結論**改變後續階段的參數集合**，因此它必須在讀取 calibration
+    partition 之前執行完畢並凍結其 artifact。不得在看過擬合結果後重跑 stage 0。
+
+# ===========================================================================
+# 5. 分階段參數群組
+# ===========================================================================
+# 順序不可調換：每一階段的可辨識性論證都建立在前面階段已固定的基礎上。
+# 各階段擬合完畢後，其參數即**凍結**，後續階段不得再動。
+stagewise:
+
+  # -------------------------------------------------------------------
+  - stage: 1
+    id: AMBIENT
+    name: Ambient 通道
+    parameters: [ambient_energy_to_mcps, ambient_jitter_relative]
+    observables:
+      - ambient_rate_mcps 的分佈**位置**（median）
+      - ambient_rate_mcps 的分佈**離散度**（IQR / median）
+    identifiability: >
+      **結構性解耦，非近似。** Ambient 只由 AMBIENT_ONLY pass 取得
+      （VCSEL 關閉，NOTE-034），因此它與 active pass 的任何參數無關。
+      實測 A2：VCSEL 功率 1.0->4.0 時 ambient 由 3.603355 變為 3.603355
+      （完全相同），即 lighting.irradiance 對 Ambient 的影響**恰為 0**。
+
+      兩個參數各有獨立的統計量：`ambient_energy_to_mcps` 是 Ambient 上的
+      精確純增益（實測線性度 4.0003 / 4.0000 / 4.0000），只移動分佈位置；
+      `ambient_jitter_relative` 是相對抖動，只改變離散度而不改變位置。
+      兩個參數、兩個互相獨立的統計量 -> 恰好可辨識。
+    why_first: >
+      它與其餘四階段**沒有**任何共用參數，先做不會被後面推翻，
+      也立刻從搜尋空間移除兩個自由度。
+    forbidden_here: [_ROOM_LIGHT_RADIANCE]
+
+  # -------------------------------------------------------------------
+  - stage: 2
+    id: SIGNAL_SCALE
+    name: Active Signal 的能量->MCPS 換算
+    parameters: [signal_energy_to_mcps, noise_relative_sigma]
+    observables:
+      - signal_rate_mcps 的分佈位置（**四類池化**）
+      - signal_rate_mcps 的分佈離散度
+    identifiability: >
+      `signal_energy_to_mcps` 是套用在 estimator **之後**的單位換算，
+      對全部四類等比作用，且**不影響 distance**（S2 實測：irradiance
+      1.0->4.0 時估計距離變化 0.0）。因此它由四類池化後的 signal 位置
+      唯一決定，1 個自由度對 1 個統計量。
+
+      使用池化位置而非逐類位置是刻意的：逐類位置的**差異**由 stage 3/4 的
+      幾何與介質參數決定，把它們交給一個全域增益去擬合，就是拿一個旋鈕
+      去補另一組旋鈕的錯。
+    known_residual_confound: >
+      **必須誠實記下**：`_FOIL_REFLECTANCE_940NM`、`_FOIL_SURFACE_ALPHA`、
+      `_FOIL_SIZE_TO_DIAMETER_RATIO` 同樣會縮放回波振幅，與本階段的增益
+      在 signal 位置上**近似簡併**。三者不在本階段，而是在 stage 3 由
+      **distance 通道**區分：post-hoc 增益不會移動 distance，但改變物理
+      振幅會經由 LEADING_EDGE 的 range walk 移動 distance
+      （實測振幅 10->500 時距離變動 10.0%，NOTE-037）。
+      這個區分是**弱**的，因此三者能否進入擬合由 stage 0 的 leverage 門檻
+      決定；未達門檻即 gauge-fix，讓 post-hoc 增益吸收整體位準。
+    forbidden_here: [lighting.irradiance]
+
+  # -------------------------------------------------------------------
+  - stage: 3
+    id: GEOMETRY_SURFACE_FOIL
+    name: 幾何 / 表面 / 箔片
+    parameters:
+      - _FOIL_GAP_TO_BOTTLE_RATIO
+      - _FOIL_REFLECTANCE_940NM
+      - _FOIL_SURFACE_ALPHA
+      - _FOIL_SIZE_TO_DIAMETER_RATIO
+      - _BOTTLE_SURFACE_ALPHA
+      - sensor.fov_deg
+      - light.cutoff_angle_deg
+    not_fitted_in_this_stage:
+      - name: foil_orientation
+        status: NOT_FITTED
+        why: >
+          登記值 facing_camera 是**目前唯一有實作**的朝向，`_foil_transform()`
+          對其餘取值直接拒絕而不退回預設。它因此不是連續旋鈕而是場景結構選項；
+          換朝向是 scene-level 變更，該開新 run 而不是在 calibration 內掃描。
+    observables:
+      - "**Empty 類**的 distance_mm 分佈位置與離散度"
+      - "**Empty 類**的 signal_rate_mcps 分佈形狀（已由 stage 2 固定位置）"
+      - Empty 的 sigma_like 分佈（作為波形寬度的間接觀測）
+    identifiability: >
+      **關鍵結構事實：Empty 沒有介質。** `build_scene_dict()` 只在
+      `medium_preset != "empty"` 時建立內部介質，因此 Empty 的全部
+      observable 只是幾何 / 表面 / 箔片參數的函數，**與 stage 4 的三個密度
+      與三個 albedo 完全無關**。本階段因此只用 Empty 一類擬合 ——
+      這不是為了省事，而是唯一能讓幾何與介質不互相污染的切法。
+
+      各參數的獨立簽名：
+      * `_FOIL_GAP_TO_BOTTLE_RATIO` 移動箔片**位置** -> 移動遠側回波的
+        **時間** -> distance 位置。這是 distance 絕對值的主要把手。
+      * `_FOIL_REFLECTANCE_940NM` / `_FOIL_SURFACE_ALPHA` /
+        `_FOIL_SIZE_TO_DIAMETER_RATIO` 改變箔片回波**振幅與角度分佈**
+        -> signal 形狀，並經 range walk 微幅影響 distance。
+      * `_BOTTLE_SURFACE_ALPHA` 改變前玻璃 GGX lobe 寬度 -> 前緣回波與
+        遠側回波的**相對強度** -> sigma_like 與 distance 的離散度。
+      * `sensor.fov_deg` / `light.cutoff_angle_deg` 改變接收/照明錐角
+        -> 邊緣路徑的加權（NOTE-033：fov 是全角、cutoff 是半角）。
+      * `distance_offset_mm` 是加在 distance 上的常數偏移。
+    declared_degeneracy:
+      id: CG-4_absolute_distance
+      members: [_FOIL_GAP_TO_BOTTLE_RATIO, distance_offset_mm]
+      status: MUST_BE_DECIDED_BY_STAGE_0
+      why: >
+        兩者都讓**四類的 distance 一起平移**，在 distance 位置這個統計量上
+        精確簡併。stage 0 的共線性檢查必然把它們判為簡併對，屆時必須依
+        provenance 擇一固定：`_FOIL_GAP_TO_BOTTLE_RATIO` 是
+        RECONSTRUCTED（箔片「存在」有依據，「在哪」沒有），
+        `distance_offset_mm` 是 PLACEHOLDER 的純數值修正項且無物理來源。
+      preregistered_ruling: >
+        **固定 `distance_offset_mm = 0.0`，擬合 `_FOIL_GAP_TO_BOTTLE_RATIO`。**
+        理由與 CG-1/CG-2 同一套：固定項要選沒有物理內容的那一個，
+        讓有幾何意義的那一個承載資訊。一個非零的 distance_offset_mm 等於
+        宣稱「模擬的光程對、但讀數要平移」，那不是物理，是把殘差藏起來。
+        本裁決在看任何資料之前寫下，stage 0 只確認簡併是否如預期存在。
+      claim_boundary: >
+        校準後的 `_FOIL_GAP_TO_BOTTLE_RATIO` **不得**被解讀為真實裝置中
+        箔片與瓶子的實際距離；它吸收了本階段所有未建模的絕對光程誤差。
+
+  # -------------------------------------------------------------------
+  - stage: 4
+    id: PARTICIPATING_MEDIA
+    name: 參與介質
+    parameters:
+      - medium.turbidity          # Water-filled
+      - medium.bubble_density     # Bubbly
+      - medium.mist_density       # Misty
+      - _ALBEDO_BY_PRESET         # 三個 class-specific 純量：water / bubbly / misty
+    observables:
+      - "Water-filled / Bubbly / Misty 三類**相對 Empty** 的 distance 位移"
+      - 三類的 signal_rate_mcps 分佈（位置已由 stage 2 的全域增益固定）
+      - 三類的 sigma_like 分佈
+    identifiability: >
+      幾何在 stage 3 已由 Empty 單獨釘死，因此三個醫質類別與 Empty 的
+      **差異**只能來自介質。每一類各有自己的密度與 albedo，且**不共用**
+      —— 三類之間沒有交叉項，等於三個各自獨立的二參數子問題。
+
+      同一類內密度與 albedo 的區分：密度（-> σt）決定穿透衰減，主要作用在
+      遠側箔片回波的**振幅與到達時間**（Water 的實測位移 +15.20 mm 與理想
+      全水路徑 Δd=(n-1)L=17.65 mm 同號同量級）；albedo（= σs/σt）決定
+      被散射回來的比例，主要作用在**主窗內的回波形狀**與 sigma_like。
+      兩者並非正交，因此**必須**由 stage 0 的共線性檢查逐類確認
+      |cos| < 0.98；未通過者依 CG-1 的同一套理由固定 albedo、擬合密度
+      （σt 是規格列為 validation-frozen 的量，albedo 無一手來源）。
+    forbidden_here: [_SIGMA_T_REFERENCE_PER_M]
+    claim_boundary: >
+      校準後的三個密度**不得**解讀為絕對濁度／氣泡數密度／霧密度；
+      可宣稱的只有 σt = density x _SIGMA_T_REFERENCE_PER_M 這個乘積
+      （CG-1 的既有 claim boundary，此處沿用）。
+
+  # -------------------------------------------------------------------
+  - stage: 5
+    id: SENSOR_SURROGATE
+    name: 感測器替身的 Sigma 映射
+    parameters: [sigma_width_to_mm, sigma_snr_weight, sigma_multipath_weight]
+    observables:
+      - 四類的 sigma_like 分佈位置
+      - 四類的 sigma_like 分佈離散度
+      - sigma_like 與 signal_rate_mcps 的**跨類共變**（SNR 項的簽名）
+      - sigma_like 與 out_of_window_energy 的跨類共變（multipath 項的簽名）
+    identifiability: >
+      前四階段結束後，波形本身已完全固定；本階段只擬合「由已固定的波形
+      算出 sigma_like」的映射，因此它**不會回頭改變** distance / ambient /
+      signal 三個通道 —— 這是唯一一個放在最後不會污染前面的階段。
+
+      三個參數的簽名可分：`sigma_width_to_mm` 是純增益（移動位置）；
+      `sigma_snr_weight` 只在 SNR 隨類別變化時產生跨類差異；
+      `sigma_multipath_weight` 只在 multipath 能量隨類別變化時產生跨類差異。
+      由於四類的 SNR 與 multipath 排序**不同**（NOTE-032 量到 Empty 與
+      Water 的 out_of_window 比例差一個數量級），兩個權重不會退化成同一個
+      方向 —— 但這仍須由 stage 0 的共線性檢查證實，不得假設。
+    claim_boundary: >
+      sigma_like **不得**被稱為真實 VL53L0X internal Sigma（NOTE-001）；
+      本階段校準的是替身的內部映射，不是對暫存器語意的宣稱。
+
+# ---------------------------------------------------------------------------
+# 不進入任何擬合階段的 calibration_only 參數
+# ---------------------------------------------------------------------------
+# 它們在 registry 裡是 calibration_only（可被 calibration 寫入），但它們是
+# **數值/離散化設定**而不是物理量。用資料去 fit 它們沒有意義：spp 調高只是
+# 雜訊變小，那不是「更像真實感測器」。因此在此宣告固定於 initial 值。
+not_fitted:
+  policy: HELD_AT_FROZEN_INITIAL_VALUE
+  members:
+    - name: spp
+      value: 16
+      why: Monte Carlo 取樣數；提高只降低估計量的變異，不改變被估計的物理量
+    - name: resolution
+      value: [64, 64]
+      why: 像面解析度；surrogate 對全像面加總，解析度是離散化而非場景性質
+    - name: temporal_bins
+      value: 128
+      why: 時間軸分箱數；改變它會同時改變 bin 寬與所有以 bin 為單位的量
+    - name: max_depth
+      value: 12
+      why: 路徑追蹤深度上限；由 NOTE-029 的 lineage 實驗定為足以涵蓋箔片家族
+    - name: bounce_budget
+      value: 3.0
+      why: 時間窗涵蓋範圍的倍率；屬窗口設定，NOTE-027 已以實測末端餘裕 31% 定案
+    - name: _LEADING_MARGIN_BINS
+      value: 8
+      why: 時間窗前緣餘裕（以 bin 數表示，NOTE-027）；窗口設定而非物理量
+    - name: foil_orientation
+      value: facing_camera
+      why: 唯一有實作的朝向；換朝向是 scene-level 變更（見 stage 3）
+    - name: distance_offset_mm
+      value: 0.0
+      why: CG-4 的 gauge 固定項（見 stage 3 的 preregistered_ruling）
+  maintenance_bound: >
+    要把其中任何一項改為可擬合，必須開 amendment 並說明它為何是物理量。
+    「調它結果會變好」不是理由。
+
+# ===========================================================================
+# 6. Optimizer
+# ===========================================================================
+optimizer:
+  common_random_numbers:
+    rule: >
+      同一階段內**所有**評估共用同一組模擬種子。不共用的話目標函數會帶
+      Monte Carlo 雜訊，optimizer 會去追雜訊而不是追參數。
+      這與 e1_evaluation_design 對 Initial/Calibrated 的要求是同一條原則。
+    seeds: {Empty: 1001, Water-filled: 1002, Bubbly: 1042, Misty: 1004}
+
+  verification_seeds:
+    rule: >
+      每階段收斂後，用一組**不同的**種子重算一次目標函數，確認改善不是
+      種子專屬的過擬合。相對劣化超過 verification_tolerance 即標記
+      SEED_OVERFIT 並停止流程。
+    seeds: {Empty: 2001, Water-filled: 2002, Bubbly: 2042, Misty: 2004}
+    verification_tolerance: 0.10
+    used_once_per_stage: true
+
+  # 一維且恰好可辨識的增益不做隨機搜尋：那只會用 200 次評估去找一個
+  # 一維凸問題的最小值，並讓「用了哪個 optimizer」變成沒有意義的細節。
+  scalar_stages:
+    applies_to: [ambient_energy_to_mcps, signal_energy_to_mcps, sigma_width_to_mm]
+    method: scipy.optimize.minimize_scalar
+    options: {method: bounded, xatol: 1.0e-4}
+    max_evaluations: 60
+
+  multivariate_stages:
+    method: scipy.optimize.differential_evolution
+    options:
+      strategy: best1bin
+      init: sobol
+      popsize: 15
+      mutation: [0.5, 1.0]
+      recombination: 0.7
+      tol: 0.01
+      polish: false          # polish 用 L-BFGS-B，對雜訊目標取數值梯度沒有意義
+      updating: deferred     # 與 workers 平行化相容且結果與序列一致
+    seed: 20260829
+    initialization: >
+      Sobol 序列覆蓋整個邊界盒，另**強制**把 initial_simulation.lock 的
+      initial 值放進初始族群第 0 個個體 —— 這保證優化結果不會比凍結的起點更差,
+      且讓「資料沒有要求任何改變」是一個可達成的結局。
+    max_evaluations_per_stage: 3000
+    maxiter: 200
+
+  seeds:
+    optimizer_seed: 20260829
+    seed_derivation: >
+      重啟第 k 次使用 optimizer_seed + 1000*k，k 由 0 起算。
+      種子由公式決定而非逐次挑選，因此「換個種子直到結果好看」留得下痕跡。
+
+convergence:
+  criterion: >
+    differential_evolution 的標準收斂條件
+    （std(population energies) <= tol * |mean(population energies)|），
+    或 scalar 階段的 xatol。
+  additional_requirement: >
+    收斂當下的目標值必須優於該階段**起始**目標值；若最佳點就是起點，
+    該階段結論為 NO_IMPROVEMENT_REQUIRED，參數維持 initial 值。
+    這是合法且應該被記錄的結局，不是失敗。
+  non_convergence:
+    outcome: NOT_CONVERGED
+    is_legal_terminal_state: true
+    rule: >
+      評估上限用盡而未達收斂條件時，記錄 best-so-far 但階段標記
+      NOT_CONVERGED，**且 calibrated_simulation 不得凍結**。
+      不得改用 best-so-far 並宣稱收斂，也不得為了收斂而放寬 tol 或邊界。
+
+restart:
+  policy: FIXED_COUNT
+  count: 3
+  rule: >
+    每階段以 seed_derivation 給定的三個種子各跑一次，取目標值最小者。
+    重啟次數事前固定，不得因為「再試一次可能更好」而追加。
+  divergence_report: >
+    三次重啟的最佳目標值若相對全距超過 0.05，必須在 artifact 中標記
+    MULTIMODAL 並記錄三組參數；這代表目標函數有多個近似等價的解，
+    是可辨識性的警訊而不是可以取平均的雜訊。
+
+tie_break:
+  epsilon: 1.0e-3            # 目標值的相對差
+  rule: >
+    兩組候選的目標值相對差小於 epsilon 時，取在**正規化邊界空間**中
+    離 initial 值 L2 距離較小的那一組。
+  rationale: >
+    資料分不出來的時候就不要動。initial model 是已凍結的參考點，
+    「最小位移」是唯一不需要引入新偏好的平手規則 —— 任何其他規則
+    （取較大值、取中點、取讓某一類好看的）都是在無資訊處注入選擇。
+
+failure_handling:
+  non_finite_objective:
+    rule: 模擬崩潰、NaN、Inf 或非有限目標值一律回傳 +inf 並完整記錄該次評估的參數
+  failed_evaluation_budget:
+    threshold: 0.20
+    rule: >
+      單一階段內失敗評估比例超過 20% 時，該階段標記 UNSTABLE_LANDSCAPE 並停止。
+      在一個五分之一都算不出來的地形上找到的最小值，不是最小值。
+  simulator_crash:
+    rule: >
+      沿用 NOTE-012 的子行程隔離：崩潰只讓該次評估失敗，不讓整個階段中止，
+      但子行程的 exit code 必須完整記錄，不得吞掉。
+  forbidden_recovery:
+    - 放寬邊界
+    - 放寬 tol 或提高 max_evaluations 後重跑並只保留後者
+    - 改變權重或 s_f
+    - 改用「差不多就好」的收斂判定
+
+# ===========================================================================
+# 7. Artifact 記錄
+# ===========================================================================
+artifacts:
+  root: outputs/calibration
+  per_evaluation:
+    file: outputs/calibration/stage_<id>/evaluations.jsonl
+    # 欄位名一律是裸識別字，說明另寫在 field_notes ——
+    # 欄位清單同時是驗證器比對的對象，混入說明文字會讓比對失去意義。
+    fields:
+      - evaluation_index
+      - parameters
+      - objective_total
+      - objective_terms
+      - w1_raw_terms
+      - simulation_run_identity_hash
+      - seeds_used
+      - status
+      - runtime_s
+    field_notes:
+      parameters: 該階段全部被 fit 的參數值
+      objective_terms: 16 項逐 class x feature 的 NW，含未被最佳化的
+      w1_raw_terms: 帶物理單位的 raw W1，供解釋用
+      status: OK / NON_FINITE / CRASHED
+  per_stage:
+    file: outputs/calibration/stage_<id>/stage_summary.json
+    fields:
+      - stage_id
+      - outcome
+      - fitted_parameters
+      - objective_before
+      - objective_after
+      - monitored_terms_before
+      - monitored_terms_after
+      - verification_seed_objective
+      - restart_results
+      - evaluations_used
+      - evaluations_budget
+      - preregistration_hash
+      - raw_data_hash
+    allowed_outcomes:
+      - CONVERGED
+      - NO_IMPROVEMENT_REQUIRED
+      - NOT_CONVERGED
+      - SIDE_EFFECT_REGRESSION
+      - SEED_OVERFIT
+      - UNSTABLE_LANDSCAPE
+      - MULTIMODAL
+    field_notes:
+      fitted_parameters: 值、邊界、以及是否貼邊
+      restart_results: 三次重啟各自的最佳目標值與參數
+  final:
+    file: outputs/calibration/calibration_report.json
+    must_contain:
+      - 全部五階段的 stage_summary
+      - stage_0 的 leverage 與共線性矩陣
+      - 每一個 calibration_only 參數的最終狀態
+        （FITTED / GAUGE_FIXED / HELD_AT_INITIAL）
+      - preregistration_hash 與 protocol_hash
+      - initial_simulation lock hash 與 ERR-001 hash
+  parameter_boundary_report:
+    rule: >
+      任何最終落在邊界上（距邊界 < 1% 範圍寬）的參數必須被標記。
+      貼邊代表資料想把它推到登記範圍之外，那是 initial freeze 的範圍
+      訂錯了，必須具名報告而不是接受該值。
+
+# ===========================================================================
+# 8. 完成後不得自動進行的事
+# ===========================================================================
+after_calibration_forbidden:
+  - 自動凍結 calibrated_simulation.lock（凍結是獨立動作，需先過稽核）
+  - 開啟 held-out（E1 final 之前 access_count 必須維持 0）
+  - 依校準結果回頭修改 estimator、initial_simulation.lock 或本預註冊
+  - 以校準後的模擬產生 synthetic split（M3 不得早於 E1 outcome）

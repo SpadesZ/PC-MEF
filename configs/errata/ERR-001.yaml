@@ -1,0 +1,113 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 的 erratum freeze 讀取，驗證通過後寫成
+#         freeze/errata/ERR-001.erratum.json；該記錄由 core.formal_loader
+#         在載入 initial_simulation.lock 時套用。
+# 檔案路徑: configs/errata/ERR-001.yaml
+# 產生時間: 2026-08-29 11:05 +08:00
+# 版本: v0.1.0
+# 功能說明: 更正 initial_simulation.lock 的 environment.mitransient 欄位 ——
+#           lock 記為 "unavailable"，被凍結的那次 run 實際使用 1.3.0。
+# 模組定位: ERR-001 的**輸入規格**。凍結後的權威記錄是
+#           freeze/errata/ERR-001.erratum.json，本檔只是產生它的來源，
+#           留在版控是為了讓更正的內容可被 review，而不是被 CLI 參數帶過。
+# 主要責任:
+#   1. 指名被更正的 lock 與其 payload_hash（綁定唯一一份文件）
+#   2. 記下 recorded / corrected 兩個值與缺陷分類
+#   3. 列出一手證據檔、其 SHA-256、以及把證據綁回該次 run 的斷言
+#   4. 宣告 scientific_state_changed=false 並說明理由
+# 維護提醒:
+#   - 不得在 ERR-001 凍結後修改本檔內容；要改就開 ERR-002。
+#     凍結記錄自帶 payload_hash，改這裡不會改到它，只會製造兩份不一致的說法。
+#   - 不得把 field_path 改成 environment 以外的東西；
+#     core.errata 的禁區檢查會拒絕，且那種更正本來就該走新 run。
+#   - 不得移除任何一條 binds；少了它，證據只能證明「某次 run 用了 1.3.0」，
+#     證明不了「**被凍結的那次** run 用了 1.3.0」。
+#   - v0.1.0 新增：首版勘誤（NOTE-040）。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli erratum freeze --spec configs/errata/ERR-001.yaml
+#   - py -3.10 -m pytest tests/unit/test_errata.py -v
+# ------------------------------------------------------------
+
+erratum_id: ERR-001
+target_lock: initial_simulation
+
+# 綁定唯一一份文件。lock 檔若被改動，重算出來的 hash 就不會是這個值，
+# 本勘誤隨即失效而不是浮動到另一份 lock 上。
+target_payload_hash: dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335
+
+field_path: environment.mitransient
+recorded_value: unavailable
+corrected_value: "1.3.0"
+
+defect_class: FREEZE_METADATA_CAPTURE_BUG
+
+# 這是本勘誤能夠存在的唯一理由。若它是 true，就不是勘誤。
+scientific_state_changed: false
+
+authority: >
+  researcher decision under the project's "locks are immutable" red line:
+  the defective lock is neither deleted nor re-frozen; the correction is
+  recorded as an append-only layer above it.
+
+rationale: >
+  首版 freeze initial-simulation 在 **freeze 行程內**重新探測相依版本，
+  而該行程沒有呼叫 set_variant；mitransient 在未設 variant 時 import 會拋
+  例外，因此被記成 "unavailable"。這是 freeze 指令的 metadata 擷取缺陷，
+  不是被凍結那次 run 的性質：該次 run 的 manifest 與四個 scenario 全部
+  記著 mitransient 1.3.0。
+
+  處置選擇：刪除該 lock 重新凍結會拿到正確的 environment，但刪除 lock
+  本身違反「lock 不可覆寫、不可刪除」這條紅線，且會讓「凍結過的東西
+  可以在不方便時消失」成為先例。因此保留原 lock 一個位元不動，
+  另以 append-only 勘誤層記錄更正。
+
+  scientific_state_changed=false 的依據：environment 欄位不參與任何計算。
+  它既不進 scene_hash、不進 parameter_set_hash、不進 surrogate_hash，
+  也不影響 IS-01..06 或 RP-01..04 的任何一項判定。它的用途是讓後人
+  **重建環境**；記錯使重建指示失效，改正它不會使任何已算出的數字改變。
+  RP-03 的 12/12 bitwise 相同、readiness 六項全 PASS，在更正前後完全一樣。
+
+  本勘誤**不**宣稱 lock 的其他欄位皆屬正確，只宣稱這一個欄位的更正有
+  一手證據支持。
+
+evidence:
+  - path: outputs/repro_a/simulation_smoke_manifest.json
+    sha256: 9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec
+    json_pointer: dependencies.mitransient
+    description: >
+      被凍結那次 run 自己的 manifest。dependencies 由執行 run 的行程記錄，
+      該行程有 set_variant，因此看得到真正載入的 mitransient。
+    binds:
+      # 證據的 content_hash 必須等於 lock 的 scene_hash ——
+      # 這是「這份 manifest 就是被凍結的那次 run」的憑據。
+      content_hash: scene_hash
+      run_identity_hash: scene_topology.run_identity_hash
+
+  - path: outputs/repro_b/simulation_smoke_manifest.json
+    sha256: f8df2a0431c6eaa645af4316fd72750fbee811945c9262a0b2c9d7d841ff23bf
+    json_pointer: dependencies.mitransient
+    description: >
+      可重現性比對的第二次獨立執行（RP-01..04 的另一半）。
+      檔案位元組不同（runtime_s 與 outputs 路徑，見 NOTE-038），
+      但 content_hash 與 run_identity_hash 與 run A 相同。
+    binds:
+      content_hash: scene_hash
+      run_identity_hash: scene_topology.run_identity_hash
+
+  - path: outputs/repro_a/simulation_smoke_manifest.json
+    sha256: 9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec
+    json_pointer: scenarios.0.transient.mitransient_version
+    description: >
+      scenario 層級的獨立記錄（smoke_empty_1001）。與 dependencies 區塊
+      分開寫入，因此它不是同一個探測結果的複本。四個 scenario 皆記 1.3.0。
+    binds:
+      scenarios.0.scenario_hash: scene_topology.scenarios.smoke_empty_1001.scenario_hash
+
+  - path: outputs/repro_a/simulation_smoke_manifest.json
+    sha256: 9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec
+    json_pointer: scenarios.3.transient.mitransient_version
+    description: >
+      scenario 層級的獨立記錄（smoke_misty_1004），確認四類的最後一個
+      也記著同一版本。
+    binds:
+      scenarios.3.scenario_hash: scene_topology.scenarios.smoke_misty_1004.scenario_hash

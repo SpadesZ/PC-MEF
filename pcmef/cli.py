@@ -970,6 +970,223 @@ def cmd_freeze_initial_simulation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_erratum_freeze(args: argparse.Namespace) -> int:
+    """凍結一份 metadata 勘誤（NOTE-040）。
+
+    寫入前先跑完整驗證：範疇（禁區優先、白名單其次）、綁定到指定的
+    lock payload_hash、原值必須真的在 lock 裡、以及每一份證據檔的
+    SHA-256 與其指向的值。任一項不符即拒絕寫入，不留下一份自己都
+    通不過的記錄。
+    """
+    import yaml
+
+    from pcmef.core.errata import Erratum, ErratumStore, EvidenceRef
+    from pcmef.core.locks import LockStore
+
+    spec = yaml.safe_load(Path(args.spec).read_text(encoding="utf-8"))
+
+    lock_store = LockStore(args.freeze_dir)
+    lock_name = spec["target_lock"]
+    if not lock_store.exists(lock_name):
+        print(
+            f"error: target lock {lock_name!r} is not frozen; an erratum can only "
+            "correct a document that exists",
+            file=sys.stderr,
+        )
+        return 2
+
+    lock_payload = lock_store.load(lock_name)
+    lock_hash = lock_store.load_hash(lock_name)
+
+    erratum = Erratum(
+        erratum_id=spec["erratum_id"],
+        target_lock=lock_name,
+        target_payload_hash=spec["target_payload_hash"],
+        field_path=spec["field_path"],
+        recorded_value=spec["recorded_value"],
+        corrected_value=spec["corrected_value"],
+        defect_class=spec["defect_class"],
+        rationale=spec["rationale"],
+        evidence=tuple(
+            EvidenceRef(
+                path=ref["path"],
+                sha256=ref["sha256"],
+                json_pointer=ref["json_pointer"],
+                description=ref.get("description", ""),
+                binds=dict(ref.get("binds") or {}),
+            )
+            for ref in spec["evidence"]
+        ),
+        authority=spec["authority"],
+        scientific_state_changed=bool(spec.get("scientific_state_changed", False)),
+    )
+
+    store = ErratumStore(args.freeze_dir)
+    try:
+        path = store.freeze(erratum, lock_payload, lock_hash, repo_root=args.repo_root)
+    except Exception as exc:  # noqa: BLE001 - 錯誤原文即是拒絕理由
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"{erratum.erratum_id} frozen")
+    print(f"  path          : {path.resolve()}")
+    print(f"  payload hash  : {store.load_hash(erratum.erratum_id)}")
+    print(f"  target lock   : {lock_name}  ({lock_hash})")
+    print(f"  field         : {erratum.field_path}")
+    print(f"  recorded      : {erratum.recorded_value!r}")
+    print(f"  corrected     : {erratum.corrected_value!r}")
+    print(f"  evidence      : {len(erratum.evidence)} source(s), all verified")
+    print(
+        "\nthe original lock is unchanged. Formal code must read it through "
+        "`locks resolve` / load_formal_lock(), which re-verifies lock, erratum "
+        "and evidence on every load."
+    )
+    return 0
+
+
+def cmd_erratum_status(args: argparse.Namespace) -> int:
+    """列出已凍結的勘誤並即時重驗每一份。"""
+    from pcmef.core.errata import ErratumStore, verify_erratum
+    from pcmef.core.locks import LockStore
+
+    store = ErratumStore(args.freeze_dir)
+    ids = store.list_ids()
+    if not ids:
+        print("no errata frozen")
+        return 0
+
+    lock_store = LockStore(args.freeze_dir)
+    failures = 0
+    for erratum_id in ids:
+        payload = store.load(erratum_id)
+        lock_name = str(payload.get("target_lock"))
+        print(f"{erratum_id}  -> {lock_name}.{payload.get('field_path')}")
+        print(f"  {payload.get('recorded_value')!r} -> {payload.get('corrected_value')!r}")
+        print(f"  payload hash : {store.load_hash(erratum_id)}")
+        try:
+            summary = verify_erratum(
+                payload,
+                lock_store.load(lock_name),
+                lock_store.load_hash(lock_name),
+                repo_root=args.repo_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            print(f"  verification : FAIL  {exc}")
+            continue
+        print(
+            f"  verification : PASS  "
+            f"{len(summary['evidence_verified'])} evidence source(s)"
+        )
+    return 2 if failures else 0
+
+
+def cmd_locks_resolve(args: argparse.Namespace) -> int:
+    """以 formal loader 解析一份 lock：驗 lock + erratum + evidence。"""
+    from pcmef.core.formal_loader import load_formal_lock, resolved_lock_report
+
+    try:
+        resolved = load_formal_lock(
+            args.lock, freeze_dir=args.freeze_dir, repo_root=args.repo_root
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    for line in resolved_lock_report(resolved):
+        print(line)
+    if args.field:
+        from pcmef.core.errata import _resolve
+
+        print()
+        print(f"original  {args.field} = {_resolve(resolved.original_payload, args.field)!r}")
+        print(f"resolved  {args.field} = {_resolve(resolved.payload, args.field)!r}")
+    return 0
+
+
+def cmd_calibration_preregister(args: argparse.Namespace) -> int:
+    """驗證（並在 --freeze 時凍結）校準預註冊（NOTE-041）。
+
+    本指令**不讀取 calibration partition 的任何數值**，也不執行校準。
+    """
+    import subprocess
+
+    from pcmef.experiments.calibration_prereg import (
+        REQUIRED_CHECKS,
+        PreregistrationError,
+        freeze_preregistration,
+        protocol_hash,
+        validate_preregistration,
+    )
+
+    report = validate_preregistration(
+        args.protocol, args.freeze_dir, args.repo_root, args.registry
+    )
+    print(f"audit: {report.name}")
+    for line in report.lines():
+        print(line)
+    counts = report.counts()
+    print(
+        f"\nPASS {counts['PASS']}  FAIL {counts['FAIL']}  "
+        f"NOT_PRODUCED {counts['NOT_PRODUCED']}  BLOCKED {counts['BLOCKED']}"
+    )
+    print(f"protocol_hash: {protocol_hash(args.protocol)}")
+
+    unmet = report.unmet(REQUIRED_CHECKS)
+    if not args.freeze:
+        print(
+            f"\npreregistration freezable: {'YES' if not unmet else 'NO'}"
+            "   (dry run; pass --freeze to write the record)"
+        )
+        return 2 if unmet else 0
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if dirty and not args.allow_dirty:
+        print(
+            "\nerror: the working tree has uncommitted changes; a preregistration "
+            "that names a commit must be produced from that commit. Commit first, "
+            "or pass --allow-dirty.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        path, document = freeze_preregistration(
+            args.protocol,
+            args.freeze_dir,
+            args.repo_root,
+            code_version=commit,
+            code_dirty=bool(dirty),
+        )
+    except PreregistrationError as exc:
+        print(f"\nerror: {exc}", file=sys.stderr)
+        return 2
+
+    payload = document["payload"]
+    print(f"\n{payload['preregistration_id']} frozen")
+    print(f"  path                 : {path.resolve()}")
+    print(f"  payload hash         : {document['payload_hash']}")
+    print(f"  protocol hash        : {payload['protocol_hash']}")
+    print(f"  code_version         : {payload['code_version']}")
+    print(f"  calibration_set_hash : {payload['split']['calibration_set_hash']}")
+    print(f"  parameter_set_hash   : {payload['registry']['parameter_set_hash']}")
+    print(f"  initial lock hash    : {payload['initial_simulation']['lock_hash']}")
+    print(f"  errata               : {payload['errata']}")
+    print(f"  optimizer seed       : {payload['optimizer']['optimizer_seed']}")
+    print(f"  heldout access count : {payload['split']['heldout_access_count']}")
+    print(
+        "\nthe calibration protocol is now sealed. Calibration may start; it may "
+        "only move the parameters this record names, inside the frozen ranges. "
+        "Held-out remains sealed."
+    )
+    return 0
+
+
 def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
     """E1-G04：驗證 surrogate 能由真實 transient 產出四特徵且無 NaN/Inf。
 
@@ -1880,6 +2097,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     freeze_initial.set_defaults(func=cmd_freeze_initial_simulation)
 
+    erratum_parser = subparsers.add_parser(
+        "erratum", help="已凍結 lock 的 metadata 勘誤（append-only）"
+    )
+    erratum_sub = erratum_parser.add_subparsers(dest="erratum_command", required=True)
+    erratum_freeze = erratum_sub.add_parser(
+        "freeze", help="依 spec 凍結一份勘誤；驗證不過即拒絕寫入"
+    )
+    erratum_freeze.add_argument("--spec", required=True)
+    erratum_freeze.add_argument("--freeze-dir", default="freeze")
+    erratum_freeze.add_argument("--repo-root", default=".")
+    erratum_freeze.set_defaults(func=cmd_erratum_freeze)
+
+    erratum_status = erratum_sub.add_parser(
+        "status", help="列出已凍結的勘誤並即時重驗 lock / erratum / evidence"
+    )
+    erratum_status.add_argument("--freeze-dir", default="freeze")
+    erratum_status.add_argument("--repo-root", default=".")
+    erratum_status.set_defaults(func=cmd_erratum_status)
+
+    cal_parser = subparsers.add_parser("calibration", help="校準（預註冊先行）")
+    cal_sub = cal_parser.add_subparsers(dest="calibration_command", required=True)
+    cal_prereg = cal_sub.add_parser(
+        "preregister",
+        help="驗證／凍結校準預註冊；不讀 calibration partition，也不執行校準",
+    )
+    cal_prereg.add_argument("--protocol", default=None)
+    cal_prereg.add_argument("--registry", default=None)
+    cal_prereg.add_argument("--freeze-dir", default="freeze")
+    cal_prereg.add_argument("--repo-root", default=".")
+    cal_prereg.add_argument(
+        "--validate",
+        action="store_true",
+        help="只驗證不寫入（預設行為；顯式寫出以便在文件與腳本中一眼看懂）",
+    )
+    cal_prereg.add_argument(
+        "--freeze", action="store_true", help="通過全部檢查後寫入凍結記錄"
+    )
+    cal_prereg.add_argument("--allow-dirty", action="store_true")
+    cal_prereg.set_defaults(func=cmd_calibration_preregister)
+
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)
     e1_evidence = e1_sub.add_parser(
@@ -2108,6 +2365,18 @@ def build_parser() -> argparse.ArgumentParser:
     status = locks_sub.add_parser("status", help="顯示每個 lock 的凍結狀態與前置條件")
     status.add_argument("--freeze-dir", default="freeze")
     status.set_defaults(func=cmd_locks_status)
+
+    locks_resolve = locks_sub.add_parser(
+        "resolve",
+        help="以 formal loader 讀 lock：同時驗 lock、erratum 與 source evidence",
+    )
+    locks_resolve.add_argument("--lock", required=True)
+    locks_resolve.add_argument("--freeze-dir", default="freeze")
+    locks_resolve.add_argument("--repo-root", default=".")
+    locks_resolve.add_argument(
+        "--field", default=None, help="另外印出某個欄位的原值與解析後的值"
+    )
+    locks_resolve.set_defaults(func=cmd_locks_resolve)
 
     return parser
 
