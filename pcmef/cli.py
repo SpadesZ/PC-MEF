@@ -1257,6 +1257,170 @@ def cmd_calibration_preregister(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_stage0_report(report: dict, path: Path) -> None:
+    classification = report["classification"]
+    print(f"stage 0: {report['name']}  ({report['stage_id']})")
+    print(f"  preregistration      : {report['preregistration_id']} "
+          f"{report['preregistration_hash'][:16]}")
+    print(f"  protocol hash        : {report['protocol_hash'][:16]}")
+    print(f"  initial lock hash    : {report['initial_simulation_lock_hash'][:16]}")
+    print(f"  parameter_set_hash   : {report['parameter_registry']['parameter_set_hash'][:16]}")
+    print(f"  bounds hash          : {report['bounds_resolution_hash'][:16]}")
+    print(f"  observables          : {report['observable_definition']['count']}")
+    print(f"  scenario renders     : {report['simulation']['scenario_renders']}")
+    print(f"  calibration access   : {report['calibration_access_count']}")
+    print(f"  heldout access       : {report['heldout_access_count']}")
+
+    print(
+        f"\n{'dimension':<32}{'low':>11}{'high':>11}{'max lev':>12}"
+        f"{'declared':>12}  outcome"
+    )
+    for entry in report["parameters"]:
+        leverage = entry.get("max_leverage")
+        declared = entry.get("max_leverage_declared")
+        shown = "n/a" if leverage is None else f"{leverage:.4g}"
+        shown_declared = "n/a" if declared is None else f"{declared:.4g}"
+        print(
+            f"{entry['dimension']:<32}{entry['low']:>11.5g}{entry['high']:>11.5g}"
+            f"{shown:>12}{shown_declared:>12}  {entry['outcome']}"
+        )
+
+    degenerate = [c for c in report["collinearity"] if c.get("degenerate")]
+    print(
+        f"\nADMITTED {len(classification['admitted'])}  "
+        f"GAUGE_FIXED {len(classification['gauge_fixed'])}  "
+        f"BORDERLINE {len(classification['borderline'])}  "
+        f"UNDETERMINED {len(classification['undetermined'])}  "
+        f"NOT_FITTED {len(classification['not_fitted'])}"
+    )
+    print(
+        f"collinear pairs (|cos| >= {report['collinearity_threshold']}): "
+        f"{len(degenerate)}"
+    )
+    for pair in degenerate:
+        print(f"  {pair['stage']}: {pair['pair']}  |cos| = {pair['abs_cosine']:.4f}")
+
+    print(f"\noutcome: {report['outcome']}")
+    for blocker in report["adjudication_blockers"]:
+        print(f"  blocker: {blocker}")
+    print(f"report: {path.resolve()}")
+
+
+def cmd_calibration_stage0(args: argparse.Namespace) -> int:
+    """CAL-PREREG-002 stage 0：純模擬的可辨識性探測（NOTE-043）。
+
+    **不讀取 calibration partition，也不讀取 held-out。** 算圖在子行程執行
+    （NOTE-012）；父行程以 artifact 判定成敗，子行程 exit code 仍完整回報。
+    """
+    import subprocess
+
+    out_dir = Path(args.out)
+    report_path = out_dir / "stage0_identifiability.json"
+
+    if not args.in_worker:
+        if report_path.exists() and not args.freeze:
+            report_path.unlink()
+        if not args.freeze:
+            command = [
+                sys.executable, "-m", "pcmef.cli", "calibration", "stage0",
+                "--out", str(args.out), "--spp", str(args.spp),
+                "--resolution", str(args.resolution),
+                "--temporal-bins", str(args.temporal_bins),
+                "--samples", str(args.samples),
+                "--freeze-dir", str(args.freeze_dir),
+                "--repo-root", str(args.repo_root),
+                "--in-worker",
+            ]
+            completed = subprocess.run(command, check=False)
+            if not report_path.exists():
+                print(
+                    f"error: worker exited with {completed.returncode} and wrote "
+                    "no stage 0 report",
+                    file=sys.stderr,
+                )
+                return completed.returncode or 1
+            if completed.returncode != 0:
+                print(
+                    f"\nnote: the render worker exited with {completed.returncode} "
+                    "after the report was written (NOTE-012); judged from the report.",
+                    file=sys.stderr,
+                )
+
+        if not report_path.exists():
+            print(f"error: {report_path} not found; run stage 0 first", file=sys.stderr)
+            return 2
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        _print_stage0_report(report, report_path)
+
+        if not args.freeze:
+            return 0 if report["outcome"] == "STAGE0_COMPLETE" else 2
+
+        from pcmef.experiments.calibration_stage0_freeze import (
+            Stage0FreezeError,
+            freeze_stage0,
+        )
+
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        if dirty and not args.allow_dirty:
+            print(
+                "\nerror: the working tree has uncommitted changes; an artifact "
+                "that names a commit must be produced from that commit. Commit "
+                "first, or pass --allow-dirty.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            path, document = freeze_stage0(
+                report,
+                freeze_dir=args.freeze_dir,
+                repo_root=args.repo_root,
+                code_version=commit,
+                code_dirty=bool(dirty),
+            )
+        except Stage0FreezeError as exc:
+            print(f"\nerror: {exc}", file=sys.stderr)
+            return 2
+        print(f"\n{document['stage_id']} frozen")
+        print(f"  path         : {path.resolve()}")
+        print(f"  payload hash : {document['payload_hash']}")
+        print(f"  code_version : {document['payload']['code_version']}")
+        print(
+            "\nstage 0 is sealed. Stage 1 is the first legitimate calibration "
+            "access and is a separate, explicit decision."
+        )
+        return 0
+
+    from pcmef.experiments.calibration_stage0 import Stage0Error, execute_stage0
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+
+    require_mitsuba()
+    try:
+        report = execute_stage0(
+            spp=args.spp,
+            resolution=(args.resolution, args.resolution),
+            temporal_bins=args.temporal_bins,
+            n_samples=args.samples,
+            freeze_dir=args.freeze_dir,
+            repo_root=args.repo_root,
+            progress=lambda message: print(message, flush=True),
+        )
+    except Stage0Error as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    _print_stage0_report(report, report_path)
+    return 0 if report["outcome"] == "STAGE0_COMPLETE" else 2
+
+
 def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
     """E1-G04：驗證 surrogate 能由真實 transient 產出四特徵且無 NaN/Inf。
 
@@ -2225,6 +2389,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cal_prereg.add_argument("--allow-dirty", action="store_true")
     cal_prereg.set_defaults(func=cmd_calibration_preregister)
+
+    cal_stage0 = cal_sub.add_parser(
+        "stage0",
+        help="stage 0 可辨識性探測；純模擬，不讀 calibration partition 也不讀 held-out",
+    )
+    cal_stage0.add_argument("--out", default="outputs/calibration/stage_0")
+    cal_stage0.add_argument("--spp", type=int, default=16)
+    cal_stage0.add_argument("--resolution", type=int, default=64)
+    cal_stage0.add_argument("--temporal-bins", type=int, default=128)
+    cal_stage0.add_argument("--samples", type=int, default=500)
+    cal_stage0.add_argument("--freeze-dir", default="freeze")
+    cal_stage0.add_argument("--repo-root", default=".")
+    cal_stage0.add_argument(
+        "--freeze",
+        action="store_true",
+        help="不重跑，改為凍結既有報告（outcome 必須是 STAGE0_COMPLETE）",
+    )
+    cal_stage0.add_argument("--allow-dirty", action="store_true")
+    cal_stage0.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
+    cal_stage0.set_defaults(func=cmd_calibration_stage0)
 
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)

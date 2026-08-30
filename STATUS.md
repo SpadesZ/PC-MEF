@@ -59,7 +59,9 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 ### 常用指令
 
 ```powershell
-py -3.10 -m pytest                                   # 全部測試（1302 條，約 6 分鐘）
+$env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"    # 少了會有一批模擬測試靜默 skip
+$env:PCMEF_REQUIRE_SIMULATION = "1"                  # 讓「缺相依」變成失敗而不是 skip
+py -3.10 -m pytest                                   # 全部測試（1681 條，約 3.5 分鐘）
 py -3.10 -m pcmef.cli config check                   # 待教授裁決的 10 項
 py -3.10 -m pcmef.cli params audit                   # 38 個參數的 formal 防線（exit 2 = 不可進 formal）
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
@@ -72,7 +74,9 @@ py -3.10 -m pcmef.cli audit e1-gates                 # Batch 7：十二個 gate
 py -3.10 -m pcmef.cli audit heldout-firewall         # Appendix B 洩漏防線
 py -3.10 -m pcmef.cli erratum status                 # 勘誤層：重驗 lock/erratum/evidence
 py -3.10 -m pcmef.cli locks resolve --lock initial_simulation   # formal 讀取入口
-py -3.10 -m pcmef.cli calibration preregister --validate        # CP-01..CP-12
+py -3.10 -m pcmef.cli calibration preregister --validate        # CP-01..CP-16
+py -3.10 -m pcmef.cli calibration stage0 --out outputs/calibration/stage_0
+                                                     # stage 0 可辨識性探測（純模擬）
 py -3.10 -m pcmef.cli audit real-split-policy        # Appendix H1 政策契約
 py -3.10 -m pytest tests/unit/test_amendments.py     # 協定修訂記錄（AMD-001）
 py -3.10 -m pcmef.cli audit real-data --source data/raw_real/... --out data/inventory
@@ -123,10 +127,23 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~lock 的 environment 記錯~~ | — | **已解除**：ERR-001 勘誤層（NOTE-040） |
 | ~~沒有校準目標規格~~ | — | **已解除**：CAL-PREREG-001 已凍結（NOTE-041） |
 
-**目前的關鍵路徑是 Phase E calibration 的執行。** `locks status` 顯示
-22 個 lock 已凍 2 個（`real_split_policy` / `initial_simulation`）、
-`calibrated_simulation` 與 `metric_config` 為 pending、其餘 18 個 BLOCKED。
-下一棒可以直接開始跑 stage 0 —— 協定已凍，範圍已定，不需要再做裁決。
+**目前的關鍵路徑是 AMD-004 → CAL-PREREG-003 → 重跑並凍結 stage 0。**
+`locks status` 顯示 22 個 lock 已凍 2 個（`real_split_policy` /
+`initial_simulation`）、`calibrated_simulation` 與 `metric_config` 為 pending、
+其餘 18 個 BLOCKED。
+
+**stage 0 已經跑過，結論是 `STAGE0_ADJUDICATION_REQUIRED`**（見下方專節）。
+下一棒的順序**不得跳**：
+
+1. 撰寫 `configs/calibration_preregistration.yaml` v0.3.0（依 AMD-004 的十項契約）
+2. 凍結 AMD-004，再凍結 CAL-PREREG-003
+3. 重跑 stage 0（約 50 分鐘），無 BORDERLINE / UNDETERMINED / 新簡併才凍結
+4. stage 1 是本研究**第一次**真實 calibration access，必須另行明確裁決
+
+> `execute_stage0()` 目前會**拒絕執行**，直到
+> `freeze/preregistrations/CAL-PREREG-003.prereg.json` 存在。
+> 程式已實作 AMD-004 語意，若讓它在只有 CAL-PREREG-002 的情況下跑，
+> 產出的 artifact 會宣稱一份它其實沒有遵守的協定。
 
 ### 動手前必讀
 
@@ -860,8 +877,10 @@ parameter / estimator / seed / scene / config，且**禁區檢查先跑、完全
 
 | 階段 | 狀態 | 真正的 blocker |
 |---|---|---|
-| E0 校準預註冊 | **已凍結** | — |
-| E calibration | **未開始**（可以開始） | — |
+| E0 校準預註冊 | **已凍結**（CAL-PREREG-002） | — |
+| E0.5 stage 0 可辨識性探測 | **已執行，需裁決** | 見「Stage 0」一節的五項發現 |
+| E0.6 AMD-004 / CAL-PREREG-003 | **AMD-004 已擬定未凍；CAL-PREREG-003 未撰寫** | stage 0 重跑與凍結都擋在這裡 |
+| E calibration | **未開始，且目前 NOT_READY** | stage 0 未凍結；wall-clock 成本未裁決 |
 | F 校準後重現 | 未開始 | 依賴 E |
 | G metric/E1 前置 lock | 未開始 | `metric_config` / `e1_scientific_rule` 未凍；依賴 E |
 
@@ -993,6 +1012,149 @@ float。**該值已凍進 lock，且 `parameter_ranges` 在勘誤的禁區內**�
 
 ---
 
+## Stage 0 —— 已執行，結論為 `STAGE0_ADJUDICATION_REQUIRED`（2026-08-30，NOTE-043）
+
+**stage 0 已完整跑過，但沒有凍結，而且不應該凍結。** 它的用途正是在燒掉
+116,352 次評估之前把設計缺陷逼出來，而它一次逼出了五個。
+
+```
+outputs/calibration/stage_0/stage0_identifiability.json
+prereg  CAL-PREREG-002 e7e2a298…   protocol c6a0de86…   bounds c71c3999…
+initial lock dc15c954…             parameter_set 3bd65b50…
+spp 16 / 64x64 / 128 bins / 500 samples / 140 scenario renders
+mitsuba 3.8.0  mitransient 1.3.0   estimator leading_edge
+calibration access 0               heldout access 0
+```
+
+| 分類 | 數 | 成員 |
+|---|---|---|
+| ADMITTED | 14 | 四個 `_FOIL_*`、`_BOTTLE_SURFACE_ALPHA`、`sensor.fov_deg`、`light.cutoff_angle_deg`、三個密度、`ambient_energy_to_mcps`、`signal_energy_to_mcps`、`sigma_width_to_mm`、`sigma_multipath_weight` |
+| GAUGE_FIXED | 1 | `_ALBEDO_BY_PRESET.water`（2.708） |
+| BORDERLINE | 3 | `_ALBEDO_BY_PRESET.bubbly` 7.835、`.misty` 8.812、`sigma_snr_weight` 17.16 |
+| UNDETERMINED | 2 | `ambient_jitter_relative`、`noise_relative_sigma` |
+| NOT_FITTED | 8 | 與預註冊相同 |
+
+### 可重現性：同 seeds／settings 下**逐位元**相同
+
+同一組凍結設定與種子跑兩次（run1 / run2，各 140 次算圖），逐項比對：
+
+| 比對項目 | 結果 |
+|---|---|
+| σ_MC（32 個 observable） | **32/32 逐位元相同**，最大絕對差 `0.0` |
+| CRN baseline（32 個） | **32/32 逐位元相同** |
+| 完整 leverage 矩陣（20 參數 × 32 observable） | **576/576 逐位元相同** |
+| 每參數 `max_leverage` | **20/20 逐位元相同** |
+| 每參數 outcome | **20/20 相同** |
+| 共線性餘弦（39 對） | **39/39 逐位元相同** |
+| 分類計數 | 14 / 1 / 3 / 2 / 8，兩次相同 |
+| outcome | 兩次皆 `STAGE0_ADJUDICATION_REQUIRED` |
+
+**一致不等於可以凍結。** 可重現性證明的是「這個判定不是種子運氣」，
+不是「這個判定沒有問題」。結論仍是需要裁決，因此**未凍結**。
+
+### 五個必須在 first access 之前處理的發現
+
+**1. Ambient 不是與 active pass 無關 —— stage 順序因此不成立。**
+CAL-PREREG-002 stage 1 寫「Ambient 只由 AMBIENT_ONLY pass 取得，因此它與
+active pass 的**任何**參數無關」。那句話的證據（VCSEL 1.0→4.0 時 ambient
+完全不變）只證明了它與**VCSEL 發射參數**無關。AMBIENT_ONLY pass 是**同一個
+場景**，室內光照樣打在箔片、瓶壁與介質上。實測 scene/media 參數在 ambient
+通道上的槓桿是 **69–129 σ_MC**，而且對多數參數而言那是它們**最大**的通道。
+先擬合並凍結 ambient 映射，等於把一個增益釘在一個後面還會被移動兩個數量級
+（以其自身雜訊為單位）的觀測量上。
+
+**2. Signal 同樣受後續 scene 參數強烈影響，只是被巨大的雜訊底線蓋住了。**
+（本輪依裁決要求補做的稽核。）以**相對變化**看，scene 參數掃過登記範圍時
+signal median 變動 `sensor.fov_deg` **1349.7%**、`medium.bubble_density`
+**1119.1%**、`_FOIL_GAP_TO_BOTTLE_RATIO` 330.8%、`light.cutoff_angle_deg`
+191.4%、`medium.turbidity` 171.5%、`_FOIL_SURFACE_ALPHA` 91.3%、
+`_FOIL_REFLECTANCE_940NM` 85.9%。但換算成 σ_MC 只有 0.0006–16.6，因為
+
+| 通道 | σ_MC / |值| |
+|---|---|
+| `distance_mm` median | **4.6e-4** |
+| `ambient_rate_mcps` median | 1.1e-2 |
+| `sigma_like` median | 0.12 – 0.52 |
+| **`signal_rate_mcps` median** | **0.35 – 1.25** |
+
+也就是說在凍結的 spp = 16 下，**Signal 觀測量的種子間離散度與它自己的值同量級**。
+兩件事同時成立：順序必須改，而且 Signal 通道在目前取樣密度下幾乎不可用。
+
+**3. 入場判定會靠「該階段從不最佳化的通道」發出入場券。**
+`_FOIL_SIZE_TO_DIAMETER_RATIO` 以 Water-filled 的 ambient 取得槓桿 **101.7**
+而 ADMITTED，但它在 stage 3 自己宣告的通道（Empty 的 distance/signal/sigma）
+上只有 **0.0006**。預註冊的字面規則是「對全部 observable 取 max」，
+所以這個判定合乎規則 —— 規則本身要修。
+
+**4. CG-5：三組 density ↔ albedo 近乎精確簡併**（CG-1~CG-4 都沒涵蓋）。
+
+| 對 | \|cos\| |
+|---|---|
+| `medium.bubble_density` ↔ `_ALBEDO_BY_PRESET.bubbly` | **0.9995** |
+| `medium.turbidity` ↔ `_ALBEDO_BY_PRESET.water` | **0.9987** |
+| `medium.mist_density` ↔ `_ALBEDO_BY_PRESET.misty` | **0.9980** |
+
+另有 stage 3 內的四對（三個 `_FOIL_*` 互相 0.9945–0.9986、
+`_BOTTLE_SURFACE_ALPHA` ↔ `light.cutoff_angle_deg` 0.9948）與 stage 5 的
+`sigma_multipath_weight` ↔ `sigma_snr_weight` 0.9959。**只回報，未改參數群。**
+
+**5. 兩個登記界線在物理上不可行。**
+`ambient_jitter_relative` 下界 0.0 被 `map_ambient_rate` 的 `jitter <= 0`
+斷言拒絕；`noise_relative_sigma` 上界 0.5 使距離映射得到 **−4.915 mm**。
+兩個界線都在 `initial_simulation.lock` 的 `parameter_ranges` 內，屬勘誤禁區，
+**不得縮小**。
+
+### σ_MC ≈ 0 的處理
+
+協定對此**沒有規定**，這本身是缺口。實作一律**不回傳 inf**：本輪
+`sigma_mc_degenerate_observables` 為**空**，32 個 observable 的 σ_MC 全部大於 0，
+因此該分支未被觸發。缺口已回報並在 AMD-004 補上三個決定性分支（NOTE-044）。
+
+### 成本：與宣稱相差 30–42 倍
+
+CAL-PREREG-002 記「每次評估約 2 秒 → 116,352 次約 65 小時」。
+實測同一組凍結設定：孤立探針 **60.8 s/次**、stage 0 那 140 次算圖平均 **84 s/次**。
+
+| 依據 | 單次 | 116,352 次 | 相對宣稱 |
+|---|---|---|---|
+| 孤立探針 | 60.8 s | **1,966 h ≈ 82 天** | 30.2× |
+| stage 0 實跑 | 84 s | 2,715 h ≈ 113 天 | 41.8× |
+
+**未擅自調 spp / maxiter / restarts 把數字弄小** —— 那是拿實驗解析度去遷就時程。
+登記為 stage 1 的具名 blocker。
+
+---
+
+## AMD-004 —— 已擬定，**尚未凍結**（2026-08-30，NOTE-044）
+
+`configs/amendments/AMD-004.yaml` 已寫好，涵蓋八項契約變更：
+stage 重排（physical scene/media → measurement mappings）、
+入場範圍改為該階段宣告的通道、CG-5 裁決、σ_MC 三分支、
+`ambient_jitter_relative` 定義域、可行域推導規則、
+`sigma_snr_weight` 的 borderline 次級判準（S0-B1..B5，**先註冊後跑**）、
+以及 wall-clock 成本登記。
+
+**CG-5 裁決**：固定三個 albedo 為 **CONVENTION**（water 0.60 / bubbly 0.92 /
+misty 0.88），擬合三個密度。理由與 CG-1／CG-2 同一套 —— 固定**provenance
+較弱**的那一個，不是固定「比較好 fit」的那一個：albedo 在 SRC-PLAN 與
+SRC-HANDOFF 都查不到一手來源（RECONSTRUCTED），而密度被 SRC-SAI §9 明列為
+`<validation-frozen range>`，本來就是 validation 該定的量。
+搜尋空間 20 → **17** 維。
+
+> **Claim boundary**：擬合出的密度只能稱為**校準後模擬器的 effective-medium
+> 消光參數**，**不得**宣稱為真實的絕對濃度／濁度／數量密度 —— 它吸收了被固定的
+> albedo 的誤差。與 CG-1「只能宣稱 σt」是同一條界線。
+> 推翻本裁決需要 **identifiability evidence**（一個能分開密度與 albedo 的
+> observable），不是偏好。
+
+**為什麼還沒凍結**：amendment 一旦凍結即不可覆寫，而 AMD-004 的
+`changed_contracts` 描述的是 **CAL-PREREG-003 的內容**。CAL-PREREG-003 尚未
+撰寫，先凍 AMD-004 等於把一份還沒寫出來的協定的描述鎖死。
+AMD-003 → CAL-PREREG-002 的既有順序是「amendment 先凍、prereg 後凍」，
+但那次的 prereg 內容在凍 amendment 時已經定稿。
+
+---
+
 ## AMD-003 —— CAL-PREREG-001 的三項 pre-execution 缺陷（2026-08-30，NOTE-042）
 
 全部在**第一次讀取 calibration partition 之前**處理完畢。
@@ -1060,11 +1222,11 @@ first access 在 stage 1 開始，以及順序規則。**目前為 0。**
 
 ---
 
-## 已知的既有測試缺陷（**不是**本次造成）
+## ~~已知的既有測試缺陷~~ → **已修正（2026-08-30，NOTE-043）**
 
 `tests/simulation/test_simulation.py::test_surrogate_can_consume_the_rendered_transient`
-在 **LLVM 在 PATH 上時失敗**，沒有 LLVM 時則靜默 skip —— 因此一直沒被發現。
-已確認在 commit `2129153`（本輪工作之前）同樣失敗，非回歸。
+先前在 **LLVM 在 PATH 上時失敗**，沒有 LLVM 時則靜默 skip —— 因此一直沒被發現。
+已確認在 commit `2129153`（該輪工作之前）同樣失敗，非回歸。
 
 ```
 CalibrationError: leading_edge defines its detection threshold in units of the
@@ -1076,8 +1238,49 @@ Ambient 必須來自獨立 ambient pass、NOTE-037 選定的 LEADING_EDGE 門檻
 ambient 雜訊為單位 —— 測試從那兩個決策之後就沒更新過。**拒絕是正確行為，
 測試才是舊的。**
 
-> **交接提醒**：跑全套測試時請**把 LLVM 放進 PATH**，否則會有一批
-> 模擬測試靜默 skip，而 exit code 0 會讓人以為全過了。
+### 修法：接上本來就已經存在的 ambient pass
+
+`render_transient()` 從 NOTE-034 起就**已經**把 ambient pass 寫進 manifest 的
+`outputs.optical_transient_ambient`，只是這個測試沒有去讀它。因此修正是把
+既有產物接上，**production surrogate 契約一個字都沒有放寬，也沒有恢復
+任何 fallback**：
+
+```python
+ambient = np.load(outputs["optical_transient_ambient"])
+observables = surrogate.observe(transient, axis, ambient_transient=ambient)
+recording = TemporalModel(surrogate).generate_recording(..., ambient_transient=ambient)
+```
+
+另新增**成對測試** `test_the_production_surrogate_contract_still_refuses_an_active_only_call`：
+拿掉 ambient pass 必須仍然拋出 `CalibrationError`。少了它，「修好測試」與
+「放寬 production 契約」在測試結果上長得一模一樣 —— 兩者都會讓上一條變綠。
+
+### 假綠燈已關閉：skip 現在可以被強制為 fail
+
+**問題不在於這個測試錯了，而在於它錯了整整一輪都沒有人看得到。**
+LLVM 不在 PATH 上時該檔全部算圖測試靜默 skip，pytest 的 exit code 仍是 0，
+於是「測試沒過」與「測試沒跑」在判定上完全相同。
+
+新增環境變數 `PCMEF_REQUIRE_SIMULATION=1`：設定後，缺相依不再是 skip
+而是**明確失敗**，訊息直接指出 drjit 執行期動態載入 `LLVM-C.dll` 而套件不內含。
+實測兩側都確認過，不是宣稱：
+
+| 情境 | 範圍 | 結果 | exit code |
+|---|---|---|---|
+| LLVM 在 PATH，`PCMEF_REQUIRE_SIMULATION=1` | 全套 | **1681 passed，0 failed，0 skipped** | 0 |
+| LLVM 在 PATH，`PCMEF_REQUIRE_SIMULATION=1` | `test_simulation.py` | 25 passed | 0 |
+| LLVM **不在** PATH，`PCMEF_REQUIRE_SIMULATION=1` | `test_simulation.py` | **1 failed** + 11 skipped，訊息具名指出缺 `LLVM-C.dll` | **1** |
+
+也就是說**修正後不再存在「一邊 fail、一邊靜默 skip」的不對稱**：
+兩側現在是 pass 與 explicit-fail，而不是 fail 與 silence。
+
+> **交接提醒**：跑全套測試時請**把 LLVM 放進 PATH 並設
+> `PCMEF_REQUIRE_SIMULATION=1`**。
+> ```powershell
+> $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+> $env:PCMEF_REQUIRE_SIMULATION = "1"
+> py -3.10 -m pytest
+> ```
 
 ---
 

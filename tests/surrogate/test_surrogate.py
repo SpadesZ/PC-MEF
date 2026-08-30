@@ -237,18 +237,49 @@ def test_ambient_must_jitter_between_acquisitions():
     assert np.std(samples) > 0
 
 
-def test_zero_ambient_jitter_is_refused():
-    calib = SurrogateCalibration(
+def _with_jitter(value: float) -> SurrogateCalibration:
+    return SurrogateCalibration(
         **{
             **{k: v for k, v in vars(PLACEHOLDER_SMOKE_CALIBRATION).items()
                if k not in ("ambient_jitter_relative", "analysis")},
-            "ambient_jitter_relative": CalibratedScale(0.0, placeholder=True),
+            "ambient_jitter_relative": CalibratedScale(value, placeholder=True),
             "analysis": dict(PLACEHOLDER_SMOKE_CALIBRATION.analysis),
         }
     )
-    observables = extract_observables(_toy_transient(), _time_axis())
-    with pytest.raises(CalibrationError, match="forbidden surrogate behaviour"):
-        map_ambient_rate(observables, calib, _rng(6))
+
+
+def test_negative_ambient_jitter_is_refused():
+    """負的相對抖動沒有物理讀法（AMD-004 之後這是唯一被拒的情況）。"""
+    observables = extract_observables(
+        _toy_transient(), _time_axis(), ambient_transient=_ambient_pass()
+    )
+    with pytest.raises(CalibrationError, match="must not be negative"):
+        map_ambient_rate(observables, _with_jitter(-0.01), _rng(6))
+
+
+def test_zero_ambient_jitter_is_deterministic_rather_than_refused():
+    """AMD-004（NOTE-044）：0.0 是已凍結登記範圍的下界，必須算得出來。
+
+    先前 `jitter <= 0` 讓 stage 0 在原理上無法評估自己的下界，而那個下界
+    寫在 `initial_simulation.lock` 的 parameter_ranges 裡，屬勘誤禁區、
+    不可更改。「常數 Ambient 是假訊號」這條顧慮沒有消失，改由校準目標
+    函數（分佈 W1）承擔 —— 真實 Ambient 的離散度不為零，jitter -> 0 會讓
+    ambient 那幾項的 W1 變大而被 optimizer 自己排除。
+    """
+    observables = extract_observables(
+        _toy_transient(), _time_axis(), ambient_transient=_ambient_pass()
+    )
+    calib = _with_jitter(0.0)
+    samples = [map_ambient_rate(observables, calib, _rng(6)) for _ in range(5)]
+    assert len(set(samples)) == 1, "zero jitter must be exactly deterministic"
+    assert samples[0] > 0
+
+    # 而且不得消耗亂數：否則同一組種子在 jitter=0 與 jitter>0 之間會走到
+    # 不同的亂數位置，同階段評估就不再共用隨機數（CRN 失效）。
+    rng = _rng(6)
+    map_ambient_rate(observables, calib, rng)
+    untouched = _rng(6)
+    assert rng.normal() == untouched.normal()
 
 
 def test_sigma_grows_with_width_and_with_multipath():

@@ -1,0 +1,407 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 的 amendment freeze 讀取，寫成
+#         freeze/amendments/AMD-004.amendment.json；其 payload_hash 進
+#         CAL-PREREG-003 的 amendments 區塊。
+# 檔案路徑: configs/amendments/AMD-004.yaml
+# 產生時間: 2026-08-30 03:10 +08:00
+# 版本: v0.1.0
+# 功能說明: 記錄 stage 0 首次實測後暴露的五項 pre-execution 缺陷、各自的裁決，
+#           以及 CG-5 這組新簡併的 gauge 選擇與其 claim boundary。
+# 模組定位: AMD-004 的**輸入規格**。凍結後的權威記錄是
+#           freeze/amendments/AMD-004.amendment.json；本檔留在版控是為了
+#           讓修訂內容可被 review，而不是被 CLI 參數帶過。
+# 主要責任:
+#   1. 逐項寫出被修改的契約（before / after）
+#   2. 記下修訂當下的前提證據，特別是兩個 access count 與 stage 0 未凍結
+#   3. 說明 CG-5 為何固定 albedo 而非固定密度，以及由此產生的 claim boundary
+#   4. 列出本次修訂**沒有**改變的不變式
+# 維護提醒:
+#   - 不得在 AMD-004 凍結後修改本檔；要再改就開 AMD-005。
+#   - 不得把 precondition_evidence 的 access count 寫成「應該是 0」；
+#     那兩個數字必須是凍結當下實際讀到的值，它們是本記錄唯一能證明
+#     「不是看到擬合結果才改規則」的東西。
+#   - 不得藉本修訂放寬 initial_simulation.lock 的 parameter_ranges；
+#     可行域是**導出的子集**，凍結的登記範圍一個位元都不動。
+#   - v0.1.0 新增：首版（NOTE-044）。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-004.yaml
+#   - py -3.10 -m pytest tests/unit/test_calibration_stage0.py -v
+# ------------------------------------------------------------
+
+amendment_id: AMD-004
+title: >
+  Reorder the calibration stages so that physical scene and media are fitted
+  before any measurement mapping is frozen; rule CG-5 (density/albedo
+  near-degeneracy); replace the sigma_MC-zero and infeasible-bound cases with
+  deterministic preregistered branches; and record that the measured
+  wall-clock cost of the frozen protocol is about 30x its stated estimate
+
+supersedes: >
+  configs/calibration_preregistration.yaml v0.2.0
+  (protocol hash c6a0de86e866cc0dbd426e77fe407d9659f46fc8888f2955e02820abd6a2316d,
+  frozen as CAL-PREREG-002 record hash
+  e7e2a298cfa364eb210ac56a414d72183e33a7f4b6974867fe06cb20482db99e)
+
+authority: >
+  researcher decision under the preregistration's own amendment clause, taken
+  after stage 0 was executed as a simulation-only probe and before any
+  calibration partition value was read. Stage 0 was NOT frozen: its outcome
+  was STAGE0_ADJUDICATION_REQUIRED, which is the state this amendment
+  adjudicates.
+
+changed_contracts:
+
+  calibration_preregistration.stagewise.order:
+    before: >
+      1 AMBIENT (mapping) -> 2 SIGNAL_SCALE (mapping) ->
+      3 GEOMETRY_SURFACE_FOIL (scene) -> 4 PARTICIPATING_MEDIA (scene) ->
+      5 SENSOR_SURROGATE (mapping). Stage 1's why_first claimed the Ambient
+      stage "has no parameter in common with the other four stages, so doing
+      it first cannot be overturned later".
+    after: >
+      1 SCENE_GEOMETRY_SURFACE_FOIL -> 2 SCENE_PARTICIPATING_MEDIA ->
+      3 MAPPING_AMBIENT -> 4 MAPPING_SIGNAL -> 5 MAPPING_SIGMA.
+      Governing principle: physical scene and media first, final measurement
+      mappings last. A mapping gain may not be fitted and frozen while a
+      later stage can still move the observable it was fitted against.
+
+  calibration_preregistration.stagewise.AMBIENT.identifiability:
+    before: >
+      "Ambient is obtained only from the AMBIENT_ONLY pass (VCSEL off,
+      NOTE-034), therefore it is independent of ANY parameter of the active
+      pass." Evidence cited: irradiance 1.0 -> 4.0 leaves ambient at
+      3.603355 -> 3.603355.
+    after: >
+      The claim is corrected to its measured scope: Ambient is independent of
+      the VCSEL EMISSION PARAMETERS, not of the scene. The AMBIENT_ONLY pass
+      keeps the identical geometry, so the room light illuminates the same
+      foil, bottle wall and participating media. Measured in stage 0 at the
+      frozen settings, scene and media parameters move the ambient channel by
+      69-129 sigma_MC, which is LARGER than their effect on any other channel:
+      _FOIL_SURFACE_ALPHA 112.3, _FOIL_SIZE_TO_DIAMETER_RATIO 101.7,
+      _FOIL_REFLECTANCE_940NM 69.43, _FOIL_GAP_TO_BOTTLE_RATIO 108.7,
+      medium.bubble_density 129.1, medium.turbidity 93.56,
+      medium.mist_density 92.33. Fitting and freezing the ambient mapping
+      first therefore pins a gain against an observable that stages 1-2 then
+      move by up to two orders of magnitude of its own noise floor.
+
+  calibration_preregistration.stagewise.SIGNAL_SCALE.identifiability:
+    before: >
+      signal_energy_to_mcps is a post-hoc unit conversion applied after the
+      estimator, so it is determined by the class-pooled signal location.
+      Only the three foil amplitude parameters were named as an approximate
+      residual confound.
+    after: >
+      Audited in stage 0 as required. The Signal channel is affected by later
+      scene parameters at least as strongly as Ambient, and the effect was
+      previously invisible because it is expressed relative to an enormous
+      Monte-Carlo noise floor. Measured RELATIVE shift of the signal median
+      across the registered range: sensor.fov_deg 1349.7%,
+      medium.bubble_density 1119.1%, _FOIL_GAP_TO_BOTTLE_RATIO 330.8%,
+      light.cutoff_angle_deg 191.4%, medium.turbidity 171.5%,
+      _FOIL_SURFACE_ALPHA 91.3%, _FOIL_REFLECTANCE_940NM 85.9%. The same
+      sweeps score only 0.0006-16.6 in sigma_MC units because
+      sigma_MC/|value| for signal_rate_mcps is 0.35-1.25 at the frozen
+      spp = 16, versus 4.6e-4 for distance_mm and about 1.1e-2 for
+      ambient_rate_mcps. Conclusion: the Signal mapping must also be fitted
+      last, and the signal channel's noise floor is recorded as an open
+      finding (see evaluation_budget.wall_clock).
+
+  calibration_preregistration.stage_0.admission_threshold.scope:
+    before: >
+      max over EVERY observable: max_o leverage_sim(p, o) >= K admits p.
+    after: >
+      max over the observables that p's OWN STAGE declares it optimises.
+      Both numbers are recorded (max_leverage and max_leverage_declared).
+      Reason: under the previous rule a parameter could be admitted on the
+      strength of a channel its stage never minimises. Measured example at
+      the frozen settings: _FOIL_SIZE_TO_DIAMETER_RATIO was ADMITTED at
+      leverage 101.7 via Water-filled ambient, while its leverage on stage 3's
+      own declared channels (Empty distance / signal / sigma_like) is 0.0006.
+      Admitting it would have put a parameter into a stage whose objective
+      terms cannot see it -- exactly the "fitted value decided by noise"
+      failure stage 0 exists to prevent.
+
+  calibration_preregistration.forbidden_parameters.gauge_fixed.CG-5:
+    before: >
+      (did not exist) The registry's CG-1..CG-4 do not cover the relationship
+      between each class's extinction density and its single-scattering
+      albedo. CAL-PREREG-002 stage 4 argued only that the three CLASSES do not
+      cross-couple; it made no claim that density and albedo are separable
+      WITHIN a class.
+    after: >
+      New confounded group CG-5_effective_medium. Measured within-stage
+      cosine of the sigma_MC-normalised response vectors at the frozen
+      settings: medium.bubble_density <-> _ALBEDO_BY_PRESET.bubbly 0.9995,
+      medium.turbidity <-> _ALBEDO_BY_PRESET.water 0.9987,
+      medium.mist_density <-> _ALBEDO_BY_PRESET.misty 0.9980; all three
+      exceed the preregistered 0.98 threshold. Ruling, by the same rule used
+      for CG-1 and CG-2 (fix the member with the weaker provenance, not the
+      one that fits better): the three albedos are fixed as CONVENTION at
+      their frozen initial values (water 0.60, bubbly 0.92, misty 0.88) and
+      the three densities are fitted. The search space drops from 20 to 17
+      dimensions.
+      CLAIM BOUNDARY: a fitted density may only be reported as an
+      EFFECTIVE-MEDIUM extinction parameter of the calibrated simulator. It
+      may not be reported as a true absolute concentration, turbidity or
+      number density, because the value absorbs whatever the fixed albedo got
+      wrong. This mirrors the CG-1 boundary, under which only sigma_t is
+      claimable.
+
+  calibration_preregistration.stage_0.sigma_mc_degeneracy:
+    before: >
+      sigma_MC <= 0 made the leverage "undefined" and the parameter
+      UNDETERMINED. One branch covered two opposite situations.
+    after: >
+      Three deterministic branches with a preregistered relative floor
+      SIGMA_MC_RELATIVE_FLOOR = 1e-12 applied to the observable's own scale:
+        RATIO                  sigma_MC > floor            -> |delta o| / sigma_MC
+        INERT                  sigma_MC <= floor and |delta o| <= floor -> exactly 0.0
+        DETERMINISTIC_RESPONSE sigma_MC <= floor and |delta o| >  floor -> named
+                               branch, outcome ADMITTED_DETERMINISTIC
+      No branch returns infinity and none invents a large number. INERT means
+      the observable carries no information about the parameter, which is a
+      leverage of exactly zero, not an unknown. DETERMINISTIC_RESPONSE means a
+      noiseless observable that nevertheless moves, which is the strongest
+      possible identifiability evidence and is recorded under its own name so
+      it can be reviewed rather than hidden inside an infinity.
+
+  surrogate.ambient.map_ambient_rate.jitter_domain:
+    before: >
+      `if jitter <= 0: raise CalibrationError(...)`, justified as SRC-SAI §10's
+      ban on a constant per-class ambient rate.
+    after: >
+      `if jitter < 0: raise`. Zero jitter is permitted and is exactly
+      deterministic; it also consumes no random draw, so common random numbers
+      remain aligned between jitter = 0 and jitter > 0.
+      Reason: 0.0 is the LOWER BOUND of the frozen registered range
+      [0.0, 0.5] in initial_simulation.lock, and parameter_ranges sits inside
+      the errata forbidden zone. The assertion therefore made stage 0
+      incapable, in principle, of evaluating a bound that cannot be changed.
+      The original concern is not discarded: a constant ambient rate is now
+      excluded by the objective itself, since J compares whole distributions
+      by W1 and the real Ambient has non-zero dispersion, so jitter -> 0
+      increases the ambient terms and the optimizer rejects it. A distribution
+      distance is a more precise guard than an assertion that also blocks a
+      legal bound.
+
+  calibration_preregistration.bounds.physical_feasibility:
+    before: >
+      (did not exist) out_of_bounds_policy covered points OUTSIDE the
+      registered range. Nothing covered a registered bound at which the
+      simulator cannot produce a physically admissible result.
+    after: >
+      A preregistered, simulation-only feasibility rule. A value is FEASIBLE
+      when all four classes, at the frozen initial scene and the frozen CRN
+      seeds, produce finite and physically admissible observables. The
+      CALIBRATION FEASIBLE DOMAIN of a parameter is derived by bisection from
+      the frozen initial value towards the offending bound, with fixed
+      settings (20 steps, relative tolerance 1e-3), always taking the feasible
+      side. The derived domain is by construction a SUBSET of the registered
+      range; the frozen parameter_ranges are not modified, and hand-narrowing
+      or clamping remains forbidden. Measured trigger at the frozen settings:
+      noise_relative_sigma at its upper bound 0.5 drives the distance mapping
+      to -4.915 mm, which map_distance correctly refuses.
+
+  calibration_preregistration.stagewise.MAPPING_SIGMA.sigma_snr_weight:
+    before: >
+      (did not exist) sigma_snr_weight measured leverage 17.16, inside the
+      preregistered borderline band [5, 20], and CAL-PREREG-002 offers no
+      resolution other than halting.
+    after: >
+      A SECONDARY CRITERION, preregistered here BEFORE it is run and
+      simulation-only, decides borderline members of the sigma stage. It is
+      recorded as a fixed conjunction so that a known borderline value cannot
+      be waved through:
+        S0-B1 channel dominance   the parameter's largest leverage must fall
+                                  on a sigma_like observable
+        S0-B2 monotonicity        the observable response must be monotone
+                                  across five equally spaced points spanning
+                                  the registered range
+        S0-B3 seed stability      the sign and order of magnitude of the
+                                  response must hold on the independent
+                                  verification seed set {2001, 2002, 2042, 2004}
+        S0-B4 collinearity        |cos| with every other admitted sigma-stage
+                                  parameter must be below 0.98
+        S0-B5 no unphysical side effect
+                                  no evaluation on the five-point grid may
+                                  produce a negative or non-finite observable
+      ADMIT only if S0-B1..S0-B5 all pass; otherwise GAUGE_FIX. The measured
+      value 17.16 is explicitly NOT a reason to admit, and the criterion may
+      not be edited after it has been run.
+
+  calibration_preregistration.evaluation_budget.wall_clock:
+    before: >
+      "about 2 seconds per evaluation (64x64, spp=16, 128 bins, four classes,
+      two passes each)", giving about 65 hours single-threaded for the
+      116,352 evaluations that AMD-003 derived.
+    after: >
+      RECORDED AS AN OPEN FINDING, NOT SILENTLY FIXED. Measured on this
+      machine at exactly the frozen settings: one four-class evaluation costs
+      60.8 s in an isolated probe, and 84 s averaged over the 140 scenario
+      renders of the stage 0 run. The stated 2 s is therefore understated by
+      about 30x, and the real single-threaded cost of the frozen budget is
+      about 1,970 hours (82 days), not 65 hours. This amendment does NOT
+      change spp, maxiter, popsize or restarts to make the number smaller:
+      that would be choosing the experiment's resolution to fit the schedule.
+      It is registered as a named blocker that must be resolved by an explicit
+      decision before stage 1 begins.
+
+rationale: >
+  ## Why the stage order had to change before any real data was read
+
+  CAL-PREREG-002 ordered the stages so that the two cheapest, most obviously
+  identifiable mappings came first. The justification was structural: stage 1
+  claimed Ambient is "independent of any parameter of the active pass",
+  supported by a measurement in which the VCSEL power was changed by 4x and
+  the ambient reading did not move at all.
+
+  That measurement is correct and it proves what it was designed to prove:
+  Ambient does not depend on the VCSEL. It does not, however, prove the
+  much broader claim that was written down, because the AMBIENT_ONLY pass is
+  the SAME SCENE with a different light source. Room light still reaches the
+  sensor by reflecting off the foil, the bottle wall and the participating
+  medium. Every geometry and media parameter therefore moves Ambient.
+
+  Stage 0 measured exactly how much, in units of the simulator's own
+  seed-to-seed noise: 69 to 129 sigma_MC. For most of those parameters the
+  ambient channel is the LARGEST response they have. Under the old order,
+  stage 1 would have fitted ambient_energy_to_mcps against that channel and
+  frozen it, and stages 3 and 4 would then have moved the same channel by up
+  to 129 noise units. The regression guard would eventually have flagged
+  SIDE_EFFECT_REGRESSION, but only after stage 3 had spent 38,784 evaluations,
+  and the recorded conclusion would have been "the scene stage broke the
+  ambient fit" rather than "the ordering was wrong".
+
+  The audit that this amendment required for the Signal channel found the same
+  disease with an additional complication. In relative terms the scene moves
+  Signal far more violently than it moves Ambient -- up to 1350% across a
+  registered range -- but in sigma_MC units it looks negligible, because the
+  Signal observable's own Monte-Carlo noise floor at spp = 16 is 35% to 125%
+  of its value. Both facts matter and both are recorded: the ordering fix is
+  necessary, and the Signal channel is close to unusable at the frozen
+  sampling density.
+
+  The new order follows one principle: physical scene and media first, final
+  measurement mappings last. A mapping gain is fitted only once nothing
+  downstream can still move the observable it was fitted against.
+
+  ## Why the admission rule now uses the stage's own declared observables
+
+  The previous rule -- max over every observable -- is what let
+  _FOIL_SIZE_TO_DIAMETER_RATIO pass at 101.7 on a channel (Water-filled
+  ambient) that its stage never optimises, while scoring 0.0006 on the
+  channels it does. Admission is a statement about whether the optimizer can
+  see a parameter; the optimizer only sees the terms in that stage's
+  objective. Both numbers are still recorded, so the previous rule's verdict
+  remains auditable.
+
+  ## Why CG-5 fixes the albedo and fits the density
+
+  The three pairs are near-exactly degenerate (0.9980 to 0.9995), so one
+  member of each pair must be fixed. The choice is made on provenance, not on
+  which one fits better, exactly as in CG-1 and CG-2.
+
+  The single-scattering albedo values in the registry (0.60 / 0.92 / 0.88) are
+  RECONSTRUCTED modelling assumptions with no first-hand source: nothing in
+  SRC-PLAN or SRC-HANDOFF records the albedo of the water, bubble or mist
+  preparations that produced this dataset. The densities are at least tied to
+  a physically meaningful quantity through CG-1's already-fixed reference
+  scale _SIGMA_T_REFERENCE_PER_M, and SRC-SAI §9 explicitly lists them as
+  <validation-frozen range>, i.e. as quantities validation is supposed to
+  determine. Fixing the quantity with no provenance and fitting the quantity
+  the specification expects to be determined is the same ruling CG-1 made.
+
+  The cost is stated as a claim boundary rather than left implicit: a fitted
+  density absorbs the error in the fixed albedo, so it is an effective-medium
+  extinction parameter of the calibrated simulator and nothing more. Reporting
+  it as a real concentration would be the same overreach that the CG-1
+  boundary already forbids for absolute turbidity.
+
+  Reversing this ruling requires identifiability evidence -- a measurement
+  showing an observable that separates density from albedo -- not a preference.
+
+  ## Why sigma_MC = 0 now has three branches instead of one
+
+  The single "undefined" branch conflated two opposite situations. An
+  observable with no noise and no response tells you nothing about the
+  parameter; its leverage is exactly zero and calling that "unknown" would
+  halt the flow for a case that is fully determined. An observable with no
+  noise that nevertheless moves is a perfect signal-to-noise ratio; calling
+  that "unknown" throws away the strongest evidence available. Neither may be
+  written as infinity, which is why the second case is a named outcome rather
+  than a number. The floor is relative to the observable's own scale so that
+  one rule covers channels measured in mm and in MCPS.
+
+  ## Why the wall-clock finding is recorded rather than fixed
+
+  AMD-003 corrected the evaluation COUNT and left the per-evaluation COST as
+  a stated estimate of 2 seconds. Measurement puts it at 61-84 seconds, so
+  the frozen budget is roughly 82 days rather than 65 hours. The tempting
+  repair is to lower spp, maxiter or restarts until the number looks
+  acceptable, but every one of those choices changes the experiment's
+  resolution or its search thoroughness, and choosing them by reference to a
+  schedule is not a scientific argument. It is therefore registered as a named
+  blocker for stage 1 and left for an explicit decision.
+
+precondition_evidence:
+  calibration_access_count: 0
+  heldout_access_count: 0
+  calibration_access_ledger_entries: 0
+  stage_0_frozen: false
+  stage_0_freeze_path_exists: false
+  e1_outcome_lock_exists: false
+  calibrated_simulation_lock_exists: false
+  stage_0_outcome_being_adjudicated: STAGE0_ADJUDICATION_REQUIRED
+  stage_0_report: outputs/calibration/stage_0/stage0_identifiability.json
+  stage_0_settings:
+    spp: 16
+    resolution: [64, 64]
+    temporal_bins: 128
+    n_samples_per_recording: 500
+    scenario_renders: 140
+    mitsuba: 3.8.0
+    mitransient: 1.3.0
+    estimator: leading_edge
+  why_this_is_not_post_hoc: >
+    Every number quoted in this amendment comes from a SIMULATION-ONLY probe.
+    The calibration partition has never been read (count 0, ledger empty) and
+    held-out has never been opened (count 0), so there is no fit result and no
+    real-data comparison that these rulings could have been shaped to flatter.
+    Stage 0 itself is not frozen, which is why its outcome is adjudicable at
+    all rather than settled.
+
+invariants_preserved:
+  initial_simulation_lock: >
+    Not modified. payload_hash dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335
+    still stands, including every entry of parameter_ranges. The feasible
+    domain introduced here is a DERIVED SUBSET recorded alongside the frozen
+    range, not a replacement for it.
+  parameter_registry: >
+    Not modified. parameter_set_hash
+    3bd65b50264413e6249d1d19cc900a8487673f073a4e531b3c456b760a39ff69 is
+    unchanged. CG-5 is recorded in the preregistration's gauge_fixed list,
+    exactly where CG-1/CG-2/CG-3's fixed members are already recorded, rather
+    than by editing a registry whose hash is frozen inside the lock.
+  bounds_resolution_hash: >
+    The single-path resolver from AMD-003 is unchanged. Removing the three
+    albedo dimensions changes which dimensions are resolved, so the hash will
+    change; it is recomputed and frozen into CAL-PREREG-003.
+  objective_function: >
+    Unchanged. J is still the uniformly weighted sum of 16 class x feature
+    normalised Wasserstein terms, with s_f the frozen pooled IQR of the
+    calibration split, computed once at stage 1 start.
+  estimator: >
+    Unchanged. LEADING_EDGE with detection_threshold_sigma 5.0 and
+    min_return_bins 2, as selected by the independent estimator
+    preregistration and frozen into initial_simulation.lock.
+  first_access_ordering: >
+    Unchanged and still enforced. Stage 0 must complete and freeze before the
+    first calibration access; this amendment is itself taken before that
+    access.
+  heldout_seal: >
+    Unchanged. held-out remains sealed with access_count 0 until E1 final.
+  amendment_append_only: >
+    AMD-001, AMD-002 and AMD-003 are untouched. CAL-PREREG-001 and
+    CAL-PREREG-002 remain frozen and readable; CAL-PREREG-002 becomes
+    superseded and not-to-be-executed, exactly as CAL-PREREG-001 did.

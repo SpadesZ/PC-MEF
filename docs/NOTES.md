@@ -324,6 +324,129 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-044 Ambient 抖動的下界、σ_MC 退化的三個分支，與不可行登記界線的可行域推導
+
+**決策日期**：2026-08-30
+
+**適用範圍**：`pcmef/surrogate/ambient.py` 的 `map_ambient_rate()`；
+`pcmef/experiments/calibration_stage0.py` 的 `leverage_of()`、
+`sigma_mc_floor()`、`derive_feasible_edge()`；
+`configs/amendments/AMD-004.yaml`；
+`tests/surrogate/test_surrogate.py`、`tests/unit/test_calibration_stage0.py`。
+
+**決策**：
+
+1. **`ambient_jitter_relative` 的拒絕條件由 `<= 0` 改為 `< 0`。**
+   0.0 是已凍結登記範圍 `[0.0, 0.5]` 的下界；jitter = 0 為精確決定性，
+   且**不消耗亂數**（與 signal / distance / sigma 的 `if relative_sigma > 0`
+   同一寫法），因此 CRN 在 jitter = 0 與 jitter > 0 之間仍然對齊。
+2. **σ_MC 退化改為三個決定性分支**，以相對門檻
+   `SIGMA_MC_RELATIVE_FLOOR = 1e-12` 判定：`RATIO` / `INERT`（槓桿恰為 0）/
+   `DETERMINISTIC_RESPONSE`（具名結局 `ADMITTED_DETERMINISTIC`）。
+   **任何分支都不回傳 inf，也不回傳憑空發明的大數。**
+3. **不可行的登記界線改由預註冊二分法導出可行域**（20 步、相對容忍 1e-3，
+   一律取可行側），凍結的 `parameter_ranges` 一個位元都不動。
+
+**原因**：
+
+**其一：一道斷言擋住了它自己無權更改的界線。** 原本的 `jitter <= 0` 是為了
+執行 SRC-SAI §10「不得每類一個無抖動常數」。但 0.0 寫在
+`initial_simulation.lock` 的 `parameter_ranges` 裡，而 `parameter_ranges`
+在 ERR-001 的勘誤禁區內 —— 於是 stage 0 在原理上無法評估一個它不得修改的下界。
+原顧慮沒有被丟掉，改由**目標函數**承擔：J 比的是分佈的 W1，真實 Ambient 的
+離散度不為零，jitter → 0 會讓 ambient 那幾項變差而被 optimizer 自己排除。
+用分佈距離擋，比用一道會擋住合法邊界的斷言擋更精確。
+
+**其二：一個 None 蓋住了兩件方向相反的事。** 先前 σ_MC ≤ 0 一律回傳 None
+並判為 UNDETERMINED。但「沒有雜訊也沒有反應」與「沒有雜訊卻會動」是相反的：
+前者的槓桿**恰為 0**（這個 observable 對該參數毫無資訊，是完全確定的事實，
+不該讓流程停下來等裁決），後者的訊噪比**發散**（是最強的可辨識證據）。
+兩者都不得寫成 inf —— 寫成 inf 會讓一個沒有雜訊參考的量自動取得入場券。
+因此第二種給一個**具名結局**而不是一個數字。
+
+**其三：協定對「登記界線本身不可行」沒有規定。** 實測
+`noise_relative_sigma` 在上界 0.5 使距離映射得到 −4.915 mm，`map_distance`
+正確拒絕。既不能改凍結界線，也不能 clamp（clamp 會讓最佳點落在邊界上而看不出
+它其實想往外走，`out_of_bounds_policy` 已明令禁止），唯一不越權的做法是
+**由事前固定的規則導出**可行子域並連同規則一起記錄。二分法的起點、步數與
+容忍值全部事前固定，且一律取可行側，因此導出的域必為登記域的子集 ——
+它不是「把界線縮到好看為止」。
+
+**驗證**：
+
+```
+tests/surrogate/test_surrogate.py::test_negative_ambient_jitter_is_refused
+tests/surrogate/test_surrogate.py::test_zero_ambient_jitter_is_deterministic_rather_than_refused
+tests/unit/test_calibration_stage0.py::test_leverage_never_returns_infinity_for_any_input
+tests/unit/test_calibration_stage0.py::test_inert_and_deterministic_response_are_not_conflated
+tests/unit/test_calibration_stage0.py::test_the_derived_domain_is_always_a_subset_of_the_registered_range
+```
+
+**維護邊界**：本條的三項改動全部屬於 **AMD-004**。在 AMD-004 與
+CAL-PREREG-003 都凍結**之前**，`execute_stage0()` 會拒絕執行，
+因此這些語意不會在宣稱 CAL-PREREG-002 的情況下被跑出來。
+
+---
+
+## NOTE-043 stage 0 的 observable 必須含離散度，且入場判定不得靠別的階段的通道
+
+**決策日期**：2026-08-30
+
+**適用範圍**：`pcmef/experiments/calibration_stage0.py`（新增）、
+`pcmef/experiments/calibration_stage0_freeze.py`（新增）、
+`pcmef/cli.py` 的 `calibration stage0`；
+`tests/simulation/test_simulation.py`；`tests/unit/test_calibration_stage0.py`。
+
+**決策**：
+
+1. stage 0 的 observable 取 **4 類 × 4 特徵 × 2 統計量（median、IQR）= 32 項**，
+   `IQR` **必須**在內。
+2. 每個參數同時記錄 `max_leverage`（預註冊字面規則：對全部 observable 取 max）
+   與 `max_leverage_declared`（限制在該參數**自己階段宣告要最佳化**的通道上）。
+3. `tests/simulation/test_simulation.py` 的 surrogate 整合測試改餵 ambient pass，
+   並新增成對測試確認只餵 active pass 仍被拒；另新增
+   `PCMEF_REQUIRE_SIMULATION=1` 把缺 LLVM 的靜默 skip 變成失敗。
+
+**原因**：
+
+**其一：只用 median 會讓兩個參數在建構上不可辨識。** CAL-PREREG-002 stage 1
+的可辨識性論證正是「兩個參數、兩個互相獨立的統計量」——
+`ambient_energy_to_mcps` 只移動位置、`ambient_jitter_relative` 只改變離散度。
+若 observable 只取 median，後者的槓桿**必然**接近 0 而被自動 gauge-fix，
+那會與預註冊自己寫下的論證直接矛盾。
+
+**其二：對全部 observable 取 max，會讓參數靠「自己階段從不最佳化的通道」
+拿到入場券。** 實測：`_FOIL_SIZE_TO_DIAMETER_RATIO` 以 Water-filled 的
+ambient 取得槓桿 **101.7** 而被 ADMITTED，但它在 stage 3 自己宣告的通道
+（Empty 的 distance / signal / sigma_like）上只有 **0.0006**。
+入場的意思是「optimizer 看得見這個參數」，而 optimizer 只看得見該階段目標
+函數裡的項。兩個數字都記錄，因此舊規則的判定仍然可稽核。
+
+**其三：假綠燈是這一輪最貴的缺陷。**
+`test_surrogate_can_consume_the_rendered_transient` 從 NOTE-034／NOTE-037
+之後就一直用舊契約，**LLVM 在 PATH 上時失敗、不在時靜默 skip**，
+於是「測試沒過」與「測試沒跑」在 exit code 上完全相同，整整一輪沒有人看見。
+修法是把 `render_transient()` 本來就已經寫進 manifest 的
+`optical_transient_ambient` 接上，**production 契約一個字都沒有放寬**；
+另加成對測試，讓「放寬契約」與「修好測試」在測試結果上分得開。
+
+**驗證**：
+
+```
+$env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+$env:PCMEF_REQUIRE_SIMULATION = "1"
+py -3.10 -m pytest            -> 1681 passed, 0 failed, 0 skipped
+（不設 LLVM 時：1 failed + 11 skipped，exit 1，訊息具名指出缺 LLVM-C.dll）
+py -3.10 -m pytest tests/unit/test_calibration_stage0.py -v
+py -3.10 -m pcmef.cli calibration stage0 --out outputs/calibration/stage_0
+```
+
+**維護邊界**：不得為了讓整合測試變綠而讓 surrogate 接受只有 active pass 的
+呼叫；`test_the_production_surrogate_contract_still_refuses_an_active_only_call`
+就是為了讓那種「修法」留下痕跡。
+
+---
+
 ## NOTE-042 CAL-PREREG-001 的三項 pre-execution 缺陷與 AMD-003 的裁決
 
 **決策日期**：2026-08-30
