@@ -127,7 +127,12 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~lock 的 environment 記錯~~ | — | **已解除**：ERR-001 勘誤層（NOTE-040） |
 | ~~沒有校準目標規格~~ | — | **已解除**：CAL-PREREG-001 已凍結（NOTE-041） |
 
-**目前的關鍵路徑是 AMD-004 → CAL-PREREG-003 → 重跑並凍結 stage 0。**
+**目前的關鍵路徑是「stage 1 的兩道守衛都破了」的裁決**（見下方 Formal
+Calibration 專節）。stage 0 已凍結、s_f 已凍結、正式校準已執行，
+但它在 stage 1 依預註冊規則停下：`SEED_OVERFIT` 且 `SIDE_EFFECT_REGRESSION`。
+往下走需要 amendment，不是重跑。
+
+**歷史關鍵路徑（已完成）：AMD-004 → CAL-PREREG-003 → 重跑並凍結 stage 0。**
 `locks status` 顯示 22 個 lock 已凍 2 個（`real_split_policy` /
 `initial_simulation`）、`calibrated_simulation` 與 `metric_config` 為 pending、
 其餘 18 個 BLOCKED。
@@ -1009,6 +1014,84 @@ float。**該值已凍進 lock，且 `parameter_ranges` 在勘誤的禁區內**�
 - 未讀取 calibration partition 的任何數值（`raw_data_hash` 留待執行當下計算）
 - 未開啟 held-out（access count 仍為 0）
 - 未凍結 `calibrated_simulation` / `metric_config` / `e1_scientific_rule`
+
+---
+
+## Formal Calibration —— 已執行，停在 stage 1（2026-08-30）
+
+**五個階段只跑完第一個就依凍結規則停下。這不是失敗，是預註冊的守衛在做它該做的事。**
+
+```
+outputs/calibration/calibration_report.json
+code_version c1f6f9d   runner calibration_formal v0.1.0
+prereg CAL-PREREG-003 fb9638d7…   stage0 CAL-STAGE0-001 810222 80…
+s_f CAL-SF-001 8e71171c…（載入，未重算）
+raw_calibration_data_hash 926eef72…（每次載入重算並斷言相符）
+calibration access ledger 3        heldout access 0
+wall clock 0.22 h                  720 / 4848 次評估，0 次失敗
+```
+
+### stage 1 `SCENE_GEOMETRY_SURFACE_FOIL`：optimizer 沒問題，結果不可用
+
+optimizer 本身乾淨：三次重啟**全部收斂**到 `sensor.fov_deg` ≈ 57.79，
+目標值相對全距 1.6e-4（遠低於 0.05，非 MULTIMODAL），失敗評估 0 次，
+只用掉 720 次預算中的 4848 次。平手規則正確地在三個統計上分不出來的解裡
+取了離凍結初值最近的那一個（restart 2）。
+
+**但兩道凍結守衛同時破了：**
+
+| 守衛 | 量到的值 | 容忍度 | 判定 |
+|---|---|---|---|
+| `verification_seeds` | 相對劣化 **8.26**（826%） | 0.10 | **SEED_OVERFIT** |
+| `regression_guard` | 未最佳化項 NW 總和 **+28.5%** | 0.10 | **SIDE_EFFECT_REGRESSION** |
+
+`outcome` 欄只有一格，記的是 `SEED_OVERFIT`；另一道在
+`stage_summary.regression_guard.violated = true`。
+（v0.1.0 的 `flags` 當時沒有兩道都記，事後已修，但**不重跑**——
+artifact 就是它產生時的樣子，改它比留著一個不完整的標籤更糟。）
+
+**SEED_OVERFIT 的意思**：同一組參數下，CRN 種子給 J = 11,210，
+verification 種子給 J = 103,797。那個 94.5% 的「改善」
+（202,923 → 11,210）整個是 CRN 種子專屬的。
+
+**SIDE_EFFECT_REGRESSION 的意思**：stage 1 只擬合 Empty，代價由另外三類付：
+
+```
+Misty|signal_rate_mcps    +366%      Bubbly|signal_rate_mcps  +180%
+Bubbly|ambient_rate_mcps   +58%      Misty|ambient_rate_mcps   +24%
+```
+
+### 為什麼會這樣（診斷，不是改協定的提案）
+
+兩件已凍結的事實相乘：
+
+1. **`signal_rate_mcps` 在 spp=16 下大半是雜訊。** CAL-STAGE0-001 自己記著
+   它八組種子的 sd/mean 是 **0.24–0.67**（`distance_mm` 是 ~0.000）。
+   實測同一 fov 換種子，active cube 總能量差 2–6 倍，峰值 bin 從 5 跳到 64。
+2. **它同時把目標函數吃掉四個數量級。** `signal_energy_to_mcps` 還停在
+   placeholder 1.0 —— 那是 **stage 4** 的參數。於是 stage 1 的 J 裡
+   `Empty|signal_rate_mcps` ≈ 202,906，其餘兩項加起來 < 18。
+
+stage 1 因此在最佳化一個「它修不了、而且大半是雜訊」的通道，
+唯一能壓低它的辦法就是找一個讓模擬訊號塌掉的 fov —— 那正是種子專屬的。
+CAL-PREREG-003 stage 4 的 `known_residual_confound` already 預告了增益混淆，
+但沒有預料到它會在 stage 1 就把整個目標函數蓋掉。
+
+### 現在不得做的事
+
+- **不得凍結 `calibrated_simulation.lock`。** 只產出了 candidate
+  （`eligible_to_freeze: false`）。
+- 不得為了讓它過而放寬 tol / 容忍度 / 邊界，或改用 best-so-far。
+- 不得繼續 stage 2–5：後面每一階段的前提都是 stage 1 已經釘住場景。
+- 不得開 held-out。
+
+### 要往下走，只有 amendment 一條路
+
+候選方向（**都必須經 amendment，且都不是這次執行可以自己決定的**）：
+提高 spp 讓 signal 通道的 sigma_MC 降到可擬合、
+把 mapping 增益移到 scene 階段之前、
+或把 `signal_rate_mcps` 移出 stage 1 的 declared observables。
+三者都會改變已凍結的實驗設計。
 
 ---
 

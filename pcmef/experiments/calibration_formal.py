@@ -626,6 +626,9 @@ def run_stage(
     }
     if regression["violated"]:
         outcome = "SIDE_EFFECT_REGRESSION"
+        # `outcome` 只有一格，但兩道守衛可以同時破。把每一道都記進 flags，
+        # 否則後面覆寫掉的那一道就只剩在巢狀欄位裡，掃 outcome 的人看不到。
+        stage_flags.append("SIDE_EFFECT_REGRESSION")
 
     # -- verification seeds（每階段只用一次） --------------------------------
     evaluator.seed_mode = "VERIFICATION"
@@ -643,6 +646,7 @@ def run_stage(
         seed_check = {"status": "VERIFICATION_EVALUATION_FAILED",
                       "error": verification_record.error}
         outcome = "SEED_OVERFIT"
+        stage_flags.append("SEED_OVERFIT")
     else:
         scale = abs(objective_after) if objective_after else 1.0
         degradation = (verification_record.stage_objective - objective_after) / scale
@@ -654,6 +658,7 @@ def run_stage(
         }
         if seed_check["violated"]:
             outcome = "SEED_OVERFIT"
+            stage_flags.append("SEED_OVERFIT")
     seed_check.update(
         {
             "seeds": dict(VERIFICATION_SEEDS),
