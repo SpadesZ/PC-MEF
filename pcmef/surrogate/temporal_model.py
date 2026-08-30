@@ -157,12 +157,23 @@ class TemporalModel:
                 raise TemporalModelError(
                     "STOCHASTIC mode takes a single transient; pass one array"
                 )
-            # 每次 acquisition 都重跑一次映射：噪聲在映射層施加，
+            # 每次 acquisition 都重跑一次**映射**：噪聲在映射層施加，
             # 因此同一份 transient 會產生互不相同但同分佈的觀測。
+            #
+            # 但**物理量抽取是決定性的**：同一組 (active, ambient, axis) 不論
+            # 算幾次都得到同一個 TransientObservables，而它每次都要把整個
+            # (H,W,bins,C) cube 折疊一遍。因此在迴圈外抽一次、迴圈內只做映射
+            # —— 數學上完全等價，rng 的抽取位置與順序一個都沒有移動。
+            #
+            # **不得**把任何消耗亂數的東西提到迴圈外：noise、jitter 與所有
+            # 逐樣本擾動都必須留在 map_from_observables() 內逐筆執行。
+            # REALIZATIONS 模式**不適用**本優化：那裡每一筆是不同的 transient，
+            # 抽取本來就必須逐筆做。
+            observables = self.surrogate.observe(
+                transient, time_axis_s, ambient_transient
+            )
             rows = [
-                self.surrogate.map_single_acquisition(
-                    transient, time_axis_s, rng, ambient_transient
-                )
+                self.surrogate.map_from_observables(observables, rng)
                 for _ in range(n_samples)
             ]
 
