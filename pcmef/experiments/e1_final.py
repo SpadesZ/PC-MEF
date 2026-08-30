@@ -497,7 +497,7 @@ def run_e1_final(
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """凍結 -> 開啟 FORMAL_E1_FINAL 一次 -> 評估 -> 判定。順序不得調換。"""
-    from pcmef.core.heldout_partition import final_ids
+    from pcmef.core.heldout_partition import final_ids, resume_final_ids
     from pcmef.core.locks import LockStore
     from pcmef.experiments.calibration_identity import load_frozen_identity
     from pcmef.experiments.calibration_objective import Simulator
@@ -536,14 +536,32 @@ def run_e1_final(
     calibrated_lock_hash = store.load_hash("calibrated_simulation")
 
     # -- 開啟在後：整個研究只做這一次 ---------------------------------------
-    say("opening FORMAL_E1_FINAL (once)")
-    ids_by_class, ledger_entry = final_ids(
-        purpose=_HELDOUT_PURPOSE,
-        calibrated_lock_hash=calibrated_lock_hash,
-        code_version=code_version,
-        freeze_dir=freeze_dir,
-        repo_root=root,
+    # 若帳上已經有一次**同一身分**的最終取用（前一次執行在開啟之後、產出
+    # 結果之前崩潰），就接續它而不是再開一次。重置計數是竄改帳本，
+    # 再記一次是宣稱開了兩次；兩者都不是誠實的處置。
+    registry = json.loads(
+        (root / "data" / "splits" / "split_registry.json").read_text(encoding="utf-8")
     )
+    if int(registry["heldout_access_count"]) == 0:
+        say("opening FORMAL_E1_FINAL (once)")
+        ids_by_class, ledger_entry = final_ids(
+            purpose=_HELDOUT_PURPOSE,
+            calibrated_lock_hash=calibrated_lock_hash,
+            code_version=code_version,
+            freeze_dir=freeze_dir,
+            repo_root=root,
+        )
+    else:
+        say(
+            "FORMAL_E1_FINAL is already recorded as opened; continuing that same "
+            "access (the counter is NOT incremented)"
+        )
+        ids_by_class, ledger_entry = resume_final_ids(
+            purpose=_HELDOUT_PURPOSE,
+            calibrated_lock_hash=calibrated_lock_hash,
+            freeze_dir=freeze_dir,
+            repo_root=root,
+        )
     real_values = load_final_values(ids_by_class, source_root)
     opened = sum(len(v) for v in ids_by_class.values())
     say(f"  opened {opened} recordings; heldout_access_count is now 1")
@@ -571,7 +589,7 @@ def run_e1_final(
     )
 
     # -- 評估 --------------------------------------------------------------
-    rule_payload = store.load("e1_scientific_rule")["payload"]
+    rule_payload = store.load("e1_scientific_rule")
     scales = FeatureScales(scales=identity.s_f)
     result = E1Engine(store).evaluate(
         real_heldout=real_values,
@@ -615,10 +633,11 @@ def run_e1_final(
             "access_entry": ledger_entry,
             "heldout_access_count": 1,
             "opened_after_every_rule_was_frozen": True,
+            "resumed_a_recorded_access": bool(ledger_entry.get("resumed", False)),
         },
         "result": result.to_artifact(),
         "cells": result.to_rows(),
-        "claim_boundary": store.load("claim_boundary")["payload"],
+        "claim_boundary": store.load("claim_boundary"),
     }
     (out / "e1_final_report.json").write_text(
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True, default=float),

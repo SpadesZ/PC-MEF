@@ -589,7 +589,20 @@
   "gate": "E1-G02",
   "group_rule": "seeded_stratified_recording",
   "group_rule_evidence": "No acquisition session metadata exists in the Edge Impulse export. protected.iat spans only 46 s across all 560 samples (2026-03-15 12:21:19 to 12:22:05) whereas acquiring 560 x 41 s recordings requires 6h22m, so iat is the ingestion timestamp, not acquisition time. payload carries only device_type / interval_ms / sensors / values.",
-  "heldout_access_count": 0,
+  "heldout_access_count": 1,
+  "heldout_final_access_entries": [
+    {
+      "calibrated_simulation_lock_hash": "079b248980eaff85068be1988a50ecf56a6ae783b425c05c0147e37d3ef515d9",
+      "code_version": "86bdb2d225e368a5af7d9f06fecc8ab811509e3e",
+      "index": 1,
+      "partition": "FORMAL_E1_FINAL",
+      "partition_hash": "a78961302a7784aeaa8ab62ecef6fc389e26b56efb43034ccb4cc26d8dbdcc8c",
+      "purpose": "e1_final_evaluation",
+      "recordings": 112,
+      "set_hash": "2c9b82bb7b95c4d8564bc031ca0c56f71082a61245654ebe45a5eae223b48b17",
+      "timestamp": "2026-08-30T14:57:01.675732+00:00"
+    }
+  ],
   "heldout_real_set_hash": "8421a54ee75e0d6b8a90835c6207ef1b7c084a82dd2b2e4119e29df97d866886",
   "seed": 20260826,
   "split_unit": "recording",

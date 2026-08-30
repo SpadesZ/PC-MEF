@@ -431,3 +431,65 @@ def final_ids(
 
     ids = {c: list(v) for c, v in document["payload"]["ids"][FINAL_ROLE].items()}
     return ids, entry
+
+
+def resume_final_ids(
+    purpose: str,
+    calibrated_lock_hash: str,
+    freeze_dir: str | Path = "freeze",
+    repo_root: str | Path = ".",
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """接續一次**已經記錄在案**的最終取用，計數不再遞增。
+
+    存在的理由：最終評估在開啟資料之後、產出結果之前可能因為實作缺陷崩潰。
+    那次取用真的發生了，帳也記了，因此正確處置既不是假裝沒發生（重置計數
+    等於竄改帳本），也不是再記一次（那會宣稱開了兩次）。而是**完成**那一次
+    取用所授權的評估。
+
+    三項身分必須逐字相符才准接續：calibrated_simulation 的 lock hash、
+    partition hash 與 set hash。任何一項不同就代表這不是同一次取用 ——
+    例如模擬器在崩潰之後被重新校準過，那麼繼續下去就是拿新模型去用舊授權。
+    """
+    document = load_partition(freeze_dir, repo_root)
+    registry_path = Path(repo_root) / "data" / "splits" / "split_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    count = int(registry["heldout_access_count"])
+    if count != 1:
+        raise HeldoutPartitionError(
+            "NO_RECORDED_ACCESS_TO_RESUME",
+            f"heldout_access_count is {count}, not 1; there is no single recorded "
+            "final access to continue",
+        )
+    entries = registry.get("heldout_final_access_entries") or []
+    if len(entries) != 1:
+        raise HeldoutPartitionError(
+            "NO_RECORDED_ACCESS_TO_RESUME",
+            f"expected exactly one recorded final access entry, found {len(entries)}",
+        )
+    entry = entries[0]
+
+    expected = {
+        "calibrated_simulation_lock_hash": calibrated_lock_hash,
+        "partition_hash": document["payload_hash"],
+        "set_hash": document["payload"]["set_hashes"][FINAL_ROLE],
+        "purpose": purpose,
+    }
+    drifted = {
+        key: (entry.get(key), value)
+        for key, value in expected.items()
+        if entry.get(key) != value
+    }
+    if drifted:
+        raise HeldoutPartitionError(
+            "RESUMED_ACCESS_IDENTITY_MISMATCH",
+            "the recorded final access does not describe this evaluation: "
+            + "; ".join(
+                f"{key} recorded {was!r} but now {now!r}"
+                for key, (was, now) in sorted(drifted.items())
+            )
+            + ". Continuing would use a new model under an old authorisation.",
+        )
+
+    ids = {c: list(v) for c, v in document["payload"]["ids"][FINAL_ROLE].items()}
+    return ids, {**entry, "resumed": True}
