@@ -3,7 +3,7 @@
 #         算圖測試在缺 mitsuba/LLVM 時自動 skip；產物寫在 tmp_path。
 # 檔案路徑: tests/simulation/test_simulation.py
 # 產生時間: 2026-08-26 09:20 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 驗證場景設定會擋下未校準的介質參數進入 formal 模式，
 #           以及同一場景真的能算出 RGB 與 optical transient 且兩者共用場景識別碼。
 # 模組定位: Batch 4 的驗收測試。它不驗證物理正確性 ——
@@ -15,10 +15,16 @@
 #   4. RGB 與 transient 共用 scenario_hash（FR-005）
 #   5. transient 時間軸為 optical transient time 且與場景尺度相符
 #   6. 缺相依時 require_mitsuba 給出可行動的訊息
+#   7. surrogate 整合點必須同時餵 active 與 ambient 兩個 pass
 # 維護提醒:
 #   - 不得把算圖測試改成無條件執行；沒裝 mitsuba 的機器要能收集並通過其餘測試。
 #   - 不得放寬 formal 模式拒絕 placeholder 那條；它是介質參數未校準時
 #     唯一的自動防線。
+#   - 不得為了讓整合測試變綠而讓 surrogate 接受只有 active pass 的呼叫；
+#     成對的 test_the_production_surrogate_contract_still_refuses_an_active_only_call
+#     就是為了讓那種「修法」留下痕跡（NOTE-034、NOTE-037）。
+#   - v0.2.0 修正：整合測試改餵 ambient pass（舊契約殘留），並新增
+#     PCMEF_REQUIRE_SIMULATION 開關把缺 LLVM 的靜默 skip 變成失敗。
 #   - v0.1.0 新增：首版模擬驗收。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/simulation/test_simulation.py -v
@@ -27,6 +33,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -110,10 +117,39 @@ def _run_smoke(tmp_path: Path, scenarios: list[dict], **overrides) -> dict:
     return manifest
 
 
+SIMULATION_AVAILABLE = _mitsuba_available()
+
+#: 把「靜默跳過」變成「明確失敗」的開關。缺 LLVM-C.dll 時本檔全部算圖測試
+#: 都會 skip，而 pytest 的 exit code 仍是 0 —— 那是假綠燈：測試沒過，
+#: 只是沒跑。交接與 CI 應設 PCMEF_REQUIRE_SIMULATION=1，讓「這台機器跑不了
+#: 模擬」這件事本身以失敗浮現，而不是靠人記得去數 skip 數。
+REQUIRE_SIMULATION_ENV = "PCMEF_REQUIRE_SIMULATION"
+
 needs_mitsuba = pytest.mark.skipif(
-    not _mitsuba_available(),
+    not SIMULATION_AVAILABLE,
     reason="mitsuba/drjit LLVM backend unavailable on this machine",
 )
+
+
+def test_a_run_that_declares_the_simulation_stack_required_must_actually_have_it():
+    """`PCMEF_REQUIRE_SIMULATION=1` 時，缺相依是失敗而不是跳過。
+
+    這一條是本檔唯一**不受** needs_mitsuba 管制的算圖相關測試，因此它在
+    LLVM 缺席時仍然會跑。沒有它的話，LLVM 不在 PATH 上的那一次執行與
+    「全部通過」在 exit code 上完全相同。
+    """
+    if os.environ.get(REQUIRE_SIMULATION_ENV) != "1":
+        pytest.skip(
+            f"set {REQUIRE_SIMULATION_ENV}=1 to require the simulation stack; "
+            f"this run tolerates its absence (available={SIMULATION_AVAILABLE})"
+        )
+    assert SIMULATION_AVAILABLE, (
+        f"{REQUIRE_SIMULATION_ENV}=1 was set but mitsuba/drjit could not initialise "
+        "its LLVM backend. drjit loads LLVM-C.dll at runtime and does not ship it; "
+        r'put it on PATH first: $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH". '
+        "Without it the rendering tests skip and the run looks green while "
+        "nothing was actually exercised."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +423,12 @@ def test_surrogate_can_consume_the_rendered_transient(tmp_path):
 
     初版時間窗截斷回波，FWHM=0，Sigma 映射拒絕受理 —— 該缺陷是在這個
     整合點才被發現的，因此把它固定成測試。
+
+    NOTE(NOTE-034)、NOTE(NOTE-037): 本測試原本只餵 active pass。Ambient 改為
+    獨立 pass、LEADING_EDGE 的偵測門檻又以量到的 ambient 雜訊為單位之後，
+    只給 active 的呼叫**必須**被拒絕 —— 拒絕是正確行為，舊的是這個測試。
+    因此改為兩個 pass 一起餵；`render_transient()` 本來就已經把 ambient pass
+    寫進 manifest 的 outputs，此處只是把它接上。
     """
     from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
     from pcmef.surrogate.single_acquisition import SensorSurrogate
@@ -395,21 +437,50 @@ def test_surrogate_can_consume_the_rendered_transient(tmp_path):
     manifest = _run_smoke(tmp_path, [{"class_label": "Empty", "seed": 2, "medium": {}}])
     outputs = manifest["scenarios"][0]["transient"]["outputs"]
     transient = np.load(outputs["optical_transient"])
+    ambient = np.load(outputs["optical_transient_ambient"])
     axis = np.load(outputs["optical_transient_time_axis"])
 
     surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
-    observables = surrogate.observe(transient, axis)
+    observables = surrogate.observe(transient, axis, ambient_transient=ambient)
     assert observables.fwhm_s > 0, "a truncated window yields FWHM=0"
+    # 兩個 pass 必須落在同一組 binning，否則 Signal 與 Ambient 不可比較。
+    assert observables.ambient_energy is not None
+    assert observables.ambient_noise_per_bin is not None
 
     recording = TemporalModel(surrogate).generate_recording(
         transient, axis,
         sample_interval_s=0.082,
         sample_interval_source="edge_impulse_12.19512Hz",
         seed=1042, n_samples=64,
+        ambient_transient=ambient,
     )
     assert recording.values.shape == (64, 4)
     assert np.all(np.isfinite(recording.values))
     assert np.all(recording.values.std(axis=0) > 0)
+
+
+@needs_mitsuba
+def test_the_production_surrogate_contract_still_refuses_an_active_only_call(tmp_path):
+    """上一條的**成對測試**：把 ambient pass 拿掉必須失敗。
+
+    少了這一條，「修好測試」與「放寬 production 契約」在測試結果上長得
+    一模一樣 —— 兩者都會讓上一條變綠。這一條讓後者留下痕跡。
+    """
+    from pcmef.surrogate.calibration import (
+        CalibrationError,
+        PLACEHOLDER_SMOKE_CALIBRATION,
+    )
+    from pcmef.surrogate.single_acquisition import SensorSurrogate
+
+    manifest = _run_smoke(tmp_path, [{"class_label": "Empty", "seed": 2, "medium": {}}])
+    outputs = manifest["scenarios"][0]["transient"]["outputs"]
+    transient = np.load(outputs["optical_transient"])
+    axis = np.load(outputs["optical_transient_time_axis"])
+
+    surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
+    rng = np.random.default_rng(0)
+    with pytest.raises(CalibrationError, match="dedicated ambient pass"):
+        surrogate.map_single_acquisition(transient, axis, rng)
 
 
 @needs_mitsuba
