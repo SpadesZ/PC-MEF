@@ -278,8 +278,12 @@ def validate_preregistration(
     #
     # 展開後的維度名（_ALBEDO_BY_PRESET.water）與 registry 名
     # （_ALBEDO_BY_PRESET）都要比對，否則只擋得住其中一種寫法。
-    # CP-03 之後才會載入 lock；這裡自己載一次，載不到就退回只比對 stage
-    # parameters（**不是**靜默放行：少掉的那一半檢查會寫進 detail）。
+    # P0-C：**fail closed.** 這個檢查算不出來時不得回 PASS。
+    # 先前的寫法在 detail 註明「展開維度未比對」但仍然 PASS，於是一個
+    # 讀不到 lock 的環境會讓 CG gauge 守衛整條靜默失效 —— 而那正是
+    # CP-02 唯一的用途。算不出來就是 BLOCKED。
+    expansion_error: str | None = None
+    expanded: set[str] = set()
     try:
         expanded = set(
             resolve_numeric_bounds(
@@ -288,10 +292,8 @@ def validate_preregistration(
                 registry,
             )
         )
-        expansion_checked = True
-    except (CalibrationPlanError, Exception):  # noqa: B014
-        expanded = set()
-        expansion_checked = False
+    except Exception as error:  # noqa: BLE001
+        expansion_error = f"{type(error).__name__}: {error}"
     for name in sorted(listed):
         base = name.split(".", 1)[0] if name.startswith("_ALBEDO_BY_PRESET.") else name
         if name in fitted or base in fitted:
@@ -305,19 +307,32 @@ def validate_preregistration(
             findings.append(
                 f"{name} 被列為 gauge 固定項，卻仍展開成 optimizer 維度 {hits}"
             )
-    results.append(
-        _bad("CP-02", req, findings)
-        if findings
-        else _ok(
-            "CP-02", req,
-            f"搜尋空間 {len(fitted)} 項；{len(listed)} 個 gauge 固定項皆明列且未入列"
-            + (
-                "，展開後的 optimizer 維度亦已比對"
-                if expansion_checked
-                else "；**展開維度未比對**（lock 不可讀）"
-            ),
+    # 優先序：已經抓到具體違規就報 FAIL（那比「附加檢查跑不起來」更有資訊）；
+    # 沒有違規但附加檢查算不出來 -> BLOCKED，**不得** PASS。
+    if findings:
+        results.append(_bad("CP-02", req, findings))
+    elif expansion_error is not None:
+        results.append(
+            CheckResult(
+                identifier="CP-02",
+                requirement=req,
+                status=CheckStatus.BLOCKED,
+                detail="展開後的 optimizer 維度無法解析，gauge 守衛無法完整執行",
+                findings=(
+                    f"resolve_numeric_bounds/load_formal_lock 失敗：{expansion_error}",
+                    "CP-02 不得在此情況下回 PASS：算不出展開維度時，"
+                    "CG gauge 固定項是否溜回搜尋空間就是未知的。",
+                ),
+            )
         )
-    )
+    else:
+        results.append(
+            _ok(
+                "CP-02", req,
+                f"搜尋空間 {len(fitted)} 項；{len(listed)} 個 gauge 固定項皆明列、"
+                "未出現在 stage parameters，展開後的 optimizer 維度亦已逐項比對",
+            )
+        )
 
     # -- CP-03 邊界必須與已凍結的 lock 逐字相同 ---------------------------
     req = "被 fit 的參數邊界必須與 initial_simulation.lock 的 parameter_ranges 相同"

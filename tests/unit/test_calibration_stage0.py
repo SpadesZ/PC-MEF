@@ -782,6 +782,9 @@ def test_s0b4_gauge_fixes_a_borderline_sigma_parameter_collinear_with_an_admitte
         stage_parameters=stages,
         stage0_settings=dict(SETTINGS),
         evaluate=evaluate,
+        # B2/B3/B5 都給通過的證據，讓**只有** B4 失敗，
+        # 否則這條測不出 B4 到底有沒有作用。
+        secondary_probe={"sigma_snr_weight": _probe()},
     )
     entry = next(p for p in result["parameters"] if p["dimension"] == "sigma_snr_weight")
     # 兩者的響應落在同一個分量上 -> 完全平行。
@@ -823,10 +826,11 @@ def test_a_missing_secondary_probe_is_not_treated_as_a_pass():
         evaluate=evaluate,
     )
     entry = next(p for p in result["parameters"] if p["dimension"] == "sigma_snr_weight")
-    # S0-B4 這次通過（正交），但 B2/B3/B5 沒有 probe -> None -> 不算通過。
+    # S0-B4 這次通過（正交），但 B2/B3/B5 沒有 probe -> None -> 不算通過，
+    # 且必須是**明確的 incomplete**，不得靜默 gauge-fix（P0-B）。
     assert entry["secondary_checks"]["S0-B4_collinearity"] is True
     assert entry["secondary_checks"]["S0-B2_monotonicity"] is None
-    assert entry["outcome"] == BORDERLINE_DEFAULT_OUTCOME
+    assert entry["outcome"] == "SECONDARY_INCOMPLETE"
 
 
 # ---------------------------------------------------------------------------
@@ -851,3 +855,162 @@ def test_a_stage_with_no_admitted_parameter_is_named_not_an_error():
     assert signal["status"] == "HAS_FREE_PARAMETERS"
     assert signal["optimizer_run"] is True
     assert signal["dimensions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# P0-A：active / inactive binding semantics
+# ---------------------------------------------------------------------------
+
+
+def test_an_active_dimension_without_a_binding_fails():
+    """會被安靜跳過，但在 optimizer 裡仍是自由度 -> 必須擋。"""
+    with pytest.raises(Stage0Error, match="no binding for optimizer dimension"):
+        run_stage0(
+            resolved_bounds={"not_a_real_dimension": (0.0, 1.0)},
+            initial_values={},
+            stage_parameters={"MAPPING_AMBIENT": ["not_a_real_dimension"]},
+            stage0_settings=dict(SETTINGS),
+            evaluate=_make_evaluate({}),
+        )
+
+
+def test_a_binding_with_no_active_dimension_is_inactive_not_an_error():
+    """CG-5/CG-6 把成員移出搜尋空間之後，歷史綁定必須留得住。
+
+    要求「做一次 gauge 裁決就刪一筆綁定」會把下一次 amendment 想放回來時
+    的依據一起刪掉。
+    """
+    result = _run({"ambient_energy_to_mcps": 1000.0, "signal_energy_to_mcps": 1000.0})
+    swept = {p["dimension"] for p in result["parameters"]}
+    # 只掃 active（BOUNDS 那兩個），DIMENSION_BINDINGS 其餘 18 項不得被掃。
+    assert swept == set(BOUNDS)
+    inactive = {b.dimension for b in DIMENSION_BINDINGS} - set(BOUNDS)
+    assert inactive, "fixture must leave some bindings inactive to be meaningful"
+    assert not (swept & inactive)
+
+
+def test_an_inactive_binding_is_never_evaluated():
+    """記錄 inactive 是一回事，掃它又是另一回事 —— 後者不得發生。"""
+    seen: list[str] = []
+
+    def evaluate(override, seed):
+        if override is not None:
+            seen.append(override["binding"].dimension)
+        return {n: 100.0 + (seed % 8) for n in NAMES}
+
+    run_stage0(
+        resolved_bounds={"ambient_energy_to_mcps": (0.0, 1.0)},
+        initial_values={"ambient_energy_to_mcps": 0.5},
+        stage_parameters={"MAPPING_AMBIENT": ["ambient_energy_to_mcps"]},
+        stage0_settings=dict(SETTINGS),
+        evaluate=evaluate,
+    )
+    assert set(seen) == {"ambient_energy_to_mcps"}
+
+
+# ---------------------------------------------------------------------------
+# P0-B：S0-B2/B3/B5 必須真的有 evidence
+# ---------------------------------------------------------------------------
+
+
+def _probe(monotone=True, stable=True, physical=True):
+    """直接構造一份 probe 結果，用來驗 run_stage0 對它的處置。"""
+    return {
+        "checks": {
+            "S0-B2_monotonicity": monotone,
+            "S0-B3_seed_stability": stable,
+            "S0-B5_no_unphysical_side_effect": physical,
+        },
+        "evidence": {"probe_observable": "synthetic"},
+    }
+
+
+def _sigma_stage_run(probe):
+    from pcmef.experiments.calibration_stage0 import declared_observables
+
+    stages = {"MAPPING_SIGMA": ["sigma_snr_weight", "sigma_multipath_weight"]}
+    bounds = {"sigma_snr_weight": (0.0, 100.0), "sigma_multipath_weight": (0.0, 100.0)}
+    decl = declared_observables("MAPPING_SIGMA")
+    target = {"sigma_snr_weight": decl[0], "sigma_multipath_weight": decl[2]}
+    spans = {"sigma_snr_weight": 42.0, "sigma_multipath_weight": 1000.0}
+
+    def evaluate(override, seed):
+        row = {n: 100.0 for n in NAMES}
+        if seed >= 0:
+            for n in NAMES:
+                row[n] = 100.0 + ((seed % 8) - 3.5)
+        if override is not None:
+            d = override["binding"].dimension
+            lo, hi = bounds[d]
+            row[target[d]] = 100.0 + spans[d] * (override["value"] - lo) / (hi - lo)
+        return row
+
+    return run_stage0(
+        resolved_bounds=bounds,
+        initial_values={k: 1.0 for k in bounds},
+        stage_parameters=stages,
+        stage0_settings=dict(SETTINGS),
+        evaluate=evaluate,
+        secondary_probe={"sigma_snr_weight": probe} if probe else None,
+    )
+
+
+def _snr(result):
+    return next(p for p in result["parameters"] if p["dimension"] == "sigma_snr_weight")
+
+
+def test_all_five_secondary_checks_passing_admits_the_parameter():
+    entry = _snr(_sigma_stage_run(_probe()))
+    assert entry["secondary_not_run"] == []
+    assert entry["secondary_failed"] == []
+    assert entry["outcome"] == "ADMITTED"
+
+
+@pytest.mark.parametrize("failing", ["monotone", "stable", "physical"])
+def test_any_failing_secondary_check_gauge_fixes_the_parameter(failing):
+    from pcmef.experiments.calibration_stage0 import BORDERLINE_DEFAULT_OUTCOME
+
+    entry = _snr(_sigma_stage_run(_probe(**{failing: False})))
+    assert entry["secondary_failed"]
+    assert entry["outcome"] == BORDERLINE_DEFAULT_OUTCOME
+
+
+def test_a_missing_probe_is_incomplete_not_a_silent_gauge_fix():
+    """「跑了而沒過」與「根本沒跑」必須分得開；後者是 blocker。"""
+    entry = _snr(_sigma_stage_run(None))
+    assert entry["secondary_not_run"] == [
+        "S0-B2_monotonicity",
+        "S0-B3_seed_stability",
+        "S0-B5_no_unphysical_side_effect",
+    ]
+    assert entry["outcome"] == "SECONDARY_INCOMPLETE"
+    assert "not executed in full" in entry["borderline_resolution"]
+
+
+def test_the_secondary_probe_measures_monotonicity_and_seed_stability():
+    """probe 本身必須真的量東西，而不是回一組寫死的 True。"""
+    from pcmef.experiments.calibration_stage0 import run_secondary_probe
+
+    declared = ["Empty|sigma_like|median"]
+
+    def linear(value, mode):
+        return {"Empty|sigma_like|median": 10.0 * value}
+
+    good = run_secondary_probe("x", 0.0, 1.0, declared, linear)
+    assert good["checks"]["S0-B2_monotonicity"] is True
+    assert good["checks"]["S0-B3_seed_stability"] is True
+    assert good["evidence"]["crn_span"] == pytest.approx(10.0)
+
+    def folded(value, mode):
+        return {"Empty|sigma_like|median": -((value - 0.5) ** 2)}
+
+    assert run_secondary_probe("x", 0.0, 1.0, declared, folded)["checks"][
+        "S0-B2_monotonicity"
+    ] is False
+
+    def negative(value, mode):
+        return {"Empty|sigma_like|median": -5.0 - value}
+
+    assert run_secondary_probe("x", 0.0, 1.0, declared, negative)["checks"][
+        "S0-B5_no_unphysical_side_effect"
+    ] is False

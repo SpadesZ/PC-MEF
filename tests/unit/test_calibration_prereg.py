@@ -627,3 +627,45 @@ def test_frozen_records_are_self_consistent_about_their_own_identity():
         stem = path.name.split(".")[0]
         assert document["preregistration_id"] == stem
         assert document["payload"]["preregistration_id"] == stem
+
+
+# ---------------------------------------------------------------------------
+# CP-02 fail closed（AMD-004 P0-C）
+# ---------------------------------------------------------------------------
+
+
+def test_cp02_does_not_pass_when_the_expansion_check_cannot_run(monkeypatch):
+    """算不出展開維度時，CG gauge 固定項有沒有溜回搜尋空間就是未知的。
+
+    先前這裡 catch Exception 後仍回 PASS，只在 detail 註明「未比對」——
+    於是一個讀不到 lock 的環境會讓 CP-02 整條靜默失效，而那正是它唯一的用途。
+    """
+    from pcmef.experiments import calibration_prereg as module
+
+    real = module.resolve_numeric_bounds
+    calls = {"n": 0}
+
+    def boom_once(*args, **kwargs):
+        # 只讓 CP-02 那一次呼叫失敗。CP-14 也用同一個函式，
+        # 全域打壞它會變成「驗證器整個炸掉」，那不是本條要驗的失敗模式。
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("lock unreadable")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, "resolve_numeric_bounds", boom_once)
+    report = validate_preregistration(PREREGISTRATION_PATH, FREEZE_DIR, REPO_ROOT)
+    result = report.get("CP-02")
+    assert result.status is not CheckStatus.PASS
+    assert result.status is CheckStatus.BLOCKED
+    assert any("lock unreadable" in f for f in result.findings)
+
+
+def test_a_blocked_cp02_makes_the_preregistration_unfreezable():
+    """BLOCKED 不是「還沒產出」的同義詞；它必須擋住凍結。"""
+    from pcmef.audit.result import CheckStatus as CS
+
+    report = validate_preregistration(PREREGISTRATION_PATH, FREEZE_DIR, REPO_ROOT)
+    # 基準線：正常情況下 CP-02 是 PASS，否則下面的推論沒有意義。
+    assert report.get("CP-02").status is CS.PASS
+    assert "CP-02" in REQUIRED_CHECKS

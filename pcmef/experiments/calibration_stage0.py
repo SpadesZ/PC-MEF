@@ -356,6 +356,90 @@ def resolve_borderline(dimension: str, outcome: str) -> tuple[str, str]:
     )
 
 
+#: S0-B2/B3/B5 的固定設定（AMD-004）。事前選定，執行中不得調整。
+SECONDARY_GRID_POINTS = 5
+#: 與 CAL-PREREG optimizer.verification_seeds 同一組，用來檢查反應不是種子專屬。
+SECONDARY_VERIFICATION_SEEDS: dict[str, int] = {
+    "Empty": 2001,
+    "Water-filled": 2002,
+    "Bubbly": 2042,
+    "Misty": 2004,
+}
+
+
+def run_secondary_probe(
+    dimension: str,
+    low: float,
+    high: float,
+    declared: list[str],
+    evaluate_grid: Callable[[float, int], dict[str, float]],
+) -> dict[str, Any]:
+    """S0-B2 / B3 / B5 的實際量測。純模擬，不碰真實資料。
+
+    `evaluate_grid(value, seed_mode)` 由呼叫端提供：`seed_mode` 為 -1 時用
+    凍結的 CRN 種子，為 -2 時用 verification 種子。
+    """
+    grid = [low + (high - low) * i / (SECONDARY_GRID_POINTS - 1)
+            for i in range(SECONDARY_GRID_POINTS)]
+
+    crn_rows = [evaluate_grid(v, -1) for v in grid]
+    ver_rows = [evaluate_grid(v, -2) for v in grid]
+
+    # 以該階段宣告通道中反應最大的那一個當代表 observable。
+    spans = {
+        name: abs(crn_rows[-1][name] - crn_rows[0][name]) for name in declared
+    }
+    probe_obs = max(spans, key=spans.get) if spans else None
+
+    def series(rows):
+        return [row[probe_obs] for row in rows] if probe_obs else []
+
+    crn, ver = series(crn_rows), series(ver_rows)
+
+    # S0-B2 單調性：五點差分必須同號（允許 0）。非單調代表反應不是一個
+    # 可被 optimizer 沿著走的方向，那種參數 fit 出來由地形細節決定。
+    diffs = [b - a for a, b in zip(crn, crn[1:])]
+    non_zero = [d for d in diffs if d != 0.0]
+    monotone = bool(non_zero) and (
+        all(d > 0 for d in non_zero) or all(d < 0 for d in non_zero)
+    )
+
+    # S0-B3 獨立種子穩定性：另一組種子上的總變化必須同號且同數量級。
+    crn_span = crn[-1] - crn[0] if crn else 0.0
+    ver_span = ver[-1] - ver[0] if ver else 0.0
+    same_sign = (crn_span > 0 and ver_span > 0) or (crn_span < 0 and ver_span < 0)
+    ratio = (
+        abs(ver_span) / abs(crn_span) if crn_span else float("inf")
+    )
+    stable = bool(same_sign and 0.1 <= ratio <= 10.0)
+
+    # S0-B5 無非物理副作用：整個網格上、兩組種子下，全部 observable 都必須
+    # 有限且非負（四個特徵都是速率/距離/寬度，負值沒有物理讀法）。
+    physical = all(
+        np.isfinite(v) and v >= 0.0
+        for row in (*crn_rows, *ver_rows)
+        for v in row.values()
+    )
+
+    return {
+        "checks": {
+            "S0-B2_monotonicity": monotone,
+            "S0-B3_seed_stability": stable,
+            "S0-B5_no_unphysical_side_effect": physical,
+        },
+        "evidence": {
+            "grid": grid,
+            "probe_observable": probe_obs,
+            "crn_series": crn,
+            "verification_series": ver,
+            "crn_span": crn_span,
+            "verification_span": ver_span,
+            "verification_to_crn_ratio": ratio,
+            "verification_seeds": dict(SECONDARY_VERIFICATION_SEEDS),
+        },
+    }
+
+
 #: 可行域推導的固定設定（AMD-004）。事前選定，執行中不得調整。
 FEASIBILITY_BISECTION_STEPS = 20
 FEASIBILITY_RELATIVE_TOLERANCE = 1.0e-3
@@ -766,19 +850,33 @@ def run_stage0(
         entry["s0b4_worst_peer"] = worst_peer
 
         # S0-B2 / B3 / B5 需要五點網格與驗證種子；由呼叫端提供的
-        # secondary_probe 執行。缺它時**不得**視為通過。
+        # secondary_probe 執行。缺它時**不得**視為通過，也不得偷偷當成失敗
+        # 而 gauge-fix —— 「跑了而沒過」與「根本沒跑」是兩回事。
         probe = (secondary_probe or {}).get(dimension)
         if probe is None:
             checks["S0-B2_monotonicity"] = None
             checks["S0-B3_seed_stability"] = None
             checks["S0-B5_no_unphysical_side_effect"] = None
         else:
-            checks.update(probe)
+            checks.update(probe.get("checks", probe))
+            entry["secondary_evidence"] = probe.get("evidence")
 
         entry["secondary_checks"] = checks
-        failed = [k for k, v in checks.items() if v is not True]
+        not_run = sorted(k for k, v in checks.items() if v is None)
+        failed = sorted(k for k, v in checks.items() if v is False)
+        entry["secondary_not_run"] = not_run
         entry["secondary_failed"] = failed
-        if failed:
+
+        if not_run:
+            # 明確的 incomplete 結局，且它**是** blocker。
+            entry["outcome"] = "SECONDARY_INCOMPLETE"
+            entry["borderline_resolution"] = (
+                f"secondary criterion {SECONDARY_ADJUDICATION_RULES[dimension]} was "
+                f"not executed in full: {not_run} produced no evidence. A missing "
+                "probe is neither a pass nor a preregistered gauge-fix; stage 0 is "
+                "incomplete until every check has evidence."
+            )
+        elif failed:
             entry["outcome"] = BORDERLINE_DEFAULT_OUTCOME
             entry["borderline_resolution"] = (
                 f"secondary criterion {SECONDARY_ADJUDICATION_RULES[dimension]} did "
@@ -790,7 +888,7 @@ def run_stage0(
             entry["outcome"] = "ADMITTED"
             entry["borderline_resolution"] = (
                 f"secondary criterion {SECONDARY_ADJUDICATION_RULES[dimension]} "
-                "passed in full"
+                "passed in full, with evidence for all five checks"
             )
         outcomes[dimension] = entry["outcome"]
 
@@ -1033,14 +1131,24 @@ def execute_stage0(
         )
 
     bounds = resolve_numeric_bounds(protocol, resolved.payload, registry)
-    stale = sorted({b.dimension for b in DIMENSION_BINDINGS} - set(bounds))
-    if stale:
+    # P0-A：搜尋空間由**協定**決定，binding 表只是「這個維度作用在哪裡」的字典。
+    # CG-5 / CG-6 刻意把 albedo 與兩個角度移出 stagewise 之後，它們就不在
+    # resolved_bounds 裡；把那種情況判成 stale 等於要求每做一次 gauge 裁決
+    # 就刪掉一筆歷史綁定，而那些綁定是下一次 amendment 想放回來時的依據。
+    #
+    # 方向是不對稱的，而且必須不對稱：
+    #   * active dimension 少了 binding -> FAIL（會被安靜跳過，但仍是自由度）
+    #   * binding 沒有對應的 active dimension -> inactive，記錄但不掃
+    active_dimensions = sorted(bounds)
+    binding_names = {b.dimension for b in DIMENSION_BINDINGS}
+    missing = sorted(set(active_dimensions) - binding_names)
+    if missing:
         raise Stage0Error(
-            f"the binding table carries dimension(s) {stale} that the frozen bounds "
-            "do not contain. A stale entry means the table and the frozen protocol "
-            "have diverged, and stage 0 would be sweeping something the optimizer "
-            "will never see."
+            f"active optimizer dimension(s) {missing} have no entry in "
+            "DIMENSION_BINDINGS. An unbound active dimension would be silently "
+            "skipped here while remaining a free parameter in the optimizer."
         )
+    inactive_bindings = sorted(binding_names - set(active_dimensions))
     bounds_hash = bounds_resolution_hash(protocol, resolved.payload, registry)
     if bounds_hash != frozen_payload["bounds_resolution_hash"]:
         raise Stage0Error(
@@ -1150,7 +1258,12 @@ def execute_stage0(
                 scene_module._ALBEDO_BY_PRESET[binding.attribute] = float(value)
 
             for label in CLASS_ORDER:
-                use_seed = CRN_SEEDS[label] if seed < 0 else int(seed)
+                if seed == -2:
+                    use_seed = SECONDARY_VERIFICATION_SEEDS[label]
+                elif seed < 0:
+                    use_seed = CRN_SEEDS[label]
+                else:
+                    use_seed = int(seed)
                 medium = _base_medium(label)
                 if (
                     binding is not None
@@ -1199,6 +1312,32 @@ def execute_stage0(
                 scene_module._ALBEDO_BY_PRESET[binding.attribute] = saved["albedo"]
         return out
 
+    # P0-B：S0-B2/B3/B5 的實際量測必須在這裡跑出來並傳進去，
+    # 否則 run_stage0 只會看到 None，而那是 incomplete 不是 pass。
+    bindings_by_name = {b.dimension: b for b in DIMENSION_BINDINGS}
+    secondary_probe: dict[str, dict[str, Any]] = {}
+    for dimension, rule in SECONDARY_ADJUDICATION_RULES.items():
+        if dimension not in bounds:
+            continue
+        say(f"secondary probe {rule} for {dimension}")
+        lo, hi = bounds[dimension]
+        binding = bindings_by_name[dimension]
+        stage_id = _stage_of(dimension, stage_parameters)
+        try:
+            secondary_probe[dimension] = run_secondary_probe(
+                dimension,
+                lo,
+                hi,
+                declared_observables(stage_id),
+                lambda value, mode: evaluate(_make_overrides(binding, value), mode),
+            )
+        except Exception as error:  # noqa: BLE001
+            # 失敗即失敗：不得留白讓它看起來像沒必要跑。
+            secondary_probe[dimension] = {
+                "checks": {},
+                "evidence": {"error": f"{type(error).__name__}: {error}"},
+            }
+
     result = run_stage0(
         resolved_bounds=bounds,
         initial_values=initial_values,
@@ -1206,6 +1345,7 @@ def execute_stage0(
         stage0_settings=frozen_payload["stage_0"],
         evaluate=evaluate,
         progress=say,
+        secondary_probe=secondary_probe,
     )
 
     # -- 判定 --------------------------------------------------------------
@@ -1253,7 +1393,9 @@ def execute_stage0(
     # borderline（即仍掛在具名次級規則上）才算未決。
     unresolved_borderline = sorted(
         e["dimension"] for e in result["parameters"]
-        if e["outcome"] in {"BORDERLINE", "BORDERLINE_PENDING_SECONDARY"}
+        if e["outcome"] in {
+            "BORDERLINE", "BORDERLINE_PENDING_SECONDARY", "SECONDARY_INCOMPLETE"
+        }
     )
     if unresolved_borderline:
         blockers.append(
@@ -1295,6 +1437,15 @@ def execute_stage0(
         },
         "bounds_resolution_hash": bounds_hash,
         "resolved_bounds": {k: list(v) for k, v in sorted(bounds.items())},
+        # P0-A：兩份清單都要留。inactive 的那些不是錯誤，是被 CG 裁決刻意
+        # 移出搜尋空間的歷史綁定；它們**沒有被 sweep 過**，artifact 必須說清楚。
+        "active_bindings": active_dimensions,
+        "inactive_bindings": inactive_bindings,
+        "inactive_bindings_note": (
+            "Entries retained in DIMENSION_BINDINGS that are NOT in the frozen "
+            "protocol's search space (typically CG gauge-fixed members). They were "
+            "not swept and carry no leverage, collinearity or admission result."
+        ),
         "simulation": {
             "spp": spp,
             "resolution": list(resolution),
