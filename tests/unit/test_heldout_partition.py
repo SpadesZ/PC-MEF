@@ -65,6 +65,13 @@ def fake_repo(tmp_path):
         REPO_ROOT / "data" / "splits" / "split_registry.json",
         root / "data" / "splits" / "split_registry.json",
     )
+    # 假 repo 代表**開啟最終測試之前**的狀態；真實 registry 在 E1 之後是 1，
+    # 直接沿用會讓這些取用測試量到的是 E1 的結果而不是它們自己的前提。
+    registry_path = root / "data" / "splits" / "split_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["heldout_access_count"] = 0
+    registry.pop("heldout_final_access_entries", None)
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
     return root
 
 
@@ -295,11 +302,26 @@ def test_final_ids_opens_exactly_once(fake_repo):
     assert excinfo.value.reason == "FINAL_ALREADY_OPENED"
 
 
-def test_the_live_repository_has_not_opened_the_final_partition():
-    """這條測試是 protected-final-test 這句話在 repo 裡的實際憑據。"""
+def test_the_live_repository_opened_the_final_partition_at_most_once():
+    """protected-final-test 在 repo 裡的實際憑據。
+
+    E1 final 之前這個數字是 0；之後恰為 1，且那一筆必須帶著它所依附的
+    calibrated_simulation lock hash。**大於 1 永遠是錯的** —— 開第二次就
+    不是最終測試了。
+    """
     registry = json.loads(
         (REPO_ROOT / "data" / "splits" / "split_registry.json").read_text(
             encoding="utf-8"
         )
     )
-    assert registry["heldout_access_count"] == 0
+    count = registry["heldout_access_count"]
+    assert count in (0, 1), f"FORMAL_E1_FINAL was opened {count} times"
+
+    entries = registry.get("heldout_final_access_entries") or []
+    assert len(entries) == count
+    for entry in entries:
+        assert entry["partition"] == FINAL_ROLE
+        assert entry["purpose"] == "e1_final_evaluation"
+        # 開啟必須發生在校準模擬器凍結之後，否則判準是看過答案才定的。
+        assert entry["calibrated_simulation_lock_hash"]
+        assert (REPO_ROOT / "freeze" / "calibrated_simulation.lock.json").exists()

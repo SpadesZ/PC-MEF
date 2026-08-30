@@ -565,16 +565,33 @@ def test_freeze_is_refused_when_a_declared_amendment_is_missing(tmp_path):
         freeze_preregistration(PREREGISTRATION_PATH, freeze_dir, REPO_ROOT)
 
 
-def test_no_calibration_artifact_exists_yet():
-    """本 session 的紅線：預註冊凍結時不得已經跑過校準。"""
-    from pcmef.audit.firewall import CALIBRATION_ARTIFACT_GLOBS
+def test_calibration_did_not_run_before_the_preregistration_was_frozen():
+    """原本的紅線是「現在還沒跑過校準」，那是一條**凍結當下**的前提。
 
-    outputs = REPO_ROOT / "outputs"
-    for pattern in CALIBRATION_ARTIFACT_GLOBS:
-        assert not list(outputs.glob(pattern))
+    校準已經跑完，因此那個寫法已經過期。它保護的東西沒有過期：校準不得
+    早於預註冊。改為斷言凍結記錄自己留下的順序證據 —— CAL-PREREG-003 是在
+    calibration_access_count 為 0 時凍的。這一條永遠檢查得了，
+    而「outputs 目錄是空的」只在跑之前為真。
+    """
+    import json
+
+    frozen = json.loads(
+        (REPO_ROOT / "freeze" / "preregistrations" / "CAL-PREREG-003.prereg.json")
+        .read_text(encoding="utf-8")
+    )
+    split = frozen["payload"]["split"]
+    assert split["calibration_access_count"] == 0
+    assert split["heldout_access_count"] == 0
+    assert split["heldout_opened"] is False
 
 
-def test_heldout_remains_sealed():
+def test_the_final_test_was_opened_at_most_once_and_only_after_the_lock():
+    """AMD-005：heldout_access_count 現在專指 FORMAL_E1_FINAL。
+
+    E1 final 之前是 0，之後恰為 1。大於 1 永遠是錯的；等於 1 時那一筆必須
+    帶著它所依附的 calibrated_simulation lock hash —— 開啟必須發生在模擬器
+    凍結之後，否則判準是看過答案才定的。
+    """
     import json
 
     registry = json.loads(
@@ -582,7 +599,14 @@ def test_heldout_remains_sealed():
             encoding="utf-8"
         )
     )
-    assert registry["heldout_access_count"] == 0
+    count = registry["heldout_access_count"]
+    assert count in (0, 1)
+    entries = registry.get("heldout_final_access_entries") or []
+    assert len(entries) == count
+    for entry in entries:
+        assert entry["purpose"] == "e1_final_evaluation"
+        assert entry["calibrated_simulation_lock_hash"]
+        assert (REPO_ROOT / "freeze" / "calibrated_simulation.lock.json").exists()
 
 
 # ---------------------------------------------------------------------------

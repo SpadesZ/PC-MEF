@@ -169,9 +169,21 @@ def _verify_payload(document: dict[str, Any], expected: str, label: str, reason:
 
 
 def load_frozen_identity(
-    freeze_dir: str | Path = "freeze", repo_root: str | Path = "."
+    freeze_dir: str | Path = "freeze",
+    repo_root: str | Path = ".",
+    allow_opened_heldout: bool = False,
 ) -> FrozenIdentity:
-    """讀齊、驗證並回傳全部凍結身分。任何一項不符即 fail closed。"""
+    """讀齊、驗證並回傳全部凍結身分。任何一項不符即 fail closed。
+
+    `allow_opened_heldout` **只有 E1 final 可以傳 True**。預設的
+    heldout_access_count = 0 斷言是給校準用的：校準在最終測試被開啟之後
+    就不得再執行，否則參數會是看過答案才調的。但 E1 final 正是開啟它的那一步，
+    它在開啟之後仍然需要載入同一份凍結身分來產出報告 —— 對它套用同一條斷言，
+    等於要求它在自己造成的狀態下失敗。
+
+    放寬的只是**這一條**斷言，其餘每一項（四個凍結雜湊、協定、界線、
+    parameter set）一律照舊；實際的計數仍然原樣寫進 artifact。
+    """
     root = Path(repo_root)
     fdir = Path(freeze_dir)
 
@@ -266,11 +278,13 @@ def load_frozen_identity(
         root / "data" / "splits" / "split_registry.json", "HELDOUT_ACCESS"
     )
     heldout = int(split_registry["heldout_access_count"])
-    if heldout != 0:
+    if heldout != 0 and not allow_opened_heldout:
         raise IdentityError(
             "HELDOUT_ACCESS",
-            f"heldout_access_count is {heldout}, not 0. Held-out must stay sealed "
-            "until E1 final; calibration must never open it.",
+            f"heldout_access_count is {heldout}, not 0. FORMAL_E1_FINAL must stay "
+            "sealed until E1 final; calibration must never run once it is open, "
+            "because parameters chosen after seeing the final test are not "
+            "calibrated, they are fitted to the answer.",
         )
     if split_registry["calibration_set_hash"] != sf_payload["calibration_set_hash"]:
         raise IdentityError(

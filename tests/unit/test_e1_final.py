@@ -236,6 +236,13 @@ def test_final_partition_cannot_be_opened_before_the_lock(tmp_path):
         REPO_ROOT / "data" / "splits" / "split_registry.json",
         root / "data" / "splits" / "split_registry.json",
     )
+    # 假 repo 代表**開啟最終測試之前**的狀態；真實 registry 在 E1 之後是 1，
+    # 直接沿用會讓這些取用測試量到的是 E1 的結果而不是它們自己的前提。
+    registry_path = root / "data" / "splits" / "split_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["heldout_access_count"] = 0
+    registry.pop("heldout_final_access_entries", None)
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
     freeze_dir = root / "freeze"
     freeze_dir.mkdir()
     shutil.copy(
@@ -255,10 +262,11 @@ def test_final_partition_cannot_be_opened_before_the_lock(tmp_path):
     )
 
 
-def test_live_repository_still_has_not_opened_the_final_partition():
+def test_live_repository_opened_the_final_partition_at_most_once():
+    """開第二次就不是最終測試了。"""
     registry = json.loads(
         (REPO_ROOT / "data" / "splits" / "split_registry.json").read_text(
             encoding="utf-8"
         )
     )
-    assert registry["heldout_access_count"] == 0
+    assert registry["heldout_access_count"] in (0, 1)

@@ -234,7 +234,7 @@ def test_render_cache_key_covers_simulation_settings(field, value):
     from pcmef.simulation.mitsuba_adapter import require_mitsuba
 
     require_mitsuba()
-    identity = load_frozen_identity()
+    identity = load_frozen_identity(allow_opened_heldout=True)
     simulator = Simulator(identity=identity)
     baseline = simulator._render_key("Empty", CRN_SEEDS["Empty"])
     setattr(simulator, field, value)
@@ -248,7 +248,7 @@ def test_render_cache_key_covers_class_seed_and_scene(monkeypatch):
     from pcmef.simulation.mitsuba_adapter import require_mitsuba
 
     require_mitsuba()
-    identity = load_frozen_identity()
+    identity = load_frozen_identity(allow_opened_heldout=True)
     simulator = Simulator(identity=identity)
     baseline = simulator._render_key("Empty", CRN_SEEDS["Empty"])
 
@@ -272,7 +272,7 @@ def test_n_samples_is_outside_the_render_key_but_inside_the_evaluation_identity(
     from pcmef.simulation.mitsuba_adapter import require_mitsuba
 
     require_mitsuba()
-    identity = load_frozen_identity()
+    identity = load_frozen_identity(allow_opened_heldout=True)
     simulator = Simulator(identity=identity)
     render_key = simulator._render_key("Empty", CRN_SEEDS["Empty"])
 
@@ -299,7 +299,7 @@ def test_evaluation_identity_covers_seed_mode_and_parameters():
     from pcmef.simulation.mitsuba_adapter import require_mitsuba
 
     require_mitsuba()
-    identity = load_frozen_identity()
+    identity = load_frozen_identity(allow_opened_heldout=True)
     evaluator = _Evaluator(
         identity=identity, simulator=Simulator(identity=identity),
         real=_real(), stage_id="MAPPING_AMBIENT",

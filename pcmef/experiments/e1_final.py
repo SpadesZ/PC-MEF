@@ -225,6 +225,32 @@ def freeze_pre_heldout_locks(
     root = Path(repo_root)
     store = LockStore(freeze_dir)
     identity = report["identity"]
+    already: list[str] = []
+
+    def write_or_verify(name: str, payload: dict[str, Any], identity_keys: tuple[str, ...]) -> None:
+        """已凍結就驗證身分後沿用，不試圖覆寫。
+
+        lock 是不可變的，而 payload 裡的 `code_version` 會隨每一次 commit 改變。
+        前一次執行在開啟資料之後才崩潰，因此這些 lock 已經帶著**產生校準的那個
+        commit** 凍好了 —— 那個值比「現在正在跑 E1 的 commit」更準確。
+        因此這裡只驗證**科學身分**欄位是否逐字相符，相符就沿用。
+
+        驗證的是身分而不是整份 payload：若校準結果真的變了，
+        identity_keys 就會不同，於是照樣擋下來。
+        """
+        if not store.exists(name):
+            store.write(name, payload)
+            return
+        frozen = store.load(name)
+        drifted = [k for k in identity_keys if frozen.get(k) != payload.get(k)]
+        if drifted:
+            raise E1FinalError(
+                "LOCK_IDENTITY_DRIFT",
+                f"lock {name!r} is already frozen but its scientific identity "
+                f"differs on {drifted}. That is a different calibration, not a "
+                "re-run of the same one; locks are immutable.",
+            )
+        already.append(name)
 
     if report["overall_outcome"] not in {"CALIBRATION_COMPLETE"}:
         raise E1FinalError(
@@ -237,7 +263,7 @@ def freeze_pre_heldout_locks(
     fitted = report["seven_calibrated_parameters"]
 
     # 1. calibrated_simulation
-    store.write(
+    write_or_verify(
         "calibrated_simulation",
         {
             "calibrated_scene_hash": hash_object(
@@ -269,10 +295,11 @@ def freeze_pre_heldout_locks(
             ],
             "code_version": code_version,
         },
+            ("calibration_source_hashes", "fitted_parameters", "calibrated_parameter_values", "stage_outcomes", "inhibited_stages"),
     )
 
     # 2. metric_config
-    store.write(
+    write_or_verify(
         "metric_config",
         {
             "metric_definitions": {
@@ -289,13 +316,14 @@ def freeze_pre_heldout_locks(
             "s_f_record": "CAL-SF-001",
             "s_f_hash": identity["sf_hash"],
         },
+            ("metric_definitions", "code_hash", "s_f", "s_f_hash"),
     )
 
     # 3. e1_candidates
     partition = json.loads(
         (Path(freeze_dir) / "heldout_partition.lock.json").read_text(encoding="utf-8")
     )
-    store.write(
+    write_or_verify(
         "e1_candidates",
         {
             "initial_simulation_hash": store.load_hash("initial_simulation"),
@@ -307,10 +335,11 @@ def freeze_pre_heldout_locks(
             "heldout_subset": "FORMAL_E1_FINAL",
             "recordings_per_class": partition["payload"]["counts"]["FORMAL_E1_FINAL"],
         },
+            ("initial_simulation_hash", "calibrated_simulation_hash", "metric_config_hash", "heldout_set_hash"),
     )
 
     # 4. e1_evaluation_design
-    store.write(
+    write_or_verify(
         "e1_evaluation_design",
         {
             "base_scenario_ids": matrix["base_scenario_ids"],
@@ -331,6 +360,7 @@ def freeze_pre_heldout_locks(
             ),
             "trend": _trend_not_applicable(),
         },
+            ("base_scenario_ids", "optical_transport_seeds", "acquisition_seed_matrix", "matched_realization_hash"),
     )
 
     # 5. e1_scientific_rule
@@ -351,7 +381,7 @@ def freeze_pre_heldout_locks(
     }
     from pcmef.core.amendments import amendment_provenance
 
-    store.write(
+    write_or_verify(
         "e1_scientific_rule",
         {
             "normalization_scales": identity["s_f"],
@@ -375,10 +405,11 @@ def freeze_pre_heldout_locks(
             "frozen_before_heldout_opened": True,
             **amendment_provenance(),
         },
+            ("normalization_scales", "aggregation", "improvement_threshold", "regression_tolerance", "trend_rule", "bootstrap_replicates", "bootstrap_seed"),
     )
 
     # 6. claim_boundary
-    store.write(
+    write_or_verify(
         "claim_boundary",
         {
             "e1_fidelity_scope": (
@@ -411,8 +442,12 @@ def freeze_pre_heldout_locks(
                 "mechanism and must not be described as such."
             ),
         },
+            ("e1_fidelity_scope", "synthetic_rgb_statement"),
     )
 
+    if already:
+        # 沿用而不是重寫，必須看得見。
+        print(f"  reusing already-frozen lock(s): {already}", flush=True)
     return {
         name: store.load_hash(name)
         for name in (
@@ -521,7 +556,9 @@ def run_e1_final(
             "must never be the input to the final evaluation",
         )
 
-    identity = load_frozen_identity(freeze_dir, root)
+    # E1 final 是**唯一**可以在最終測試已開啟的狀態下載入凍結身分的地方：
+    # 它就是開啟它的那一步。校準路徑的預設值不變。
+    identity = load_frozen_identity(freeze_dir, root, allow_opened_heldout=True)
     matrix = scenario_seed_matrix()
 
     # -- 凍結在前 ----------------------------------------------------------

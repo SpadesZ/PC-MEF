@@ -66,7 +66,10 @@ SEVEN_CALIBRATED = {
 
 @pytest.fixture(scope="module")
 def identity():
-    return load_frozen_identity("freeze", REPO_ROOT)
+    # E1 final 之後 heldout_access_count 是 1。本檔驗的是**凍結身分**，
+    # 不是那道閘門；閘門另有 test_identity_gate_rejects_a_nonzero_heldout_access_count
+    # 專門盯著，且它用的是一個乾淨的假 repo。
+    return load_frozen_identity("freeze", REPO_ROOT, allow_opened_heldout=True)
 
 
 def test_live_repository_identity_verifies(identity):
@@ -74,7 +77,8 @@ def test_live_repository_identity_verifies(identity):
     assert identity.stage0_hash == EXPECTED_STAGE0_PAYLOAD_HASH
     assert identity.sf_hash == EXPECTED_SF_PAYLOAD_HASH
     assert identity.raw_calibration_data_hash == EXPECTED_RAW_CALIBRATION_DATA_HASH
-    assert identity.heldout_access_count == 0
+    # E1 final 之前是 0，之後恰為 1。大於 1 永遠是錯的。
+    assert identity.heldout_access_count in (0, 1)
 
 
 def test_s_f_comes_from_the_frozen_record_and_is_usable(identity):
