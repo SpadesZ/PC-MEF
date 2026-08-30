@@ -179,9 +179,9 @@ sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment
 |---|---|---|
 | M0 Data Audit | **資料齊備** | 560 筆 500×4 原始序列已復原；Vision 1200 張完整（NOTE-011） |
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
-| M2 Surrogate + E1 | **引擎完成，場景保真度未完** | 參數防線已上線（NOTE-030）；**四條阻塞已具名**，見「D：M2 sanity」 |
-| M3 Post-E1 Split | 未開始 | 依賴 E1 outcome（synthetic split 不得早於此） |
-| M4 Perception | 未開始 | 需先安裝 tensorflow / scikit-learn |
+| M2 Surrogate + E1 | **`E1 CLOSED — partial calibration success`** | 五階段跑完、E1 開啟一次並得 PASS。**只有 Ambient Rate 真的改善**，其餘三個 feature 維持 initial physics-constrained state。見「E1 已完成」專節 |
+| M3 Post-E1 Split | **`paired bridge smoke PASS / ready for perception`** | 成對 RGB-ToF 生成路徑已驗收（6/6 check PASS，identity `a00b3969…`）。synthetic split policy lock 本身仍未凍 |
+| M4 Perception | 進行中 | torch 2.10.0+cpu 可用；tensorflow / scikit-learn 未安裝且**不需要** |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
 | M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
@@ -1081,6 +1081,64 @@ Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
 不得宣稱整個 ToF 模擬器已 physics-calibrated；不得把三個 0 說成「無退步」；
 不得把趨勢的 NOT_APPLICABLE 說成趨勢一致。
 
+### E1 結論的正式限縮
+
+> **E1 證明的是：Ambient Rate 通道經校準後顯著改善。**
+> 其餘三個 feature（distance_mm、signal_rate_mcps、sigma_like）維持
+> **initial physics-constrained state** —— 它們的參數更新被獨立證據否決，
+> 因此模擬器在這三個通道上就是 `initial_simulation.lock` 凍結的那個模型，
+> 既沒有被校準，也沒有退步。
+
+---
+
+## Cross-stage observable dependency limitation（2026-08-31）
+
+**這是本次校準最重要的方法論發現，而且它不是實作缺陷。**
+
+CAL-PREREG-003 的分階段設計假設每個階段可以在自己宣告的 observable 上
+獨立擬合。實跑之後這個假設在 stage 1 不成立：
+
+```
+stage 1 宣告的 observable：Empty|{distance_mm, signal_rate_mcps, sigma_like}
+stage 1 可動的參數：       sensor.fov_deg（唯一 admitted）
+```
+
+`Empty|signal_rate_mcps` 在起始點的 NW 是 **202,906**，另外兩項加起來
+**不到 18**。也就是說 stage 1 的目標函數 99.99% 是由 signal 通道決定的 ——
+而 signal 通道的**增益**（`signal_energy_to_mcps`）是 **stage 4** 的參數，
+stage 1 完全動不到它。
+
+於是 stage 1 面對的是一個它結構上解不了的問題：它被要求最小化一個
+主要由「別的階段才能修的量綱錯誤」構成的目標。
+
+### Stage 1 的 FOV candidate 是什麼、不是什麼
+
+optimizer 在這個地形上做了它唯一能做的事：找一個讓**模擬訊號塌掉**的
+fov（57.79°），藉此壓低那個 5 個數量級的殘差。三次重啟都收斂到同一點
+（相對全距 1.6e-4），所以這不是搜尋失敗。
+
+> **`sensor.fov_deg ≈ 57.79` 是一個 dependency-confounded harmful update：**
+> 它是為了補償「另一個階段才能修的增益錯誤」而產生的，
+> 且被 verification-seed guard（劣化 8.26）與 regression guard（+28.5%）
+> 兩道獨立證據攔下。
+>
+> **不得**把它解讀為「FOV 本身不可校準」或「FOV 沒有可辨識性」。
+> stage 0 實測 `sensor.fov_deg` 的 own-stage leverage **通過**了入場判定；
+> 它可辨識。被拒絕的是**這一個特定的候選值**，理由是它在當前的
+> 階段相依結構下有害，不是理由是這個參數不可校準。
+
+### 這個限制的範圍
+
+| | |
+|---|---|
+| 受影響 | stage 1（FOV）、stage 4（signal）、stage 5（sigma）—— 三者都被抑制 |
+| 未受影響 | stage 3（ambient）。ambient 通道的量綱在起始點就已經接近，且它的 seed 雜訊只有 sd/mean ≈ 0.011，因此它在自己的階段裡是可解的 |
+| 根因 | 兩件事相乘：(a) 階段順序把 mapping 增益放在 scene 之後；(b) spp=16 下 signal / sigma 通道的 Monte-Carlo 雜訊達 sd/mean 0.17-0.67 |
+
+要解除它，必須同時處理階段相依與模擬解析度 —— 兩者都會改動
+`initial_simulation.lock` 或 CAL-PREREG-003 的階段結構，屬 amendment 範圍。
+**本階段（2/3 Perception）不處理，也不得因為模型表現而回頭改它。**
+
 ---
 
 ## Formal Calibration（AMD-005 之後）—— `CALIBRATION_COMPLETE`（2026-08-30）
@@ -1203,7 +1261,13 @@ CAL-PREREG-003 stage 4 的 `known_residual_confound` already 預告了增益混�
 
 ---
 
-## Stage 0 —— 已執行，結論為 `STAGE0_ADJUDICATION_REQUIRED`（2026-08-30，NOTE-043）
+## ~~Stage 0 —— 結論為 `STAGE0_ADJUDICATION_REQUIRED`~~ → **已作廢（2026-08-30）**
+
+> **本節記錄的是 AMD-004 之前那一次 stage 0 的結果，已不再有效。**
+> stage 0 已依 AMD-004 重跑並凍結為 CAL-STAGE0-001
+> （payload hash `810222803e6555e3…`，outcome `STAGE0_COMPLETE`，
+> 七個 admitted 參數）。下面的判定與待辦**全部過期**，保留純為血緣可稽核。
+
 
 **stage 0 已完整跑過，但沒有凍結，而且不應該凍結。** 它的用途正是在燒掉
 116,352 次評估之前把設計缺陷逼出來，而它一次逼出了五個。
@@ -1316,7 +1380,11 @@ CAL-PREREG-002 記「每次評估約 2 秒 → 116,352 次約 65 小時」。
 
 ---
 
-## AMD-004 —— 已擬定，**尚未凍結**（2026-08-30，NOTE-044）
+## ~~AMD-004 —— 尚未凍結~~ → **已凍結（2026-08-30）**
+
+> AMD-004 payload hash `f298816d97e88b3f…`，其後 CAL-PREREG-003、
+> stage 0 重跑、正式校準與 E1 均已完成。本節的「待辦」欄位過期。
+
 
 `configs/amendments/AMD-004.yaml` 已寫好，涵蓋八項契約變更：
 stage 重排（physical scene/media → measurement mappings）、
@@ -2177,7 +2245,11 @@ E1 可依原規格在 500 點序列上進行，`e1_scientific_rule.lock` 沿用�
 
 ---
 
-## 下一步（2026-08-27 晚間更新）
+## ~~下一步（2026-08-27 晚間更新）~~ → **已全部完成（2026-08-31）**
+
+> 本節寫於校準預註冊之前。其後 M2 已 closed（E1 partial calibration
+> success）、成對資料橋已驗收。保留為歷史記錄，**不是待辦清單**。
+
 
 外部阻塞已全部解除：資料齊備、sigma 解出、real split 凍結、E1/E2 bootstrap 核定。
 **Part VI、Batch 6、Batch 7 皆已完成**。
