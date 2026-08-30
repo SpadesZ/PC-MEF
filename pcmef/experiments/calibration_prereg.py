@@ -51,6 +51,7 @@ from pcmef.experiments.calibration_plan import (
 __all__ = [
     "PREREGISTRATION_PATH",
     "PREREGISTRATION_ID",
+    "declared_preregistration_id",
     "REQUIRED_CHECKS",
     "load_protocol",
     "protocol_hash",
@@ -62,7 +63,32 @@ __all__ = [
 PREREGISTRATION_PATH = (
     Path(__file__).resolve().parents[2] / "configs" / "calibration_preregistration.yaml"
 )
+#: 只是**歷史預設值**，不是身分來源。真正的身分一律由協定檔的
+#: `preregistration_id` 決定（見 `declared_preregistration_id()`）——
+#: 先前這個常數同時決定 freeze 檔名與 payload 內的 id，於是把 YAML 改成
+#: CAL-PREREG-003 卻忘了改常數，會凍出一份「檔名與內容都寫 002、
+#: 但協定其實是 003」的記錄（AMD-004 P0-2）。
 PREREGISTRATION_ID = "CAL-PREREG-002"
+
+_ID_PATTERN = re.compile(r"^CAL-PREREG-\d{3}$")
+
+
+def declared_preregistration_id(protocol: dict[str, Any]) -> str:
+    """協定檔自己宣告的預註冊 ID。**這是唯一的身分來源。**"""
+    declared = protocol.get("preregistration_id")
+    if not declared:
+        raise PreregistrationError(
+            "the protocol declares no preregistration_id. A preregistration's "
+            "identity may not come from a code constant, or a frozen record could "
+            "name a different protocol than the one it actually froze."
+        )
+    identifier = str(declared).strip()
+    if not _ID_PATTERN.match(identifier):
+        raise PreregistrationError(
+            f"preregistration_id {identifier!r} does not match CAL-PREREG-NNN"
+        )
+    return identifier
+
 
 #: 凍結前必須全部 PASS。NOT_PRODUCED 在這裡不是可接受狀態 ——
 #: 預註冊的每一項都是**現在就該寫完**的，沒有「之後補」的欄位。
@@ -244,10 +270,53 @@ def validate_preregistration(
     for name in ("_SIGMA_T_REFERENCE_PER_M", "lighting.irradiance", "_ROOM_LIGHT_RADIANCE"):
         if name not in listed:
             findings.append(f"{name} 未被明列於 forbidden_parameters.gauge_fixed")
+
+    # AMD-004 P0-3：**協定自己列的每一個 gauge 固定項都必須真的擋得住。**
+    # 先前這裡只硬寫 CG-1/2/3 那三個名字，於是 CG-5 把三個 albedo 加進
+    # gauge_fixed 之後，validator 完全不會檢查它們有沒有溜回搜尋空間 ——
+    # 「寫在 YAML 裡」與「真的被擋下」是兩回事。
+    #
+    # 展開後的維度名（_ALBEDO_BY_PRESET.water）與 registry 名
+    # （_ALBEDO_BY_PRESET）都要比對，否則只擋得住其中一種寫法。
+    # CP-03 之後才會載入 lock；這裡自己載一次，載不到就退回只比對 stage
+    # parameters（**不是**靜默放行：少掉的那一半檢查會寫進 detail）。
+    try:
+        expanded = set(
+            resolve_numeric_bounds(
+                protocol,
+                load_formal_lock("initial_simulation", freeze_dir, root).payload,
+                registry,
+            )
+        )
+        expansion_checked = True
+    except (CalibrationPlanError, Exception):  # noqa: B014
+        expanded = set()
+        expansion_checked = False
+    for name in sorted(listed):
+        base = name.split(".", 1)[0] if name.startswith("_ALBEDO_BY_PRESET.") else name
+        if name in fitted or base in fitted:
+            findings.append(
+                f"{name} 被列為 gauge 固定項，卻仍出現在某個 stage 的 parameters"
+            )
+        hits = sorted(
+            d for d in expanded if d == name or d.split(".", 1)[0] == name
+        )
+        if hits:
+            findings.append(
+                f"{name} 被列為 gauge 固定項，卻仍展開成 optimizer 維度 {hits}"
+            )
     results.append(
         _bad("CP-02", req, findings)
         if findings
-        else _ok("CP-02", req, f"搜尋空間 {len(fitted)} 項，三個 gauge 固定項皆明列且未入列")
+        else _ok(
+            "CP-02", req,
+            f"搜尋空間 {len(fitted)} 項；{len(listed)} 個 gauge 固定項皆明列且未入列"
+            + (
+                "，展開後的 optimizer 維度亦已比對"
+                if expansion_checked
+                else "；**展開維度未比對**（lock 不可讀）"
+            ),
+        )
     )
 
     # -- CP-03 邊界必須與已凍結的 lock 逐字相同 ---------------------------
@@ -729,11 +798,15 @@ def freeze_preregistration(
     from pcmef.core.parameters import ParameterRegistry
 
     root = Path(repo_root)
+    # AMD-004 P0-2：身分只能來自協定檔，不得來自程式常數。檔名、payload 內的
+    # id 與協定宣告的 id 三者由同一個值產生，因此不可能分家。
+    protocol_for_id = load_protocol(protocol_path)
+    identifier = declared_preregistration_id(protocol_for_id)
     target_dir = Path(freeze_dir) / "preregistrations"
-    target = target_dir / f"{PREREGISTRATION_ID}.prereg.json"
+    target = target_dir / f"{identifier}.prereg.json"
     if target.exists():
         raise PreregistrationError(
-            f"{PREREGISTRATION_ID} is already frozen at {target}; preregistrations "
+            f"{identifier} is already frozen at {target}; preregistrations "
             "are append-only. Changing the protocol requires an amendment and a new id."
         )
 
@@ -753,7 +826,7 @@ def freeze_preregistration(
 
     optimizer = protocol["optimizer"]
     payload = {
-        "preregistration_id": PREREGISTRATION_ID,
+        "preregistration_id": identifier,
         "preregistration_version": protocol["preregistration_version"],
         "protocol_path": "configs/calibration_preregistration.yaml",
         "protocol_hash": hash_object(protocol),
@@ -846,7 +919,7 @@ def freeze_preregistration(
     }
 
     document = {
-        "preregistration_id": PREREGISTRATION_ID,
+        "preregistration_id": identifier,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "payload_hash": hash_object(payload),
         "payload": payload,

@@ -215,21 +215,33 @@ def test_a_zero_response_vector_has_no_defined_angle():
 # ---------------------------------------------------------------------------
 
 
+def _own_channel(dimension: str) -> str:
+    """該維度**自己階段宣告**的第一個 observable。
+
+    AMD-004 之後入場判定只看這一組通道，因此測試的效應必須落在這裡；
+    落在別的通道上會（正確地）被判為 GAUGE_FIXED。
+    """
+    from pcmef.experiments.calibration_stage0 import declared_observables
+
+    stage = next(s for s, members in STAGES.items() if dimension in members)
+    return declared_observables(stage)[0]
+
+
 def _make_evaluate(effects: dict[str, float], noise: float = 1.0):
-    """回傳一個假的 evaluate：每個維度只在第一個 observable 上有效應。"""
-    target = NAMES[0]
+    """假的 evaluate：每個維度的效應落在它自己階段宣告的第一個 observable。"""
 
     def evaluate(override, seed):
         row = {name: 100.0 for name in NAMES}
         if seed >= 0:
             # 種子間抖動 -> sigma_MC。用固定序列讓測試是決定性的。
-            row[target] = 100.0 + noise * ((seed % 8) - 3.5)
+            for name in NAMES:
+                row[name] = 100.0 + noise * ((seed % 8) - 3.5)
         if override is not None:
             dimension = override["binding"].dimension
             span = effects.get(dimension, 0.0)
             lo, hi = BOUNDS[dimension]
             fraction = (override["value"] - lo) / (hi - lo)
-            row[target] = 100.0 + span * fraction
+            row[_own_channel(dimension)] = 100.0 + span * fraction
         return row
 
     return evaluate
@@ -285,6 +297,103 @@ def test_declared_channels_cover_every_stage_the_protocol_defines():
     assert ambient_stages == {"AMBIENT"}
 
 
+def _run_with_channels(effects_by_observable, noise=1.0):
+    """effects_by_observable: {dimension: {observable: span}}。"""
+
+    def evaluate(override, seed):
+        row = {name: 100.0 for name in NAMES}
+        if seed >= 0:
+            for name in NAMES:
+                row[name] = 100.0 + noise * ((seed % 8) - 3.5)
+        if override is not None:
+            dimension = override["binding"].dimension
+            lo, hi = BOUNDS[dimension]
+            fraction = (override["value"] - lo) / (hi - lo)
+            for observable, span in effects_by_observable.get(dimension, {}).items():
+                row[observable] = 100.0 + span * fraction
+        return row
+
+    return run_stage0(
+        resolved_bounds=dict(BOUNDS),
+        initial_values=dict(INITIAL),
+        stage_parameters=dict(STAGES),
+        stage0_settings=dict(SETTINGS),
+        evaluate=evaluate,
+    )
+
+
+def test_a_parameter_loud_elsewhere_but_silent_in_its_own_stage_is_not_admitted():
+    """AMD-004 P0-1：入場判定必須用**該階段自己宣告**的 observable。
+
+    這一條複製 stage 0 首跑實測到的情況：
+    `_FOIL_SIZE_TO_DIAMETER_RATIO` 在 Water-filled 的 ambient 上槓桿 101.7
+    而被 ADMITTED，但它在自己階段宣告的通道上只有 0.0006。
+    入場的意思是「optimizer 看得見它」，而 optimizer 只看得見該階段目標
+    函數裡的項 —— 靠別的階段才會最佳化的通道拿入場券是無效的。
+    """
+    from pcmef.experiments.calibration_stage0 import declared_observables
+
+    own = declared_observables("AMBIENT")[0]           # ambient 通道，屬 stage AMBIENT
+    other = declared_observables("SIGNAL_SCALE")[0]    # signal 通道，別的階段才最佳化
+
+    # sigma_MC 對這組序列恰為 2.4495；span 245 -> 槓桿約 100，span 0.0024 -> 約 0.001
+    result = _run_with_channels(
+        {"ambient_energy_to_mcps": {other: 245.0, own: 0.0024}}
+    )
+    entry = next(
+        p for p in result["parameters"] if p["dimension"] == "ambient_energy_to_mcps"
+    )
+
+    # 全域上很大（遠高於門檻 10），自己階段的通道上幾乎為零（遠低於 band 下緣 5）。
+    assert entry["max_leverage"] > 50.0
+    assert entry["max_leverage_observable"] == other
+    assert entry["max_leverage_declared"] < 0.01
+    assert entry["max_leverage_declared_observable"] == own
+
+    # 這是本測試的重點：判定必須是 GAUGE_FIXED，不是 ADMITTED。
+    assert entry["outcome"] == "GAUGE_FIXED"
+    # 舊規則的判定仍留作診斷，因此「改判準之後結論變了哪些」看得見。
+    assert entry["outcome_under_global_scope"] == "ADMITTED"
+    assert result["parameters"] and any(
+        w["dimension"] == "ambient_energy_to_mcps"
+        for w in _would_have_passed(result)
+    )
+
+
+def _would_have_passed(result):
+    return [
+        p for p in result["parameters"]
+        if str(p.get("outcome_under_global_scope", "")).startswith("ADMITTED")
+        and not p["outcome"].startswith("ADMITTED")
+    ]
+
+
+def test_admission_uses_own_stage_even_when_that_makes_it_pass():
+    """成對：自己階段的通道夠大時就必須 ADMIT，否則上一條會在
+    「判定永遠拒絕」的情況下通過。"""
+    from pcmef.experiments.calibration_stage0 import declared_observables
+
+    own = declared_observables("AMBIENT")[0]
+    result = _run_with_channels({"ambient_energy_to_mcps": {own: 245.0}})
+    entry = next(
+        p for p in result["parameters"] if p["dimension"] == "ambient_energy_to_mcps"
+    )
+    assert entry["max_leverage_declared"] == pytest.approx(100.0, rel=1e-3)
+    assert entry["outcome"] == "ADMITTED"
+
+
+def test_a_stage_without_declared_observables_is_refused_not_defaulted():
+    """未知/未宣告的 stage 不得靜默落入某個預設範圍。"""
+    with pytest.raises(Stage0Error, match="declares no observables"):
+        run_stage0(
+            resolved_bounds={"ambient_energy_to_mcps": (0.0, 1.0)},
+            initial_values=dict(INITIAL),
+            stage_parameters={"NOT_A_REAL_STAGE": ["ambient_energy_to_mcps"]},
+            stage0_settings=dict(SETTINGS),
+            evaluate=_make_evaluate({}),
+        )
+
+
 def test_a_clean_probe_completes():
     """沒有這一條，其餘負向測試會在「永遠要求裁決」的情況下全部通過。"""
     result = _run({"ambient_energy_to_mcps": 1000.0, "signal_energy_to_mcps": 1000.0})
@@ -315,14 +424,19 @@ def test_a_moving_observable_without_a_noise_reference_is_admitted_deterministic
     entry = next(
         p for p in result["parameters"] if p["dimension"] == "ambient_energy_to_mcps"
     )
-    assert entry["deterministic_response_observables"] == [NAMES[0]]
-    assert entry["leverage_branch"][NAMES[0]] == "DETERMINISTIC_RESPONSE"
+    moved = _own_channel("ambient_energy_to_mcps")
+    assert entry["deterministic_response_observables"] == [moved]
+    # 而且那個無雜訊卻會動的 observable 必須落在**自己階段宣告**的通道上，
+    # 否則它不該讓參數入場（P0-1）。
+    assert entry["deterministic_response_declared"] == [moved]
+    assert entry["leverage_branch"][moved] == "DETERMINISTIC_RESPONSE"
     # 會動的那一個沒有數值槓桿（不得是 inf），其餘 observable 是 INERT，
     # 槓桿恰為 0 —— 因此 max 只會是 0.0，判定完全由具名分支決定。
-    assert entry["leverage"][NAMES[0]] is None
+    assert entry["leverage"][moved] is None
     assert entry["max_leverage"] == 0.0
-    assert entry["leverage_branch"][NAMES[1]] == "INERT"
-    assert entry["leverage"][NAMES[1]] == 0.0
+    inert = next(n for n in NAMES if n != moved)
+    assert entry["leverage_branch"][inert] == "INERT"
+    assert entry["leverage"][inert] == 0.0
 
 
 def test_a_parameter_nothing_responds_to_is_gauge_fixed_even_without_noise():

@@ -583,10 +583,18 @@ def run_stage0(
         entry["deterministic_response_observables"] = deterministic
         entry["non_finite_observables"] = non_finite
 
-        # 診斷：把 max 限制在「該階段自己宣告要最佳化的 observable」上。
-        # 這**不**改變入場判定，只是把「靠一個自己階段從不最佳化的 observable
-        # 拿到入場券」這件事變成看得見的數字。
+        # AMD-004 P0-1：**入場判定的分母是該階段自己宣告要最佳化的 observable。**
+        # 全域 max 降為診斷。入場的意思是「optimizer 看得見這個參數」，
+        # 而 optimizer 只看得見該階段目標函數裡的那些項；一個參數若只在別的
+        # 階段才會被最佳化的通道上有反應，它在自己的階段裡就是看不見的。
         stage_declared = declared_observables(entry["stage"])
+        if not stage_declared:
+            raise Stage0Error(
+                f"stage {entry['stage']!r} (dimension {dimension!r}) declares no "
+                "observables. Admission is measured on the stage's own declared "
+                "channels, so a stage without them cannot be adjudicated; add it to "
+                "DECLARED_CHANNELS and to the frozen protocol."
+            )
         declared_defined = {n: v for n, v in defined.items() if n in stage_declared}
         declared_best_name = (
             max(declared_defined, key=lambda n: declared_defined[n])
@@ -598,31 +606,36 @@ def run_stage0(
             if declared_best_name is not None
             else None
         )
+        declared_deterministic = [n for n in deterministic if n in stage_declared]
+        declared_non_finite = [n for n in non_finite if n in stage_declared]
+
         entry["declared_observables"] = stage_declared
         entry["max_leverage_declared"] = declared_best
         entry["max_leverage_declared_observable"] = declared_best_name
-        entry["outcome_if_restricted_to_declared"] = classify_leverage(
-            declared_best, threshold, band
-        )
+        entry["deterministic_response_declared"] = declared_deterministic
+        # 舊規則（對全部 observable 取 max）的判定保留為診斷，因此
+        # 「改判準之後結論變了哪些」永遠可稽核。
+        entry["outcome_under_global_scope"] = classify_leverage(best, threshold, band)
 
-        outcome = classify_leverage(best, threshold, band)
-        if non_finite:
+        outcome = classify_leverage(declared_best, threshold, band)
+        if declared_non_finite:
             outcome = "UNDETERMINED"
             entry["why"] = (
-                f"{len(non_finite)} observable(s) produced a non-finite value or "
-                "non-finite sigma_MC; no classification is defensible."
+                f"{len(declared_non_finite)} declared observable(s) produced a "
+                "non-finite value or non-finite sigma_MC; no classification is "
+                "defensible."
             )
-        elif deterministic and outcome != "ADMITTED":
+        elif declared_deterministic and outcome != "ADMITTED":
             # 無雜訊、卻在整個登記範圍上會動 -> 訊噪比發散。
             # 這是可辨識的最強證據，但它是**具名分支**而不是一個假造的 inf。
             outcome = "ADMITTED_DETERMINISTIC"
             entry["why"] = (
-                f"{len(deterministic)} observable(s) have sigma_MC at or below the "
-                f"degeneracy floor (relative {SIGMA_MC_RELATIVE_FLOOR:g}) yet move "
-                "across the registered range. A noiseless observable that responds "
-                "is the strongest possible identifiability evidence, so this is "
-                "recorded as its own outcome rather than as an invented infinite "
-                "leverage."
+                f"{len(declared_deterministic)} declared observable(s) have sigma_MC "
+                f"at or below the degeneracy floor (relative "
+                f"{SIGMA_MC_RELATIVE_FLOOR:g}) yet move across the registered range. "
+                "A noiseless observable that responds is the strongest possible "
+                "identifiability evidence, so this is recorded as its own outcome "
+                "rather than as an invented infinite leverage."
             )
         entry["outcome"] = outcome
 
@@ -1010,26 +1023,25 @@ def execute_stage0(
     new_degeneracies = [
         c for c in result["collinearity"] if c.get("degenerate") is True
     ]
-    # 靠「自己階段從不最佳化的 observable」取得入場券的參數。
-    admitted_elsewhere = [
+    # AMD-004 P0-1 之後這是**回報項而不是 blocker**：舊規則（全域 max）會放行、
+    # 新規則（該階段宣告的通道）擋下的那些參數。它們現在確實被擋下了，
+    # 記錄下來是為了讓「改判準之後結論變了哪些」看得見。
+    would_have_passed_under_global_scope = [
         {
             "dimension": e["dimension"],
             "stage": e["stage"],
-            "max_leverage": e["max_leverage"],
-            "max_leverage_observable": e["max_leverage_observable"],
+            "max_leverage_global": e["max_leverage"],
+            "max_leverage_global_observable": e["max_leverage_observable"],
             "max_leverage_declared": e.get("max_leverage_declared"),
             "max_leverage_declared_observable": e.get(
                 "max_leverage_declared_observable"
             ),
-            "outcome_if_restricted_to_declared": e.get(
-                "outcome_if_restricted_to_declared"
-            ),
+            "outcome_binding": e["outcome"],
+            "outcome_under_global_scope": e.get("outcome_under_global_scope"),
         }
         for e in result["parameters"]
-        if e["outcome"].startswith("ADMITTED")
-        and not str(e.get("outcome_if_restricted_to_declared", "")).startswith(
-            "ADMITTED"
-        )
+        if str(e.get("outcome_under_global_scope", "")).startswith("ADMITTED")
+        and not e["outcome"].startswith("ADMITTED")
     ]
 
     blockers: list[str] = []
@@ -1046,15 +1058,6 @@ def execute_stage0(
         blockers.append(
             f"{len(new_degeneracies)} within-stage pair(s) exceeded the "
             "collinearity threshold 0.98 and are not covered by CG-1..CG-4"
-        )
-    if admitted_elsewhere:
-        blockers.append(
-            f"{len(admitted_elsewhere)} dimension(s) were admitted on the strength "
-            "of an observable that their own stage never optimises: "
-            f"{[a['dimension'] for a in admitted_elsewhere]}. The preregistered "
-            "admission rule is max over every observable, so this classification is "
-            "literal-compliant, but those parameters would be near-invisible to the "
-            "objective terms their stage actually minimises."
         )
 
     outcome = "STAGE0_ADJUDICATION_REQUIRED" if blockers else "STAGE0_COMPLETE"
@@ -1142,12 +1145,14 @@ def execute_stage0(
             for stage, spec in DECLARED_CHANNELS.items()
         },
         "declared_channels_note": (
-            "A reading of the stagewise observables prose in CAL-PREREG-002, "
-            "recorded so it can be checked. It drives only the diagnostic field "
-            "max_leverage_declared; the binding admission rule remains the "
-            "preregistered literal one (max over every observable)."
+            "The observables each stage declares it optimises, recorded so the "
+            "reading can be checked. Under AMD-004 these are the BINDING scope of "
+            "the admission rule: a parameter is admitted on max leverage over its "
+            "OWN stage's declared observables. The global max over all 32 is kept "
+            "as the diagnostic field outcome_under_global_scope."
         ),
-        "admitted_via_undeclared_observable": admitted_elsewhere,
+        "admission_scope": "own_stage_declared_observables",
+        "would_have_passed_under_global_scope": would_have_passed_under_global_scope,
         "sigma_mc_relative_floor": SIGMA_MC_RELATIVE_FLOOR,
         "feasible_domains": result["feasible_domains"],
         "feasibility_rule": {

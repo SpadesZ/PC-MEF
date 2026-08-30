@@ -155,6 +155,41 @@ def test_cp02_fails_when_calibration_tries_to_move_the_estimator(
     assert _status(protocol, tmp_path, "CP-02") is CheckStatus.FAIL
 
 
+_CG5_ENTRY = {
+    "name": "_ALBEDO_BY_PRESET.water",
+    "group": "CG-5_effective_medium",
+    "why": "density <-> albedo 近乎精確簡併（實測 |cos| 0.9987）",
+}
+
+
+def test_cp02_enforces_every_gauge_member_the_protocol_lists_not_just_cg123(
+    protocol, tmp_path
+):
+    """AMD-004 P0-3：CG-5 的 albedo 必須真的被擋住，不是只寫在 YAML 裡。
+
+    先前 CP-02 只硬寫 CG-1/2/3 那三個名字，於是任何**新**的 gauge 固定項
+    加進 forbidden_parameters 之後，validator 完全不會檢查它有沒有溜回
+    搜尋空間 —— 「寫下裁決」與「裁決生效」是兩回事。
+    """
+    protocol["forbidden_parameters"]["gauge_fixed"].append(dict(_CG5_ENTRY))
+    # _ALBEDO_BY_PRESET 仍留在某個 stage 的 parameters 裡 -> 必須 FAIL。
+    assert _status(protocol, tmp_path, "CP-02") is CheckStatus.FAIL
+
+
+def test_cp02_passes_once_the_gauge_member_actually_leaves_the_search_space(
+    protocol, tmp_path
+):
+    """成對：真的把它移出擬合之後就該 PASS。
+
+    少了這一條，上一條會在「CP-02 永遠 FAIL」的情況下通過。
+    """
+    protocol["forbidden_parameters"]["gauge_fixed"].append(dict(_CG5_ENTRY))
+    for stage in protocol["stagewise"]:
+        if "_ALBEDO_BY_PRESET" in stage["parameters"]:
+            stage["parameters"].remove("_ALBEDO_BY_PRESET")
+    assert _status(protocol, tmp_path, "CP-02") is CheckStatus.PASS
+
+
 def test_cp02_fails_when_a_gauge_member_is_no_longer_listed(protocol, tmp_path):
     """把固定項從禁令清單移掉，即使沒人擬合它也必須 FAIL。"""
     protocol["forbidden_parameters"]["gauge_fixed"] = [
@@ -538,3 +573,57 @@ def test_heldout_remains_sealed():
         )
     )
     assert registry["heldout_access_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 預註冊身分（AMD-004 P0-2）
+# ---------------------------------------------------------------------------
+
+
+def test_the_identity_comes_from_the_protocol_not_from_a_code_constant():
+    """YAML 說 003、程式常數說 002 -> 不得凍出一份自稱 002 的記錄。"""
+    from pcmef.experiments.calibration_prereg import declared_preregistration_id
+
+    assert declared_preregistration_id({"preregistration_id": "CAL-PREREG-003"}) == (
+        "CAL-PREREG-003"
+    )
+    assert declared_preregistration_id(load_protocol()) == "CAL-PREREG-002"
+
+
+@pytest.mark.parametrize("bad", [None, "", "CAL-PREREG-3", "PREREG-003", "003"])
+def test_a_malformed_or_missing_identity_is_refused(bad):
+    protocol = {} if bad is None else {"preregistration_id": bad}
+    with pytest.raises(PreregistrationError):
+        from pcmef.experiments.calibration_prereg import declared_preregistration_id
+
+        declared_preregistration_id(protocol)
+
+
+def test_the_freeze_target_follows_the_protocol_id(protocol, tmp_path, monkeypatch):
+    """freeze 檔名、payload 內的 id 與協定宣告的 id 必須是同一個值。
+
+    先前三者由一個模組常數決定，於是把協定改成 CAL-PREREG-003 卻忘了改常數，
+    會凍出「檔名與內容都寫 002、協定其實是 003」的記錄。
+    """
+    protocol["preregistration_id"] = "CAL-PREREG-009"
+    path = _write(tmp_path, protocol)
+
+    # 只驗身分推導，不重跑整套 CP 檢查（那需要完整 freeze 目錄）。
+    from pcmef.experiments.calibration_prereg import declared_preregistration_id
+
+    assert declared_preregistration_id(load_protocol(path)) == "CAL-PREREG-009"
+
+    # 而且 001/002 必須永遠留著（append-only）。
+    frozen = REPO_ROOT / "freeze" / "preregistrations"
+    assert (frozen / "CAL-PREREG-001.prereg.json").exists()
+    assert (frozen / "CAL-PREREG-002.prereg.json").exists()
+
+
+def test_frozen_records_are_self_consistent_about_their_own_identity():
+    """已凍結的每一份記錄，檔名 / 文件 id / payload id 三者必須一致。"""
+    frozen = REPO_ROOT / "freeze" / "preregistrations"
+    for path in sorted(frozen.glob("CAL-PREREG-*.prereg.json")):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        stem = path.name.split(".")[0]
+        assert document["preregistration_id"] == stem
+        assert document["payload"]["preregistration_id"] == stem
