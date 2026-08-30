@@ -1307,6 +1307,155 @@ def _print_stage0_report(report: dict, path: Path) -> None:
     print(f"report: {path.resolve()}")
 
 
+def cmd_e1_final(args: argparse.Namespace) -> int:
+    """AMD-005 的最終評估：凍結在前、開啟在後。
+
+    算圖在子行程執行（NOTE-012）。`--dry-run` 只檢查前提，不凍結任何 lock、
+    也**不會**碰 FORMAL_E1_FINAL。
+    """
+    import subprocess
+
+    out_dir = Path(args.out)
+    report_path = out_dir / "e1_final_report.json"
+
+    if args.dry_run:
+        from pcmef.core.heldout_partition import FINAL_ROLE, load_partition
+        from pcmef.core.locks import LockStore
+        from pcmef.experiments.e1_final import scenario_seed_matrix
+
+        registry = json.loads(
+            (Path(args.repo_root) / "data" / "splits" / "split_registry.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        report = json.loads(Path(args.calibration_report).read_text(encoding="utf-8"))
+        partition = load_partition(args.freeze_dir, args.repo_root)
+        matrix = scenario_seed_matrix()
+        store = LockStore(args.freeze_dir)
+
+        print("E1 final readiness (dry run — nothing frozen, nothing opened)")
+        print(f"  calibration outcome        : {report['overall_outcome']}")
+        print(f"  scientific_result          : {report.get('scientific_result')}")
+        # 舊版 runner（v0.1.0）的報告沒有這一區塊；缺它就是「這份報告不是
+        # AMD-005 之後產生的」，必須看得出來，而不是讓 dry-run 崩掉。
+        inhibitory = report.get("inhibitory_control")
+        print(
+            f"  inhibited stages           : "
+            f"{(inhibitory['inhibited_stages'] or 'none') if inhibitory else 'n/a (report predates AMD-005)'}"
+        )
+        print(f"  heldout partition          : {partition['payload_hash'][:16]}")
+        print(
+            f"  FORMAL_E1_FINAL recordings : "
+            f"{partition['payload']['totals'][FINAL_ROLE]}"
+        )
+        print(f"  heldout_access_count       : {registry['heldout_access_count']}")
+        print(f"  base scenarios             : {len(matrix['base_scenario_ids'])}")
+        print(f"  seed matrix hash           : {matrix['seed_matrix_hash'][:16]}")
+        print("\n  locks")
+        for name in (
+            "real_split_policy", "initial_simulation", "calibrated_simulation",
+            "metric_config", "e1_candidates", "e1_evaluation_design",
+            "e1_scientific_rule", "claim_boundary", "e1_outcome",
+        ):
+            state = "frozen" if store.exists(name) else "pending"
+            print(f"    [{state:>7}] {name}")
+        ready = report["overall_outcome"] == "CALIBRATION_COMPLETE"
+        print(
+            f"\n  ready to run final: {ready} "
+            f"({'calibration is resolved' if ready else 'calibration is not resolved'})"
+        )
+        return 0 if ready else 2
+
+    if not args.in_worker:
+        command = [
+            sys.executable, "-m", "pcmef.cli", "e1", "final",
+            "--calibration-report", str(args.calibration_report),
+            "--out", str(args.out),
+            "--freeze-dir", str(args.freeze_dir),
+            "--repo-root", str(args.repo_root),
+            "--source", str(args.source),
+            "--in-worker",
+        ]
+        if args.allow_dirty:
+            command.append("--allow-dirty")
+        completed = subprocess.run(command, check=False)
+        if not report_path.exists():
+            print(
+                f"error: worker exited with {completed.returncode} and wrote no E1 "
+                "report",
+                file=sys.stderr,
+            )
+            return completed.returncode or 1
+        document = json.loads(report_path.read_text(encoding="utf-8"))
+        _print_e1_final_report(document, report_path)
+        return 0
+
+    from pcmef.core.heldout_partition import HeldoutPartitionError
+    from pcmef.experiments.e1_final import E1FinalError, run_e1_final
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+
+    require_mitsuba()
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if dirty and not args.allow_dirty:
+        print(
+            "error: the working tree has uncommitted changes; the locks this command "
+            "freezes name a commit and must be produced from it. Commit first, or "
+            "pass --allow-dirty.",
+            file=sys.stderr,
+        )
+        return 2
+
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:8.1f}s] {message}", flush=True)
+
+    try:
+        run_e1_final(
+            calibration_report=args.calibration_report,
+            out_root=args.out,
+            freeze_dir=args.freeze_dir,
+            repo_root=args.repo_root,
+            source_root=args.source,
+            code_version=commit,
+            progress=say,
+        )
+    except (E1FinalError, HeldoutPartitionError) as error:
+        print(f"\nFAIL CLOSED: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _print_e1_final_report(document: dict, path: Path) -> None:
+    print("\nE1 final")
+    print(f"  path            : {path.resolve()}")
+    print(f"  outcome         : {document['outcome']}")
+    print(f"  heldout opened  : {document['heldout']['recordings']} recordings, "
+          f"access count {document['heldout']['heldout_access_count']}")
+    print("\n  PASS conditions")
+    for line in document["condition_lines"]:
+        print(f"    {line}")
+    result = document["result"]
+    print("\n  macro-mean Delta (NW_initial - NW_calibrated)")
+    bootstrap = result.get("bootstrap", {})
+    print(
+        f"    point {bootstrap.get('point_estimate')}  "
+        f"CI [{bootstrap.get('ci_lower')}, {bootstrap.get('ci_upper')}]"
+    )
+    print(f"\n  {'cell':30s} {'NW initial':>14s} {'NW calibrated':>15s} {'delta':>12s}")
+    for row in document["cells"]:
+        print(
+            f"  {row['class_label'] + '|' + row['feature']:30s} "
+            f"{row['nw_initial']:>14.6g} {row['nw_calibrated']:>15.6g} "
+            f"{row['delta']:>12.6g}"
+        )
+
+
 def cmd_split_partition_heldout(args: argparse.Namespace) -> int:
     """AMD-005：在**讀值之前**把 heldout_real 切成 probe 與 final。
 
@@ -2758,6 +2907,27 @@ def build_parser() -> argparse.ArgumentParser:
     e1_evidence.add_argument("--tests-dir", default="tests/e1")
     e1_evidence.add_argument("--out", default="tests/e1_metrics.xml")
     e1_evidence.set_defaults(func=cmd_e1_metrics_evidence)
+
+    e1_final = e1_sub.add_parser(
+        "final",
+        help="AMD-005：凍結校準模擬器與全部判準，然後開啟 FORMAL_E1_FINAL 一次並評估",
+    )
+    e1_final.add_argument(
+        "--calibration-report",
+        default="outputs/calibration/calibration_report.json",
+    )
+    e1_final.add_argument("--out", default="outputs/e1")
+    e1_final.add_argument("--freeze-dir", default="freeze")
+    e1_final.add_argument("--repo-root", default=".")
+    e1_final.add_argument("--source", default="data/raw_real/edge_impulse_export")
+    e1_final.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只檢查前提與評估設計，不凍結、不開啟 FORMAL_E1_FINAL",
+    )
+    e1_final.add_argument("--allow-dirty", action="store_true")
+    e1_final.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
+    e1_final.set_defaults(func=cmd_e1_final)
 
     params_parser = subparsers.add_parser("params", help="參數 registry 與 formal 防線")
     params_sub = params_parser.add_subparsers(dest="params_command", required=True)
