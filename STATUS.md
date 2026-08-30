@@ -181,7 +181,7 @@ sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
 | M2 Surrogate + E1 | **`E1 CLOSED — partial calibration success`** | 五階段跑完、E1 開啟一次並得 PASS。**只有 Ambient Rate 真的改善**，其餘三個 feature 維持 initial physics-constrained state。見「E1 已完成」專節 |
 | M3 Post-E1 Split | **`paired bridge smoke PASS / ready for perception`** | 成對 RGB-ToF 生成路徑已驗收（6/6 check PASS，identity `a00b3969…`）。synthetic split policy lock 本身仍未凍 |
-| M4 Perception | **corrective pass 進行中** | ds_v1 為 diagnostic（RGB 積分器缺陷 + 單一 family）；已修 RGB volumetric transport、RGB/ToF spp 解耦、20 families/class 的 family-level split，重跑中 |
+| M4 Perception | **corrective pass 完成** | ds_v2：Vision 1.000 / ToF 0.988 / Fusion 1.000（family-level split，80 families，無 leakage）。**但三者都在天花板，量不出 gate 價值**，見「M4 corrective pass 結果」 |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
 | M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
@@ -1169,6 +1169,68 @@ family split：train 12 / val 4 / test 4（每類），同一 family 的 5 個�
 > `n_families - 1` 會讓 irradiance 取到 **4.039**，超出 S3 宣告的上界 4.0。
 > 已改為除以 `n_families`，取值嚴格落在宣告區間內。超出預註冊範圍的場景
 > 就是沒有依據的場景，因此那一批已生成的資料整批作廢重跑。
+
+---
+
+## M4 corrective pass 結果 —— ds_v2（2026-08-31）
+
+```
+outputs/perception/ds_v2/{dataset_manifest,preprocessing,perception_report}.json
+4 classes x 20 physical families x 5 realizations = 400 samples
+family split 12/4/4 -> train 240 / val 80 / test 80
+simulator identity 3b2c296c601b0878   calibrated lock 079b248980eaff85（未變）
+render: tof spp 16（E1 凍結）/ rgb spp 4096（convergence pilot 選定）
+```
+
+| 模型 | 參數 | train | val | **test** | test macro-F1 | 過擬合 |
+|---|---|---|---|---|---|---|
+| Vision CNN | 23,956 | 0.946 | 1.000 | **1.000** | 1.000 | 無 train-val 落差 |
+| ToF 1D-CNN | 18,852 | 0.996 | 1.000 | **0.988** | 0.987 | 無 train-val 落差 |
+| Fusion (w=0.50) | — | 1.000 | 1.000 | **1.000** | 1.000 | 權重由 validation 選出 |
+
+ToF 唯一的錯誤是一筆 Misty 被判為 Water-filled；Vision 與 fusion 的
+confusion matrix 是乾淨的對角線。
+
+### leakage 稽核
+
+```
+scenario_id disjoint           True
+scenario_seed disjoint         True
+physical scene family disjoint True     80 families（每類 20），無跨 split
+```
+
+nuisance 兩軸在三個 split 上都覆蓋整個範圍：
+
+| split | lateral_offset_mm | irradiance |
+|---|---|---|
+| train | [-5.000, 4.875] mean 0.104 | [1.000, 3.662] mean 2.331 |
+| val | [-4.000, 3.375] mean 0.438 | [1.600, 3.812] mean 2.481 |
+| test | [-4.500, 2.375] mean -1.062 | [1.900, 3.963] mean 2.931 |
+
+### Vision 從 0.425 變成 1.000，原因是 renderer 終於畫出介質
+
+ds_v1 的 Vision 失效不是模型問題：`path` 積分器丟掉參與介質，
+(Empty, Misty) 與 (Water-filled, Bubbly) 各自共用 interior IOR，
+於是 RGB 只看得到兩個場景。改用 `volpath` 後最難的一對
+`Empty|Misty` 類間距離由 **0.058 變成 0.599**（10 倍），Vision 因此
+從 0.425 變成 1.000。這是「看得見」與「看不見」的差別，不是調參的結果。
+
+### 這些數字仍不能直接當 gate 的輸入 —— 三個保留
+
+1. **三個模型都在天花板。** test 1.000 / 0.988 / 1.000 代表兩個模態幾乎
+   從不彼此矛盾。D/U/Q gate 的用途是在模態分歧時仲裁，而這個資料集
+   幾乎不產生分歧，因此它**量不出 gate 的價值**。要讓 gate 可評估，
+   需要有難例（更近的類別、更強的雜訊、或部分遮蔽），而那是下一階段的
+   設計決定，不是這裡該偷改的。
+2. **信心與正確率脫節。** Vision 全對但 mean P(true class) 只有 0.671，
+   ToF 0.897。機率沒有校準過，直接餵給以機率為輸入的 gate 會有問題。
+3. **只有兩個 nuisance 軸。** family 之間只差在橫向偏移與亮度；
+   類別本身由介質決定，訊號很強。這仍然不是「未見過的瓶子構型」的
+   泛化證據，只是「未見過的擺位與亮度」。
+
+> 因此本階段的結論是：**成對資料管線、兩個單模態 baseline 與傳統融合
+> 全部可執行且結果正常**，且兩個資料生成缺陷已在進入 formal gate 之前修掉。
+> 但這些分數**不足以支撐 PC-MEF gate 的評估**，理由是任務太容易而非管線有問題。
 
 ---
 
