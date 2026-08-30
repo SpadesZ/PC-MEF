@@ -1441,18 +1441,26 @@ def _print_e1_final_report(document: dict, path: Path) -> None:
     for line in document["condition_lines"]:
         print(f"    {line}")
     result = document["result"]
-    print("\n  macro-mean Delta (NW_initial - NW_calibrated)")
     bootstrap = result.get("bootstrap", {})
+    print("\n  macro-mean Delta (NW_initial - NW_calibrated); positive = closer")
     print(
-        f"    point {bootstrap.get('point_estimate')}  "
-        f"CI [{bootstrap.get('ci_lower')}, {bootstrap.get('ci_upper')}]"
+        f"    point {bootstrap.get('point_estimate'):.6g}  "
+        f"CI [{bootstrap.get('ci_lower'):.6g}, {bootstrap.get('ci_upper'):.6g}]  "
+        f"({bootstrap.get('replicates')} replicates over "
+        f"{bootstrap.get('n_units')} scenarios)"
+    )
+    trend = result.get("trend", {})
+    print(
+        f"    trend applicable={trend.get('applicable')} "
+        f"degraded={trend.get('degraded')} "
+        f"({document['evaluation_design']['trend']['status']})"
     )
     print(f"\n  {'cell':30s} {'NW initial':>14s} {'NW calibrated':>15s} {'delta':>12s}")
     for row in document["cells"]:
         print(
             f"  {row['class_label'] + '|' + row['feature']:30s} "
             f"{row['nw_initial']:>14.6g} {row['nw_calibrated']:>15.6g} "
-            f"{row['delta']:>12.6g}"
+            f"{row['delta_nw']:>12.6g}"
         )
 
 
