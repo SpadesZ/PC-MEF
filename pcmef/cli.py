@@ -1307,6 +1307,134 @@ def _print_stage0_report(report: dict, path: Path) -> None:
     print(f"report: {path.resolve()}")
 
 
+def cmd_sim_paired_smoke(args: argparse.Namespace) -> int:
+    """E1 -> E2 成對資料橋的 smoke。算圖在子行程執行（NOTE-012）。
+
+    **不讀真實資料、不碰 FORMAL_E1_FINAL、不訓練任何模型。**
+    """
+    import subprocess
+
+    out_root = Path(args.out)
+    marker = out_root / "paired_smoke_result.json"
+
+    if not args.in_worker:
+        command = [
+            sys.executable, "-m", "pcmef.cli", "sim", "paired-smoke",
+            "--per-class", str(args.per_class),
+            "--out", str(args.out),
+            "--freeze-dir", str(args.freeze_dir),
+            "--repo-root", str(args.repo_root),
+            "--in-worker",
+        ]
+        if args.run_name:
+            command.extend(["--run-name", args.run_name])
+        if args.skip_determinism:
+            command.append("--skip-determinism")
+        if marker.exists():
+            marker.unlink()
+        completed = subprocess.run(command, check=False)
+        if not marker.exists():
+            print(
+                f"error: worker exited with {completed.returncode} and wrote no "
+                "paired smoke result",
+                file=sys.stderr,
+            )
+            return completed.returncode or 1
+        result = json.loads(marker.read_text(encoding="utf-8"))
+        _print_paired_smoke(result, marker)
+        return 0 if result["verification"]["passed"] else 2
+
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+    from pcmef.simulation.paired import (
+        PairedGenerationError,
+        run_paired_smoke,
+        verify_manifest,
+    )
+
+    require_mitsuba()
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+
+    try:
+        manifest = run_paired_smoke(
+            per_class=args.per_class,
+            out_root=args.out,
+            run_name=args.run_name,
+            freeze_dir=args.freeze_dir,
+            repo_root=args.repo_root,
+            code_version=commit,
+            progress=say,
+        )
+        say("verifying")
+        verification = verify_manifest(
+            manifest,
+            freeze_dir=args.freeze_dir,
+            repo_root=args.repo_root,
+            check_determinism=not args.skip_determinism,
+            progress=say,
+        )
+    except PairedGenerationError as error:
+        print(f"\nFAIL CLOSED: {error}", file=sys.stderr)
+        return 2
+
+    out_root.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "manifest_path": (Path(manifest["run_dir"]) / "paired_manifest.json").as_posix(),
+                "run_dir": manifest["run_dir"],
+                "counts": manifest["counts"],
+                "simulator": manifest["simulator"],
+                "verification": verification,
+                "ready_for_perception_train": verification["passed"],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return 0 if verification["passed"] else 2
+
+
+def _print_paired_smoke(result: dict, path: Path) -> None:
+    print("\npaired RGB-ToF smoke")
+    print(f"  result          : {path.resolve()}")
+    print(f"  run dir         : {result['run_dir']}")
+    print(f"  samples         : {result['counts']['total']} "
+          f"({result['counts']['per_class']})")
+    simulator = result["simulator"]
+    print(f"  simulator id    : {simulator['identity_hash']}")
+    print(f"  calibrated lock : {simulator['calibrated_simulation_lock_hash'][:32]}")
+    print(f"  inhibited stages: {simulator['inhibited_stages']}")
+    print("\n  parameters in use")
+    provenance = dict(simulator["parameter_provenance"])
+    # sensor.fov_deg 作用在場景側而不是 surrogate 側，因此不在
+    # _PROVENANCE 表裡；它的來源由被抑制的階段決定。
+    for name in simulator["scene_constants"]:
+        provenance.setdefault(
+            name,
+            "retained frozen initial (SCENE_GEOMETRY_SURFACE_FOIL UPDATE_INHIBITED)"
+            if "SCENE_GEOMETRY_SURFACE_FOIL" in simulator["inhibited_stages"]
+            else "scene constant from the calibrated lock",
+        )
+    for name, value in sorted(simulator["fitted_parameters"].items()):
+        print(f"    {name:26s} {value!r:24s} {provenance.get(name, 'unrecorded')}")
+    print("\n  checks")
+    for check in result["verification"]["checks"]:
+        print(f"    [{'PASS' if check['passed'] else 'FAIL'}] {check['name']}")
+        print(f"           {check['detail']}")
+    print(
+        f"\n  READY_FOR_PERCEPTION_TRAIN = "
+        f"{'YES' if result['ready_for_perception_train'] else 'NO'}"
+    )
+
+
 def cmd_e1_final(args: argparse.Namespace) -> int:
     """AMD-005 的最終評估：凍結在前、開啟在後。
 
@@ -2736,6 +2864,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,  # 內部旗標：標示此行程即為算圖 worker
     )
     smoke.set_defaults(func=cmd_sim_smoke)
+
+    paired_smoke = sim_sub.add_parser(
+        "paired-smoke",
+        help="E1->E2：以 E1 最終保留狀態的模擬器同時產出 RGB 與 500x4 ToF",
+    )
+    paired_smoke.add_argument("--per-class", type=int, default=1)
+    paired_smoke.add_argument("--out", default="outputs/paired")
+    paired_smoke.add_argument("--run-name", default=None)
+    paired_smoke.add_argument("--freeze-dir", default="freeze")
+    paired_smoke.add_argument("--repo-root", default=".")
+    paired_smoke.add_argument(
+        "--skip-determinism",
+        action="store_true",
+        help="略過重算比對（只在除錯時用；正式驗收必須跑）",
+    )
+    paired_smoke.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
+    paired_smoke.set_defaults(func=cmd_sim_paired_smoke)
 
     ambient_check = sim_sub.add_parser(
         "ambient-check",
