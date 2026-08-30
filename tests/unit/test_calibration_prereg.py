@@ -115,7 +115,7 @@ def test_stages_are_disjoint():
 
 
 def test_cp01_fails_when_a_parameter_is_unclassified(protocol, tmp_path):
-    protocol["stagewise"][0]["parameters"].remove("ambient_jitter_relative")
+    protocol["stagewise"][2]["parameters"].remove("ambient_jitter_relative")
     assert _status(protocol, tmp_path, "CP-01") is CheckStatus.FAIL
 
 
@@ -171,8 +171,12 @@ def test_cp02_enforces_every_gauge_member_the_protocol_lists_not_just_cg123(
     加進 forbidden_parameters 之後，validator 完全不會檢查它有沒有溜回
     搜尋空間 —— 「寫下裁決」與「裁決生效」是兩回事。
     """
-    protocol["forbidden_parameters"]["gauge_fixed"].append(dict(_CG5_ENTRY))
-    # _ALBEDO_BY_PRESET 仍留在某個 stage 的 parameters 裡 -> 必須 FAIL。
+    # 用一個**目前確實在擬合**的參數：把它列為 gauge 固定項卻沒有移出
+    # stagewise，必須 FAIL。CG-5 的 albedo 已經移出去了，拿它測不出東西。
+    protocol["forbidden_parameters"]["gauge_fixed"].append(
+        {"name": "sensor.fov_deg", "group": "CG-6_effective_angular_response",
+         "why": "測試用：列為固定項但未移出搜尋空間"}
+    )
     assert _status(protocol, tmp_path, "CP-02") is CheckStatus.FAIL
 
 
@@ -183,10 +187,16 @@ def test_cp02_passes_once_the_gauge_member_actually_leaves_the_search_space(
 
     少了這一條，上一條會在「CP-02 永遠 FAIL」的情況下通過。
     """
-    protocol["forbidden_parameters"]["gauge_fixed"].append(dict(_CG5_ENTRY))
+    protocol["forbidden_parameters"]["gauge_fixed"].append(
+        {"name": "sensor.fov_deg", "group": "CG-6_effective_angular_response",
+         "why": "測試用"}
+    )
     for stage in protocol["stagewise"]:
-        if "_ALBEDO_BY_PRESET" in stage["parameters"]:
-            stage["parameters"].remove("_ALBEDO_BY_PRESET")
+        if "sensor.fov_deg" in stage["parameters"]:
+            stage["parameters"].remove("sensor.fov_deg")
+    protocol["not_fitted"]["members"].append(
+        {"name": "sensor.fov_deg", "value": 45.0, "why": "測試用"}
+    )
     assert _status(protocol, tmp_path, "CP-02") is CheckStatus.PASS
 
 
@@ -448,7 +458,7 @@ def test_refreezing_is_refused(tmp_path):
 
 def test_cp13_fails_when_the_budget_table_is_hand_edited(protocol, tmp_path):
     """預算表由公式導出；手改一個數字就代表預註冊與程式分家了。"""
-    protocol["evaluation_budget"]["resolved"]["GEOMETRY_SURFACE_FOIL"]["per_stage"] = 3000
+    protocol["evaluation_budget"]["resolved"]["SCENE_GEOMETRY_SURFACE_FOIL"]["per_stage"] = 3000
     assert _status(protocol, tmp_path, "CP-13") is CheckStatus.FAIL
 
 
@@ -587,7 +597,7 @@ def test_the_identity_comes_from_the_protocol_not_from_a_code_constant():
     assert declared_preregistration_id({"preregistration_id": "CAL-PREREG-003"}) == (
         "CAL-PREREG-003"
     )
-    assert declared_preregistration_id(load_protocol()) == "CAL-PREREG-002"
+    assert declared_preregistration_id(load_protocol()) == "CAL-PREREG-003"
 
 
 @pytest.mark.parametrize("bad", [None, "", "CAL-PREREG-3", "PREREG-003", "003"])

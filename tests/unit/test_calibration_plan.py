@@ -242,12 +242,29 @@ def test_an_undeclared_multivalued_parameter_is_refused(protocol, registry):
         expand_dimensions(["_ALBEDO_BY_PRESET"], stripped, registry)
 
 
-def test_participating_media_is_six_dimensions_not_four(protocol, registry):
-    budgets = stage_budgets(protocol, registry)
-    entry = budgets["PARTICIPATING_MEDIA"]
-    assert entry["parameters"] == 4
-    assert entry["dimensions"] == 6
-    assert entry["population"] == 128
+def test_the_media_stage_is_three_dimensions_after_cg5(protocol, registry):
+    """CG-5 之後三個 albedo 是 CONVENTION，介質階段只剩三個密度。
+
+    本條原本驗的是 AMD-003 的 dimension_expansion 消歧義（4 參數 -> 6 維）。
+    CG-5 把 albedo 移出搜尋空間之後那個情境不再存在，但**消歧義機制本身
+    必須仍然有效** —— 由下一條測試守住。
+    """
+    entry = stage_budgets(protocol, registry)["SCENE_PARTICIPATING_MEDIA"]
+    assert entry["parameters"] == 3
+    assert entry["dimensions"] == 3
+    assert entry["population"] == 64
+
+
+def test_an_undeclared_multivalued_parameter_is_still_refused(protocol, registry):
+    """消歧義機制不得因為 CG-5 把 albedo 移出去就失效。"""
+    import pytest as _pytest
+
+    from pcmef.experiments.calibration_plan import CalibrationPlanError
+
+    stripped = dict(protocol)
+    stripped["dimension_expansion"] = {}
+    with _pytest.raises(CalibrationPlanError, match="dimension_expansion"):
+        expand_dimensions(["_ALBEDO_BY_PRESET"], stripped, registry)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +287,7 @@ def test_every_fitted_dimension_has_a_numeric_bound(protocol, lock_payload, regi
         len(expand_dimensions(stage["parameters"], protocol, registry))
         for stage in protocol["stagewise"]
     )
-    assert len(resolved) == expected == 20
+    assert len(resolved) == expected == 15   # CG-5 -3, CG-6 -2
     for name, (lo, hi) in resolved.items():
         assert isinstance(lo, float) and isinstance(hi, float), name
         assert lo < hi, name
