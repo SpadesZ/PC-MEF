@@ -1307,6 +1307,110 @@ def _print_stage0_report(report: dict, path: Path) -> None:
     print(f"report: {path.resolve()}")
 
 
+def cmd_split_partition_heldout(args: argparse.Namespace) -> int:
+    """AMD-005：在**讀值之前**把 heldout_real 切成 probe 與 final。
+
+    只讀 split_registry 的指派，不開任何一筆 recording。
+    """
+    import subprocess
+
+    from pcmef.core.heldout_partition import (
+        FINAL_ROLE,
+        PROBE_ROLE,
+        HeldoutPartitionError,
+        freeze_partition,
+        load_partition,
+        plan_partition,
+        probe_access_count,
+    )
+
+    registry = json.loads(
+        (Path(args.repo_root) / "data" / "splits" / "split_registry.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lock_path = Path(args.freeze_dir) / "heldout_partition.lock.json"
+
+    if not args.freeze:
+        if lock_path.exists():
+            document = load_partition(args.freeze_dir, args.repo_root)
+            payload = document["payload"]
+            print(f"{payload['partition_id']} already frozen")
+            print(f"  path         : {lock_path.resolve()}")
+            print(f"  payload hash : {document['payload_hash']}")
+        else:
+            plan = plan_partition(args.repo_root)
+            payload = {
+                "partition_id": "HELDOUT-PART-001 (preview, NOT frozen)",
+                "counts": {
+                    PROBE_ROLE: {c: len(v) for c, v in plan["probe"].items()},
+                    FINAL_ROLE: {c: len(v) for c, v in plan["final"].items()},
+                },
+                "totals": {
+                    PROBE_ROLE: sum(len(v) for v in plan["probe"].values()),
+                    FINAL_ROLE: sum(len(v) for v in plan["final"].values()),
+                },
+                "ids": {PROBE_ROLE: plan["probe"], FINAL_ROLE: plan["final"]},
+            }
+            print("HELDOUT-PART-001 preview (nothing written)")
+    else:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        if dirty and not args.allow_dirty:
+            print(
+                "error: the working tree has uncommitted changes; a lock that names a "
+                "commit must be produced from that commit. Commit first, or pass "
+                "--allow-dirty.",
+                file=sys.stderr,
+            )
+            return 2
+        amendment = json.loads(
+            (Path(args.freeze_dir) / "amendments" / "AMD-005.amendment.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        try:
+            path, document = freeze_partition(
+                freeze_dir=args.freeze_dir,
+                repo_root=args.repo_root,
+                code_version=commit,
+                amendment_hash=amendment["payload_hash"],
+            )
+        except HeldoutPartitionError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        payload = document["payload"]
+        print(f"{payload['partition_id']} frozen")
+        print(f"  path         : {path.resolve()}")
+        print(f"  payload hash : {document['payload_hash']}")
+        print(f"  seed         : {payload['seed']}")
+
+    print(f"\n  {'class':16s} {PROBE_ROLE:>24s} {FINAL_ROLE:>18s}")
+    for cls in sorted(payload["counts"][PROBE_ROLE]):
+        print(
+            f"  {cls:16s} {payload['counts'][PROBE_ROLE][cls]:>24d} "
+            f"{payload['counts'][FINAL_ROLE][cls]:>18d}"
+        )
+    print(
+        f"  {'TOTAL':16s} {payload['totals'][PROBE_ROLE]:>24d} "
+        f"{payload['totals'][FINAL_ROLE]:>18d}"
+    )
+    if "set_hashes" in payload:
+        print(f"\n  probe set hash : {payload['set_hashes'][PROBE_ROLE]}")
+        print(f"  final set hash : {payload['set_hashes'][FINAL_ROLE]}")
+    print(f"\n  heldout_access_count (FORMAL_E1_FINAL) : {registry['heldout_access_count']}")
+    print(f"  probe_access_count                     : {probe_access_count(args.repo_root)}")
+    overlap = set().union(*payload["ids"][PROBE_ROLE].values()) & set().union(
+        *payload["ids"][FINAL_ROLE].values()
+    )
+    print(f"  probe/final id overlap                 : {len(overlap)}")
+    return 0
+
+
 def cmd_calibration_formal(args: argparse.Namespace) -> int:
     """CAL-PREREG-003 stage 1-5：正式校準。
 
@@ -2507,6 +2611,18 @@ def build_parser() -> argparse.ArgumentParser:
     plan_real.set_defaults(func=cmd_split_plan_real)
     freeze_real.add_argument("--freeze-dir", default="freeze")
     freeze_real.set_defaults(func=cmd_freeze_real_split_policy)
+
+    partition_heldout = split_sub.add_parser(
+        "partition-heldout",
+        help="AMD-005：把 heldout_real 切成 development probe 與 formal final（只碰 ID）",
+    )
+    partition_heldout.add_argument("--freeze-dir", default="freeze")
+    partition_heldout.add_argument("--repo-root", default=".")
+    partition_heldout.add_argument(
+        "--freeze", action="store_true", help="寫出 lock；未帶此旗標只做預覽"
+    )
+    partition_heldout.add_argument("--allow-dirty", action="store_true")
+    partition_heldout.set_defaults(func=cmd_split_partition_heldout)
 
     freeze_parser = subparsers.add_parser("freeze", help="凍結 formal lock")
     freeze_sub = freeze_parser.add_subparsers(dest="freeze_command", required=True)

@@ -1,0 +1,219 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 由 cli 的 amendment freeze 讀取，寫成
+#         freeze/amendments/AMD-005.amendment.json；其 payload_hash 進
+#         freeze/heldout_partition.lock.json 與後續 calibration artifact。
+# 檔案路徑: configs/amendments/AMD-005.yaml
+# 產生時間: 2026-08-30 22:55 +08:00
+# 版本: v0.1.0
+# 功能說明: 把研究治理由 journal-grade blind preregistration 改為
+#           thesis-oriented protected-final-test，並把校準階段守衛的破線
+#           由「中止流程」改為「抑制該次更新、保留原值、繼續下一階段」。
+# 模組定位: AMD-005 的**輸入規格**。凍結後的權威記錄是
+#           freeze/amendments/AMD-005.amendment.json；本檔留在版控是為了
+#           讓修訂內容可被 review，而不是被 CLI 參數帶過。
+# 主要責任:
+#   1. 定義 heldout_real 的二次分割與其「先凍 ID、後讀值」的順序要求
+#   2. 重新定義 heldout_access_count 的所指，並為 probe 另立帳本
+#   3. 定義 UPDATE_INHIBITED 語意，並劃清它的功能性類比界線
+#   4. 記下修訂當下的前提證據與本次**沒有**改變的不變式
+# 維護提醒:
+#   - 不得在 AMD-005 凍結後修改本檔；要再改就開 AMD-006。
+#   - 不得把 UPDATE_INHIBITED 說成證明了任何生物神經抑制機制；
+#     它只是功能性啟發的命名，claim boundary 寫在 changed_contracts 裡。
+#   - 不得在 ID 凍結之前讀取任何一筆 heldout 的值；先看值再決定分割，
+#     等於讓最終測試集是挑出來的。
+#   - 不得用 E1_DEVELOPMENT_PROBE 的結果去挑參數或調整判準。
+#   - v0.1.0 新增：首版（治理模式轉換）。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-005.yaml
+#   - py -3.10 -m pytest tests/unit/test_heldout_partition.py -v
+# ------------------------------------------------------------
+
+amendment_id: AMD-005
+title: >
+  Move the research governance from journal-grade blind preregistration to a
+  thesis-oriented protected-final-test design: split the untouched held-out
+  partition into a loggable development probe and a sealed final test before
+  any value is read, and change a calibration stage guard breach from
+  "stop the flow" to "inhibit the update, retain the previous value, continue".
+
+supersedes: >
+  CAL-PREREG-003 (protocol hash
+  51796b777fda308f8aca6d60e99634faf258d1bd1720d729a23d972b5af8a807, frozen as
+  record hash fb9638d78df974ca90f16546c9aa5367371fe2d82e8284190f5f6c8ad63b70fa)
+  in two respects only: the terminal-state semantics of
+  optimizer.verification_seeds and reporting.regression_guard, and the meaning
+  of split.heldout_access_count. Every other clause of CAL-PREREG-003 stands
+  unchanged, including the objective, the frozen s_f, the resolved bounds, the
+  stage order, the evaluation budget and the convergence rule.
+
+rationale: >
+  The formal calibration run at code_version c1f6f9d converged cleanly in
+  stage 1 (three restarts, spread 1.6e-4, zero failed evaluations) and then
+  broke both preregistered guards at once: verification-seed degradation 8.26
+  against a tolerance of 0.10, and a 28.5% worsening of the non-optimised
+  terms against a tolerance of 0.10. Under CAL-PREREG-003 that stopped the
+  whole flow, leaving four stages unexecuted and no calibrated simulator.
+
+  The guards were right and must keep their authority. What was wrong was the
+  consequence. A stage whose proposed update fails independent evidence does
+  not invalidate the stages after it: stage 1's parameter simply should not
+  move. Rejecting the update and holding sensor.fov_deg at its frozen initial
+  value leaves the physical model exactly as the initial freeze left it, which
+  is a defensible state, and lets the three mapping stages -- whose parameters
+  are separately identifiable and whose channels are not the noisy one -- be
+  fitted. Stopping instead produces no simulator at all, which is strictly
+  worse and is not what the guards were protecting.
+
+  The governance change is the honest counterpart. This is a thesis, not a
+  registered-report submission, and a design that cannot ever look at a
+  development sample forces every method decision to be made blind and then
+  defended by assertion. Splitting the held-out partition BEFORE reading any
+  value keeps the property that actually matters -- the final test set is
+  fixed in advance and never tuned against -- while allowing a small logged
+  probe for sanity checking. The protection is the freezing order, not the
+  refusal to look.
+
+changed_contracts:
+  heldout_partition:
+    before: >
+      heldout_real is a single 168-recording partition (42/class) whose
+      access_count must remain 0 until E1 final. There is no sanctioned way to
+      inspect any held-out value during method development.
+    after: >
+      heldout_real is split, BEFORE any value is read, into
+      E1_DEVELOPMENT_PROBE (14/class = 56) and FORMAL_E1_FINAL (28/class =
+      112). Selection is a deterministic class-stratified permutation with
+      fixed seed 20260830, one rng per class, frozen as HELDOUT-PART-001 in
+      freeze/heldout_partition.lock.json. The freeze is refused unless
+      heldout_access_count is 0 at that moment.
+    why: >
+      Freezing the ids first is the whole protection. If the subsets were
+      chosen after seeing values, the final test set would be a selected one
+      and its result would mean nothing.
+
+  heldout_access_count_semantics:
+    before: >
+      split_registry.heldout_access_count counts reads of any heldout_real
+      value and must be 0 until E1 final.
+    after: >
+      split_registry.heldout_access_count counts reads of FORMAL_E1_FINAL only
+      and must be 0 until the final evaluation. E1_DEVELOPMENT_PROBE reads are
+      recorded in the separate append-only ledger
+      data/splits/heldout_probe_access_ledger.json with their own counter.
+    why: >
+      The existing guards in audit/firewall, audit/e1_gates and the calibration
+      identity gate all key on heldout_access_count. Re-pointing it at the
+      sealed subset keeps every one of those guards meaningful instead of
+      making them fire on a sanctioned probe read. Mixing probe reads into that
+      counter would destroy the only number that still means "the final test is
+      untouched".
+
+  stage_guard_terminal_state:
+    before: >
+      optimizer.verification_seeds: relative degradation above
+      verification_tolerance marks SEED_OVERFIT and stops the flow.
+      reporting.regression_guard: a worsening of the non-optimised terms above
+      regression_tolerance marks SIDE_EFFECT_REGRESSION and stops the flow.
+    after: >
+      Either breach marks the stage UPDATE_INHIBITED. The proposed parameter
+      update is REJECTED, the previous frozen (or initial) value is RETAINED,
+      both guard measurements are recorded in full, and the run continues to
+      the next stage. The tolerances, the seeds and the guard computations are
+      unchanged; only the consequence changes.
+    why: >
+      A failed proposal is evidence that this parameter should not move, not
+      evidence that the remaining stages are unsound. Retaining the frozen
+      initial value is the minimum-displacement outcome the tie-break rule
+      already prefers when the data cannot distinguish candidates.
+    claim_boundary: >
+      UPDATE_INHIBITED is a FUNCTIONALLY INSPIRED name: a proposed state change
+      is suppressed when independent evidence indicates the update harms
+      system-level stability. It is an engineering control rule and nothing
+      more. It does NOT model, demonstrate or provide evidence for any
+      biological neural inhibition mechanism, and no claim of that kind may be
+      made from it anywhere in the thesis.
+
+  not_terminal_but_still_terminal:
+    before: "n/a"
+    after: >
+      NOT_CONVERGED and UNSTABLE_LANDSCAPE remain terminal and still stop the
+      flow. Those two say the optimiser could not do its job at all, which is
+      a different statement from "the answer it found should be rejected".
+    why: >
+      Inhibiting an update presupposes there is a well-formed update to
+      inhibit. There is not one when the search never converged or when a fifth
+      of the landscape could not be evaluated.
+
+  amendment_frequency:
+    before: >
+      Every change of judgement criteria requires a new amendment record.
+    after: >
+      New amendments and new audit layers are opened only when (a) the
+      FORMAL_E1_FINAL partition is accidentally accessed, (b) scientific
+      semantics materially change, or (c) the pipeline cannot execute.
+      Ordinary implementation work proceeds without a new record.
+    why: >
+      The governance layer has begun to cost more than the evidence it
+      protects. The remaining work is to finish E1.
+
+precondition_evidence:
+  calibration_access_count: 3
+  heldout_access_count: 0
+  probe_access_count: 0
+  heldout_partition_frozen_before_this_amendment: false
+  stage1_result:
+    code_version: c1f6f9d21bd654d889bd4728971131abb27a0645
+    stage_id: SCENE_GEOMETRY_SURFACE_FOIL
+    restarts_converged: 3
+    restart_objective_relative_range: 1.62e-4
+    failed_evaluations: 0
+    evaluations_used: 720
+    evaluations_budget: 4848
+    proposed_sensor_fov_deg: 57.79226688844989
+    frozen_initial_sensor_fov_deg: 45.0
+    verification_relative_degradation: 8.2596
+    verification_tolerance: 0.10
+    regression_relative_change: 0.2848
+    regression_tolerance: 0.10
+  note: >
+    Both numbers above were measured BEFORE this amendment was written, by the
+    runner at c1f6f9d, and are reproducible from
+    outputs/calibration/stage_SCENE_GEOMETRY_SURFACE_FOIL/stage_summary.json.
+    This amendment changes what happens next; it does not change, re-run or
+    re-interpret that measurement.
+
+invariants_preserved:
+  formal_e1_final_sealed: >
+    FORMAL_E1_FINAL is not read by this amendment, by the partition freeze, or
+    by any calibration stage. heldout_access_count remains 0 until the
+    calibrated simulator and all gate rules are frozen.
+  frozen_scale_unchanged: >
+    CAL-SF-001 (payload hash
+    8e71171c7ae851c1e575627a78ac107b626f7c228895125b07b864454ee0096e) is not
+    recomputed. s_f stays exactly as frozen.
+  calibration_data_unchanged: >
+    raw_calibration_data_hash stays
+    926eef729eb3b5b4762fe7a77c139f5ca89375a57367de432508dfa8a8ca1ed8 and is
+    re-asserted on every load.
+  bounds_unchanged: >
+    initial_simulation.lock parameter_ranges and the derived feasible domains
+    are untouched; bounds_resolution_hash stays
+    de9ce5a2f009e08afc916208f6dd9ee4880a84bed0919dd5d9fb290f1dea9aeb.
+  stage0_admission_unchanged: >
+    CAL-STAGE0-001 is not re-run and not re-adjudicated. The seven admitted
+    parameters and the zero-dimensional SCENE_PARTICIPATING_MEDIA stage stand.
+  budget_unchanged: >
+    popsize 15, maxiter 100, restarts 3 and the per-stage evaluation budgets
+    are unchanged. Inhibiting an update does not reduce the search that
+    produced it.
+  guard_authority_unchanged: >
+    verification_tolerance stays 0.10 and regression_tolerance stays 0.10. The
+    guards still fire on exactly the same evidence; only the consequence of
+    firing changed.
+
+authority: >
+  Advisor decision, 2026-08-30, recorded by the maintainer. The thesis is the
+  deliverable and a protected final test is the appropriate standard for it.
+  This amendment is written and frozen while heldout_access_count is 0, which
+  is the only thing that makes the protected-final-test claim checkable.
