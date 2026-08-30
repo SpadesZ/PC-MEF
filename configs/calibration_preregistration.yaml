@@ -44,20 +44,65 @@
 #   - py -3.10 -m pytest tests/unit/test_calibration_plan.py -v
 # ------------------------------------------------------------
 
-preregistration_id: CAL-PREREG-002
-preregistration_version: v0.2.0
+preregistration_id: CAL-PREREG-003
+preregistration_version: v0.3.0
 registered_on: "2026-08-30"
 status: FROZEN_BEFORE_READING_CALIBRATION_PARTITION
 
+# 本檔凍結的是**規則與公式**，不是結果。
+#
+# 特別是：候選維度集合、入場判準、borderline 規則、共線性範圍、
+# 0 維階段語意、預算公式與成本模型公式在此凍結；
+# **實際 admitted 維度集合與實際校準預算不在此凍結**，
+# 它們只能由使用本協定的 Stage 0 正式重跑導出。
+# 任何以舊 artifact 投影出來的數字（例如 7 維 / 82 小時）都不是 binding。
+binding_scope:
+  frozen_here:
+    - candidate dimensions per stage
+    - CG gauge-fixed members and their claim boundaries
+    - own-stage admission scope
+    - generic conservative borderline rule
+    - S0-B1..B5 secondary criterion (sigma stage only)
+    - admitted-only collinearity scope
+    - zero-dimensional stage semantics
+    - optimizer budget formula
+    - runtime cost model formula
+  NOT_frozen_here:
+    - the actual admitted dimension set
+    - the actual per-stage dimension counts after admission
+    - the actual calibration wall-clock budget
+  derived_from: CAL-PREREG-003 stage 0 rerun, executed from scratch
+
 supersedes:
-  preregistration_id: CAL-PREREG-001
-  record_hash: a17dd93982e496b7a5faa538aa0c99b72a5067ac61e901e3a299258576b3254a
-  protocol_hash: 77365cc30413d4eaa940fcc224ac9b344d92f8ace6780b0d2f369a592e0900bf
+  preregistration_id: CAL-PREREG-002
+  record_hash: e7e2a298cfa364eb210ac56a414d72183e33a7f4b6974867fe06cb20482db99e
+  protocol_hash: c6a0de86e866cc0dbd426e77fe407d9659f46fc8888f2955e02820abd6a2316d
   note: >
-    CAL-PREREG-001 保留不刪除（append-only）。它記錄的 v0.1.0 協定帶有
-    AMD-003 所列的三項缺陷，因此**不得**用於執行；操作版本是本檔。
+    CAL-PREREG-001 與 CAL-PREREG-002 均保留不刪除（append-only），
+    兩者都**不得**用於執行。001 帶有 AMD-003 所列的三項缺陷；
+    002 的 stage 順序、入場範圍與共線性範圍已由 AMD-004 推翻。
+    操作版本是本檔。
 
 amendments:
+  - id: AMD-004
+    adds:
+      - stagewise.order (physical scene/media -> measurement mappings)
+      - stage_0.admission_scope (own-stage declared observables)
+      - stage_0.collinearity_check.scope (admitted-only, same stage)
+      - stage_0.borderline_policy (generic conservative rule)
+      - stage_0.secondary_criterion (S0-B1..B5, sigma stage only)
+      - stage_0.sigma_mc_degeneracy (three deterministic branches)
+      - bounds.physical_feasibility (derived feasible domain)
+      - stagewise.zero_dimensional_stage
+      - forbidden_parameters.gauge_fixed CG-5 / CG-6
+      - runtime_cost_model
+    fixes:
+      - Ambient 並非與 active pass 無關；先固定 mapping 的順序不成立
+      - Signal 同樣受後續 scene 參數影響，被巨大的雜訊底線蓋住
+      - 入場判定會靠該階段從不最佳化的通道發券
+      - density <-> albedo 與三向 angular 近乎精確簡併
+      - jitter=0 與 noise 上界在物理上不可行
+      - wall-clock 與宣稱相差 30-42 倍
   - id: AMD-003
     adds: [stage_0.normaliser, evaluation_budget, dimension_expansion, bounds.uniqueness]
     fixes:
@@ -173,6 +218,21 @@ reporting:
 # 這三個是 CG-1/2/3 裁決時選定的 gauge 固定項。它們對應的自由度在原理上
 # 不可辨識（NOTE-031 / NOTE-034），把它們放進搜尋空間會直接重建簡併。
 forbidden_parameters:
+  claim_boundaries:
+    CG-5_effective_medium: >
+      擬合出的密度只能稱為**校準後模擬器的 effective-medium 消光參數**。
+      不得宣稱為 true absolute turbidity / absolute bubble concentration /
+      absolute mist density —— 它吸收了被固定的 albedo 的誤差。
+      與 CG-1「只能宣稱 sigma_t」是同一條界線。
+    CG-6_effective_angular_response: >
+      擬合出的 sensor.fov_deg 只能稱為
+      **effective collection-angle parameter of the square-film receiver
+      surrogate**。不得稱為 true / measured VL53L0X system FoV：
+      本模擬器的 sensor.fov_deg 是方形 perspective-film 的**全角**，
+      與真實 system FoV 不等價，且它吸收了被固定的
+      light.cutoff_angle_deg 與 _BOTTLE_SURFACE_ALPHA 的誤差。
+      **不得**因為 datasheet 寫 25 就直接把 sensor.fov_deg 改成 25
+      並重寫 initial_simulation.lock。
   gauge_fixed:
     - name: _SIGMA_T_REFERENCE_PER_M
       group: CG-1_extinction
@@ -183,6 +243,33 @@ forbidden_parameters:
     - name: _ROOM_LIGHT_RADIANCE
       group: CG-3_ambient
       why: 實測為 Ambient 上的精確純增益（線性度 4.0003/4.0000/4.0000）
+
+    # --- CG-5：effective medium（AMD-004）--------------------------------
+    # 每一類的消光密度與其單次散射反照率近乎精確簡併。固定 provenance 較弱的
+    # 那一個（albedo 在 SRC-PLAN / SRC-HANDOFF 都查不到一手來源），
+    # 擬合 SRC-SAI §9 明列為 <validation-frozen range> 的密度。
+    - name: _ALBEDO_BY_PRESET.water
+      group: CG-5_effective_medium
+      why: 與 medium.turbidity 近乎精確簡併；albedo 無一手來源，密度有
+    - name: _ALBEDO_BY_PRESET.bubbly
+      group: CG-5_effective_medium
+      why: 與 medium.bubble_density 近乎精確簡併
+    - name: _ALBEDO_BY_PRESET.misty
+      group: CG-5_effective_medium
+      why: 與 medium.mist_density 近乎精確簡併
+
+    # --- CG-6：effective illumination / collection cone（AMD-004）--------
+    # _BOTTLE_SURFACE_ALPHA、light.cutoff_angle_deg 與 sensor.fov_deg 三者
+    # 在 Empty 的 own-stage 通道上近乎完全平行（三向）。固定前兩者，
+    # 保留 sensor.fov_deg 為唯一 calibrated member —— 依 provenance 而非
+    # fit quality：VL53L0X datasheet 有 system FoV 的外部規格證據，
+    # VCSEL divergence 與瓶面 GGX 粗糙度都沒有。
+    - name: _BOTTLE_SURFACE_ALPHA
+      group: CG-6_effective_angular_response
+      why: 瓶面 GGX 粗糙度無一手來源；與兩個角度參數三向簡併
+    - name: light.cutoff_angle_deg
+      group: CG-6_effective_angular_response
+      why: VCSEL divergence 的 provenance 弱於 datasheet 的 system FoV
 
   derived:
     - name: optical_path_to_distance
@@ -366,194 +453,123 @@ s_f_relative_leverage_diagnostic:
 # 順序不可調換：每一階段的可辨識性論證都建立在前面階段已固定的基礎上。
 # 各階段擬合完畢後，其參數即**凍結**，後續階段不得再動。
 stagewise:
+  # AMD-004：順序原則為 **physical scene / media -> final measurement mappings**。
+  # 一個 mapping 增益不得在「後面的階段還會移動它所擬合的 observable」時就被
+  # 擬合並凍結。CAL-PREREG-002 把 Ambient 放第一是錯的：AMBIENT_ONLY pass 是
+  # 同一個場景，室內光照樣打在箔片、瓶壁與介質上，實測 scene/media 參數在
+  # ambient 通道上的槓桿達 69-129 sigma_MC。
+  #
+  # 下列 parameters 是**候選**維度，不是 admitted 維度。
+  # 實際進入 optimizer 的集合由 stage 0 的 own-stage admission 決定。
 
-  # -------------------------------------------------------------------
   - stage: 1
-    id: AMBIENT
-    name: Ambient 通道
-    parameters: [ambient_energy_to_mcps, ambient_jitter_relative]
-    observables:
-      - ambient_rate_mcps 的分佈**位置**（median）
-      - ambient_rate_mcps 的分佈**離散度**（IQR / median）
-    identifiability: >
-      **結構性解耦，非近似。** Ambient 只由 AMBIENT_ONLY pass 取得
-      （VCSEL 關閉，NOTE-034），因此它與 active pass 的任何參數無關。
-      實測 A2：VCSEL 功率 1.0->4.0 時 ambient 由 3.603355 變為 3.603355
-      （完全相同），即 lighting.irradiance 對 Ambient 的影響**恰為 0**。
-
-      兩個參數各有獨立的統計量：`ambient_energy_to_mcps` 是 Ambient 上的
-      精確純增益（實測線性度 4.0003 / 4.0000 / 4.0000），只移動分佈位置；
-      `ambient_jitter_relative` 是相對抖動，只改變離散度而不改變位置。
-      兩個參數、兩個互相獨立的統計量 -> 恰好可辨識。
-    why_first: >
-      它與其餘四階段**沒有**任何共用參數，先做不會被後面推翻，
-      也立刻從搜尋空間移除兩個自由度。
-    forbidden_here: [_ROOM_LIGHT_RADIANCE]
-
-  # -------------------------------------------------------------------
-  - stage: 2
-    id: SIGNAL_SCALE
-    name: Active Signal 的能量->MCPS 換算
-    parameters: [signal_energy_to_mcps, noise_relative_sigma]
-    observables:
-      - signal_rate_mcps 的分佈位置（**四類池化**）
-      - signal_rate_mcps 的分佈離散度
-    identifiability: >
-      `signal_energy_to_mcps` 是套用在 estimator **之後**的單位換算，
-      對全部四類等比作用，且**不影響 distance**（S2 實測：irradiance
-      1.0->4.0 時估計距離變化 0.0）。因此它由四類池化後的 signal 位置
-      唯一決定，1 個自由度對 1 個統計量。
-
-      使用池化位置而非逐類位置是刻意的：逐類位置的**差異**由 stage 3/4 的
-      幾何與介質參數決定，把它們交給一個全域增益去擬合，就是拿一個旋鈕
-      去補另一組旋鈕的錯。
-    known_residual_confound: >
-      **必須誠實記下**：`_FOIL_REFLECTANCE_940NM`、`_FOIL_SURFACE_ALPHA`、
-      `_FOIL_SIZE_TO_DIAMETER_RATIO` 同樣會縮放回波振幅，與本階段的增益
-      在 signal 位置上**近似簡併**。三者不在本階段，而是在 stage 3 由
-      **distance 通道**區分：post-hoc 增益不會移動 distance，但改變物理
-      振幅會經由 LEADING_EDGE 的 range walk 移動 distance
-      （實測振幅 10->500 時距離變動 10.0%，NOTE-037）。
-      這個區分是**弱**的，因此三者能否進入擬合由 stage 0 的 leverage 門檻
-      決定；未達門檻即 gauge-fix，讓 post-hoc 增益吸收整體位準。
-    forbidden_here: [lighting.irradiance]
-
-  # -------------------------------------------------------------------
-  - stage: 3
-    id: GEOMETRY_SURFACE_FOIL
-    name: 幾何 / 表面 / 箔片
+    id: SCENE_GEOMETRY_SURFACE_FOIL
+    name: 幾何 / 表面 / 箔片（物理場景）
     parameters:
       - _FOIL_GAP_TO_BOTTLE_RATIO
       - _FOIL_REFLECTANCE_940NM
       - _FOIL_SURFACE_ALPHA
       - _FOIL_SIZE_TO_DIAMETER_RATIO
-      - _BOTTLE_SURFACE_ALPHA
       - sensor.fov_deg
-      - light.cutoff_angle_deg
-    not_fitted_in_this_stage:
-      - name: foil_orientation
-        status: NOT_FITTED
-        why: >
-          登記值 facing_camera 是**目前唯一有實作**的朝向，`_foil_transform()`
-          對其餘取值直接拒絕而不退回預設。它因此不是連續旋鈕而是場景結構選項；
-          換朝向是 scene-level 變更，該開新 run 而不是在 calibration 內掃描。
     observables:
       - "**Empty 類**的 distance_mm 分佈位置與離散度"
-      - "**Empty 類**的 signal_rate_mcps 分佈形狀（已由 stage 2 固定位置）"
-      - Empty 的 sigma_like 分佈（作為波形寬度的間接觀測）
+      - "**Empty 類**的 signal_rate_mcps 分佈形狀"
+      - Empty 的 sigma_like 分佈（波形寬度的間接觀測）
     identifiability: >
-      **關鍵結構事實：Empty 沒有參與介質，但它有完整的殼＋空氣＋殼幾何。**
+      **Empty 沒有參與介質，但它有完整的殼＋空氣＋殼幾何。**
+      `build_scene_dict()` 的 `scene["bottle_interior"]` 無條件建立，四類皆然；
+      只有 `interior["interior"] = medium` 是條件式的，而
+      `_DENSITY_KEY_BY_PRESET` 沒有 "empty" 鍵。因此 Empty 的全部 observable
+      是幾何/表面/箔片參數的函數，與 stage 2 的三個密度完全無關。
+      本階段只用 Empty 擬合 —— 這是唯一能讓幾何與介質不互相污染的切法。
+      由 tests/simulation/test_empty_topology.py 逐次確認。
+    why_first: >
+      它決定的是**物理場景**。所有 mapping 增益都作用在算圖之後，因此先把
+      場景釘住，才不會讓一個之後還會被移動的觀測量去決定增益。
 
-      AMD-003 更正 v0.1.0 的措辭。原文「只在 `medium_preset != "empty"` 時
-      建立內部介質」與 NOTE-029 當初描述**缺陷**時的句子幾乎相同，容易被讀成
-      「Empty 不建內圓柱」—— 那正是已經修掉的實心玻璃柱錯誤。逐行核對後的
-      事實是：
-
-      * `build_scene_dict()` 的 `scene["bottle_interior"]` **無條件建立**，
-        四類皆然（mitsuba_adapter.py，NOTE-029 的註解就寫在該段上方）。
-      * 只有 `interior["interior"] = medium` 這一行是條件式的，由
-        `_medium_dict()` 決定；`_DENSITY_KEY_BY_PRESET` 沒有 "empty" 這個鍵，
-        因此 Empty 取不到密度、回傳 None、不掛參與介質。
-      * `_INTERIOR_BASE_IOR["empty"] = "air"`，內圓柱是
-        `int_ior=air / ext_ior=bk7`。
-      * 實測建構結果：四類的 `bottle_interior` 皆存在，
-        r_in = 26.5 mm、r_out = 28.5 mm（壁厚 2.0 mm），
-        Empty 的 `int_ior=air` 且 `has_participating_medium=False`。
-
-      因此 Empty 的全部 observable 是幾何 / 表面 / 箔片參數的函數，
-      **與 stage 4 的三個密度與三個 albedo 完全無關**。本階段只用 Empty
-      一類擬合 —— 這不是為了省事，而是唯一能讓幾何與介質不互相污染的切法。
-      這條由 `tests/simulation/test_empty_topology.py` 逐次確認，不靠記憶。
-
-      各參數的獨立簽名：
-      * `_FOIL_GAP_TO_BOTTLE_RATIO` 移動箔片**位置** -> 移動遠側回波的
-        **時間** -> distance 位置。這是 distance 絕對值的主要把手。
-      * `_FOIL_REFLECTANCE_940NM` / `_FOIL_SURFACE_ALPHA` /
-        `_FOIL_SIZE_TO_DIAMETER_RATIO` 改變箔片回波**振幅與角度分佈**
-        -> signal 形狀，並經 range walk 微幅影響 distance。
-      * `_BOTTLE_SURFACE_ALPHA` 改變前玻璃 GGX lobe 寬度 -> 前緣回波與
-        遠側回波的**相對強度** -> sigma_like 與 distance 的離散度。
-      * `sensor.fov_deg` / `light.cutoff_angle_deg` 改變接收/照明錐角
-        -> 邊緣路徑的加權（NOTE-033：fov 是全角、cutoff 是半角）。
-      * `distance_offset_mm` 是加在 distance 上的常數偏移。
-    declared_degeneracy:
-      id: CG-4_absolute_distance
-      members: [_FOIL_GAP_TO_BOTTLE_RATIO, distance_offset_mm]
-      status: MUST_BE_DECIDED_BY_STAGE_0
-      why: >
-        兩者都讓**四類的 distance 一起平移**，在 distance 位置這個統計量上
-        精確簡併。stage 0 的共線性檢查必然把它們判為簡併對，屆時必須依
-        provenance 擇一固定：`_FOIL_GAP_TO_BOTTLE_RATIO` 是
-        RECONSTRUCTED（箔片「存在」有依據，「在哪」沒有），
-        `distance_offset_mm` 是 PLACEHOLDER 的純數值修正項且無物理來源。
-      preregistered_ruling: >
-        **固定 `distance_offset_mm = 0.0`，擬合 `_FOIL_GAP_TO_BOTTLE_RATIO`。**
-        理由與 CG-1/CG-2 同一套：固定項要選沒有物理內容的那一個，
-        讓有幾何意義的那一個承載資訊。一個非零的 distance_offset_mm 等於
-        宣稱「模擬的光程對、但讀數要平移」，那不是物理，是把殘差藏起來。
-        本裁決在看任何資料之前寫下，stage 0 只確認簡併是否如預期存在。
-      claim_boundary: >
-        校準後的 `_FOIL_GAP_TO_BOTTLE_RATIO` **不得**被解讀為真實裝置中
-        箔片與瓶子的實際距離；它吸收了本階段所有未建模的絕對光程誤差。
-
-  # -------------------------------------------------------------------
-  - stage: 4
-    id: PARTICIPATING_MEDIA
-    name: 參與介質
+  - stage: 2
+    id: SCENE_PARTICIPATING_MEDIA
+    name: 參與介質（物理場景）
     parameters:
-      - medium.turbidity          # Water-filled
-      - medium.bubble_density     # Bubbly
-      - medium.mist_density       # Misty
-      - _ALBEDO_BY_PRESET         # 三個 class-specific 純量：water / bubbly / misty
+      - medium.turbidity
+      - medium.bubble_density
+      - medium.mist_density
     observables:
-      - "Water-filled / Bubbly / Misty 三類**相對 Empty** 的 distance 位移"
-      - 三類的 signal_rate_mcps 分佈（位置已由 stage 2 的全域增益固定）
+      - Water-filled / Bubbly / Misty 三類**相對 Empty** 的 distance 位移
+      - 三類的 signal_rate_mcps 分佈
       - 三類的 sigma_like 分佈
     identifiability: >
-      幾何在 stage 3 已由 Empty 單獨釘死，因此三個醫質類別與 Empty 的
-      **差異**只能來自介質。每一類各有自己的密度與 albedo，且**不共用**
-      —— 三類之間沒有交叉項，等於三個各自獨立的二參數子問題。
+      幾何已由 stage 1 在 Empty 上釘死；三類各有自己的密度，無交叉項。
+      三個 albedo 已由 CG-5 固定為 CONVENTION（見 forbidden_parameters），
+      因此本階段的候選維度是三個密度而不是六個。
 
-      同一類內密度與 albedo 的區分：密度（-> σt）決定穿透衰減，主要作用在
-      遠側箔片回波的**振幅與到達時間**（Water 的實測位移 +15.20 mm 與理想
-      全水路徑 Δd=(n-1)L=17.65 mm 同號同量級）；albedo（= σs/σt）決定
-      被散射回來的比例，主要作用在**主窗內的回波形狀**與 sigma_like。
-      兩者並非正交，因此**必須**由 stage 0 的共線性檢查逐類確認
-      |cos| < 0.98；未通過者依 CG-1 的同一套理由固定 albedo、擬合密度
-      （σt 是規格列為 validation-frozen 的量，albedo 無一手來源）。
-    forbidden_here: [_SIGMA_T_REFERENCE_PER_M]
-    claim_boundary: >
-      校準後的三個密度**不得**解讀為絕對濁度／氣泡數密度／霧密度；
-      可宣稱的只有 σt = density x _SIGMA_T_REFERENCE_PER_M 這個乘積
-      （CG-1 的既有 claim boundary，此處沿用）。
+  - stage: 3
+    id: MAPPING_AMBIENT
+    name: Ambient 通道映射
+    parameters: [ambient_energy_to_mcps, ambient_jitter_relative]
+    observables:
+      - ambient_rate_mcps 的分佈**位置**（median）
+      - ambient_rate_mcps 的分佈**離散度**（IQR）
+    identifiability: >
+      `ambient_energy` 是每次算圖的單一純量，因此 500 個樣本之間的變異
+      **只**來自 jitter：`ambient_jitter_relative` 唯一決定離散度，
+      `ambient_energy_to_mcps` 是純增益、唯一決定位置。
+      兩個參數對兩個互相獨立的統計量。
+      **修正 CAL-PREREG-002 的過寬宣稱**：Ambient 與 VCSEL 發射參數無關
+      （實測 irradiance 1.0->4.0 時 ambient 完全不變），但它**與場景有關**，
+      因此本階段必須排在 scene 之後。
+    forbidden_here: [_ROOM_LIGHT_RADIANCE]
 
-  # -------------------------------------------------------------------
+  - stage: 4
+    id: MAPPING_SIGNAL
+    name: Active Signal 的能量->MCPS 映射
+    parameters: [signal_energy_to_mcps, noise_relative_sigma]
+    observables:
+      - signal_rate_mcps 的分佈位置（**四類池化**）
+      - signal_rate_mcps 的分佈離散度
+    identifiability: >
+      `main_energy` 同樣是每次算圖的單一純量，因此
+      `noise_relative_sigma` 唯一決定相對離散度，`signal_energy_to_mcps`
+      是套用在 estimator **之後**的純增益、唯一決定位置。
+    known_residual_confound: >
+      **必須誠實記下**：三個箔片振幅參數同樣會縮放回波振幅。它們在 stage 1，
+      且已由 own-stage admission 決定去留；若它們被 gauge-fix，本階段的
+      post-hoc 增益會吸收整體位準，那是**已知且已記錄**的結果，不是意外。
+    forbidden_here: [lighting.irradiance]
+
   - stage: 5
-    id: SENSOR_SURROGATE
-    name: 感測器替身的 Sigma 映射
+    id: MAPPING_SIGMA
+    name: Sigma-like 映射
     parameters: [sigma_width_to_mm, sigma_snr_weight, sigma_multipath_weight]
     observables:
       - 四類的 sigma_like 分佈位置
       - 四類的 sigma_like 分佈離散度
-      - sigma_like 與 signal_rate_mcps 的**跨類共變**（SNR 項的簽名）
-      - sigma_like 與 out_of_window_energy 的跨類共變（multipath 項的簽名）
     identifiability: >
-      前四階段結束後，波形本身已完全固定；本階段只擬合「由已固定的波形
-      算出 sigma_like」的映射，因此它**不會回頭改變** distance / ambient /
-      signal 三個通道 —— 這是唯一一個放在最後不會污染前面的階段。
-
-      三個參數的簽名可分：`sigma_width_to_mm` 是純增益（移動位置）；
-      `sigma_snr_weight` 只在 SNR 隨類別變化時產生跨類差異；
-      `sigma_multipath_weight` 只在 multipath 能量隨類別變化時產生跨類差異。
-      由於四類的 SNR 與 multipath 排序**不同**（NOTE-032 量到 Empty 與
-      Water 的 out_of_window 比例差一個數量級），兩個權重不會退化成同一個
-      方向 —— 但這仍須由 stage 0 的共線性檢查證實，不得假設。
-    claim_boundary: >
-      sigma_like **不得**被稱為真實 VL53L0X internal Sigma（NOTE-001）；
-      本階段校準的是替身的內部映射，不是對暫存器語意的宣稱。
+      波形已由 stage 1/2 固定，本階段只擬合「由波形算 sigma」的映射。
+      `sigma_width_to_mm` 是純增益；`sigma_snr_weight` 與
+      `sigma_multipath_weight` 不是純增益，它們經 (1 + w/snr) 與
+      (1 + w*prominence) 進入，因此與場景決定的 snr / prominence 有交互作用。
+      `sigma_snr_weight` 是**唯一**帶具名 borderline 次級判準的參數
+      （S0-B1..B5，見 stage_0.secondary_criterion）。
 
 # ---------------------------------------------------------------------------
-# 不進入任何擬合階段的 calibration_only 參數
+# 0 維階段語意（AMD-004 C）
+# ---------------------------------------------------------------------------
+zero_dimensional_stage:
+  rule: >
+    若某階段在 stage 0 的入場判定後沒有任何 admitted 參數，這**不是錯誤，
+    也不得靜默跳過**。它是一個具名結局，必須完整記錄。
+  record:
+    status: NO_FREE_PARAMETERS
+    optimizer_run: false
+    physical_model_retained: true
+    values: frozen initial values
+    reason: failed preregistered identifiability admission
+  applies_to: 任何 0 維階段，不限於某一個特定階段
+  maintenance_bound: >
+    不得為了「讓階段有事做」而放寬入場判準。一個沒有可辨識參數的階段，
+    正確的處置是保留物理模型並固定其參數，而不是去擬合雜訊。
+
 # ---------------------------------------------------------------------------
 # 它們在 registry 裡是 calibration_only（可被 calibration 寫入），但它們是
 # **數值/離散化設定**而不是物理量。用資料去 fit 它們沒有意義：spp 調高只是
@@ -585,6 +601,15 @@ not_fitted:
     - name: distance_offset_mm
       value: 0.0
       why: CG-4 的 gauge 固定項（見 stage 3 的 preregistered_ruling）
+    - name: _ALBEDO_BY_PRESET
+      value: {water: 0.60, bubbly: 0.92, misty: 0.88}
+      why: CG-5 的 gauge 固定項（CONVENTION）；三個類別純量全部固定
+    - name: _BOTTLE_SURFACE_ALPHA
+      value: 0.02
+      why: CG-6 的 gauge 固定項（CONVENTION）
+    - name: light.cutoff_angle_deg
+      value: 25.0
+      why: CG-6 的 gauge 固定項（CONVENTION）；半角慣例，實際照明錐 50 度全角
   maintenance_bound: >
     要把其中任何一項改為可擬合，必須開 amendment 並說明它為何是物理量。
     「調它結果會變好」不是理由。
@@ -667,13 +692,15 @@ evaluation_budget:
 
   # 以 popsize=15、maxiter=100、restarts=3 展開。這張表是**規範性**的：
   # 執行器算出來的值必須與它逐項相符，否則預註冊與程式已經分家。
+  # 這張表是對**候選**維度算出來的上限，不是實際成本。
+  # stage 0 的 admission 只會**減少**維度，因此這裡的數字是預算上界。
   resolved:
-    AMBIENT:             {dimensions: 2, population: 32,  per_restart: 3232,  per_stage: 9696}
-    SIGNAL_SCALE:        {dimensions: 2, population: 32,  per_restart: 3232,  per_stage: 9696}
-    GEOMETRY_SURFACE_FOIL: {dimensions: 7, population: 128, per_restart: 12928, per_stage: 38784}
-    PARTICIPATING_MEDIA: {dimensions: 6, population: 128, per_restart: 12928, per_stage: 38784}
-    SENSOR_SURROGATE:    {dimensions: 3, population: 64,  per_restart: 6464,  per_stage: 19392}
-  total_evaluations: 116352
+    SCENE_GEOMETRY_SURFACE_FOIL: {dimensions: 5, population: 128, per_restart: 12928, per_stage: 38784}
+    SCENE_PARTICIPATING_MEDIA:   {dimensions: 3, population: 64,  per_restart: 6464,  per_stage: 19392}
+    MAPPING_AMBIENT:             {dimensions: 2, population: 32,  per_restart: 3232,  per_stage: 9696}
+    MAPPING_SIGNAL:              {dimensions: 2, population: 32,  per_restart: 3232,  per_stage: 9696}
+    MAPPING_SIGMA:               {dimensions: 3, population: 64,  per_restart: 6464,  per_stage: 19392}
+  total_evaluations: 96960          # 候選維度的上界，非實際成本
 
   counting:
     unit: 一次目標函數呼叫（= 一次四類 x 兩 pass 的模擬與一次 J 計算）
@@ -696,11 +723,34 @@ evaluation_budget:
       - 提高 maxiter / popsize / restarts 後重跑並只保留後者
       - 縮小邊界讓搜尋變容易
 
-  cost_disclosure: >
-    以每次評估約 2 秒估算（64x64、spp=16、128 bins、四類各兩 pass），
-    全部五階段 116,352 次評估約需 65 小時單執行緒。這個數字寫在這裡是為了
-    讓「預算不夠用」在開始之前就被看見。若實際不可行，正確處置是開 amendment
-    調整 maxiter/popsize 並重新導出本表，**不是**在執行中途悄悄改參數。
+  # AMD-004：v0.2.0 這裡寫「每次評估約 2 秒 -> 65 小時」。實測同一組凍結設定
+  # 為 60.8-84 秒/次，低估 30-42 倍。本檔因此**不再凍結一個時數**，
+  # 只凍結成本模型的**公式**；實際時數必須由 stage 0 定出 admitted 維度後導出。
+  runtime_cost_model:
+    formula: |
+      T_total = R_scene * C_render + R_media * C_render
+                + R_surrogate * C_surrogate
+                + S_mapping * C_render
+      其中
+        R_scene      = 需要重算場景的階段其 admitted 維度所導出的評估次數
+        R_media      = 同上（介質階段）
+        R_surrogate  = 只作用在算圖之後的階段其評估次數（可重用 cube）
+        S_mapping    = 每個 mapping 階段各算一次四類場景（場景已凍結）
+        C_render     = 一次四類 x 兩 pass 的算圖成本（實測 60.8-84 s）
+        C_surrogate  = 一次 surrogate 映射 + 500 點 recording 的成本
+    measured_inputs:
+      C_render_seconds: [60.8, 84.0]     # 孤立探針 / stage 0 實跑平均
+      measured_on: 64x64, spp=16, 128 bins, 四類各兩 pass
+    binding: false
+    note: >
+      **實際校準預算不在此凍結。** 它必須用 stage 0 正式重跑得到的
+      admitted 維度集合代入上式導出。任何以舊 artifact 投影出來的時數
+      （例如 82 小時）都不是 binding result。
+    forbidden_adjustment: >
+      不得為了讓時數變小而修改 spp / resolution / temporal_bins /
+      maxiter / popsize / restarts —— 那是拿實驗解析度去遷就時程。
+      若導出的成本真的不可行，正確處置是開新 amendment，
+      且必須發生在 calibration first access 之前。
 
 convergence:
   criterion: >

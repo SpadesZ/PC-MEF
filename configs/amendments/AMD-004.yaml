@@ -31,10 +31,13 @@
 amendment_id: AMD-004
 title: >
   Reorder the calibration stages so that physical scene and media are fitted
-  before any measurement mapping is frozen; rule CG-5 (density/albedo
-  near-degeneracy); replace the sigma_MC-zero and infeasible-bound cases with
-  deterministic preregistered branches; and record that the measured
-  wall-clock cost of the frozen protocol is about 30x its stated estimate
+  before any measurement mapping is frozen; scope admission and collinearity
+  to each stage's own declared observables; rule CG-5 (density/albedo) and
+  CG-6 (three-way angular/surface response); add a parameter-agnostic
+  conservative borderline rule and zero-dimensional stage semantics; replace
+  the sigma_MC-zero and infeasible-bound cases with deterministic
+  preregistered branches; and replace the wall-clock estimate, measured to be
+  understated 30-42x, with a cost-model formula that is not itself binding
 
 supersedes: >
   configs/calibration_preregistration.yaml v0.2.0
@@ -139,8 +142,9 @@ changed_contracts:
       for CG-1 and CG-2 (fix the member with the weaker provenance, not the
       one that fits better): the three albedos are fixed as CONVENTION at
       their frozen initial values (water 0.60, bubbly 0.92, misty 0.88) and
-      the three densities are fitted. The search space drops from 20 to 17
-      dimensions.
+      the three densities are fitted. Together with CG-6 this reduces the
+      CANDIDATE search space from 20 to 15 dimensions; the ADMITTED set is not
+      fixed here and must come from the CAL-PREREG-003 stage 0 rerun.
       CLAIM BOUNDARY: a fitted density may only be reported as an
       EFFECTIVE-MEDIUM extinction parameter of the calibrated simulator. It
       may not be reported as a true absolute concentration, turbidity or
@@ -173,21 +177,64 @@ changed_contracts:
   calibration_preregistration.forbidden_parameters.gauge_fixed.CG-6:
     before: >
       (did not exist) _BOTTLE_SURFACE_ALPHA and light.cutoff_angle_deg were
-      measured at |cos| 0.9948 under the old global scope.
+      measured at |cos| 0.9948 under the old global scope, and an earlier draft
+      of this amendment ruled only on that PAIR, keeping light.cutoff_angle_deg
+      fitted.
     after: >
-      New confounded group CG-6_effective_illumination_cone. Under the new
-      scope the two are even less separable, not more: projected |cos| = 1.0000
-      over the six Empty observables that SCENE_GEOMETRY_SURFACE_FOIL declares.
-      Ruling (preregistered here, before the re-run): fix
-      _BOTTLE_SURFACE_ALPHA = 0.02 as CONVENTION and keep
-      light.cutoff_angle_deg fitted.
-      Provenance basis, as in CG-1/CG-2/CG-5: _BOTTLE_SURFACE_ALPHA is a GGX
-      roughness with no first-hand source, whereas the VCSEL cone half-angle
-      at least corresponds to a documented device property.
-      CLAIM BOUNDARY: the fitted light.cutoff_angle_deg may only be reported as
-      an EFFECTIVE ILLUMINATION CONE PARAMETER of the calibrated simulator. It
-      may NOT be claimed as the real VCSEL divergence, because it absorbs
-      whatever the fixed bottle-surface roughness got wrong.
+      New confounded group CG-6_effective_angular_response, and it is a
+      THREE-WAY degeneracy, not a pair. Projected over the six Empty
+      observables that SCENE_GEOMETRY_SURFACE_FOIL declares:
+        _BOTTLE_SURFACE_ALPHA <-> light.cutoff_angle_deg  1.0000
+        _BOTTLE_SURFACE_ALPHA <-> sensor.fov_deg          0.9998
+        light.cutoff_angle_deg <-> sensor.fov_deg         0.9998
+      Ruling: fix BOTH _BOTTLE_SURFACE_ALPHA = 0.02 AND
+      light.cutoff_angle_deg = 25.0 as CONVENTION; sensor.fov_deg is the sole
+      calibrated member.
+      Provenance basis, not fit quality: the VL53L0X datasheet carries an
+      external specification for system FoV, whereas the true VCSEL divergence
+      and the bottle-surface GGX roughness have none. The weaker-provenance
+      members are fixed. Note the simulator's sensor.fov_deg is a SQUARE
+      perspective-film FULL angle and must not be treated as equivalent to the
+      real system FoV, and light.cutoff_angle_deg is a HALF-angle simulator
+      convention.
+      CLAIM BOUNDARY: a fitted sensor.fov_deg may only be reported as an
+      EFFECTIVE COLLECTION-ANGLE PARAMETER OF THE SQUARE-FILM RECEIVER
+      SURROGATE. It may NOT be reported as the true or measured VL53L0X system
+      FoV, because it absorbs whatever the two fixed members got wrong.
+      It is also FORBIDDEN to simply set sensor.fov_deg = 25 and rewrite
+      initial_simulation.lock on the strength of the datasheet.
+  calibration_preregistration.stage_0.borderline_policy:
+    before: >
+      A parameter whose leverage fell inside the borderline band [5, 20]
+      halted the flow with STAGE0_ADJUDICATION_REQUIRED and had no resolution
+      rule, so every borderline parameter invited a bespoke ruling made after
+      its number was already known.
+    after: >
+      A protocol-level, PARAMETER-AGNOSTIC conservative rule. If a parameter's
+      own-stage leverage lands in the band and no NAMED secondary adjudication
+      rule existed for it before this amendment, the outcome is
+      GAUGE_FIXED_AT_FROZEN_INITIAL_VALUE. Inventing a rescue criterion for an
+      individual borderline parameter is forbidden.
+      The ONLY named exception is MAPPING_SIGMA.sigma_snr_weight, for which
+      S0-B1..B5 was defined in advance and must be executed.
+      BORDERLINE therefore ceases to be a blocker; only a parameter still
+      awaiting its named secondary criterion, or one whose secondary criterion
+      was not executed in full (SECONDARY_INCOMPLETE), remains unresolved.
+
+  calibration_preregistration.stagewise.zero_dimensional_stage:
+    before: >
+      (did not exist) A stage left with no admitted parameter had no defined
+      semantics, so it would have been either an error or a silent skip.
+    after: >
+      A stage with no admitted parameter is a NAMED, LEGAL terminal state:
+        status = NO_FREE_PARAMETERS
+        optimizer_run = false
+        physical model retained = true
+        values = frozen initial values
+        reason = failed preregistered identifiability admission
+      It is neither an error nor a silent skip, and the rule applies to any
+      zero-dimensional stage. Loosening the admission threshold so that a
+      stage "has something to do" is forbidden.
 
   calibration_preregistration.stage_0.sigma_mc_degeneracy:
     before: >
@@ -278,6 +325,27 @@ changed_contracts:
       against an admitted member and the preregistered consequence is an
       AUTOMATIC GAUGE_FIX. The binding value is the one the CAL-PREREG-003
       re-run produces, not this projection.
+
+  calibration_preregistration.stage_0.foil_group:
+    before: >
+      Three foil parameters were mutually collinear under the old global scope
+      (_FOIL_REFLECTANCE_940NM <-> _FOIL_SURFACE_ALPHA 0.9986,
+       _FOIL_SIZE_TO_DIAMETER_RATIO <-> _FOIL_SURFACE_ALPHA 0.9959,
+       _FOIL_REFLECTANCE_940NM <-> _FOIL_SIZE_TO_DIAMETER_RATIO 0.9945),
+      which would have demanded a gauge ruling.
+    after: >
+      NO RULING IS TAKEN, and none is needed. Under own-stage admission,
+      projected over the six Empty observables that
+      SCENE_GEOMETRY_SURFACE_FOIL declares:
+        _FOIL_REFLECTANCE_940NM       0.9065     -> GAUGE_FIXED
+        _FOIL_SIZE_TO_DIAMETER_RATIO  0.0005576  -> GAUGE_FIXED
+        _FOIL_SURFACE_ALPHA           0.5751     -> GAUGE_FIXED
+        _FOIL_GAP_TO_BOTTLE_RATIO     10.64      -> BORDERLINE -> conservative
+                                                    gauge-fix by the generic rule
+      With no admitted member left, the admitted-only collinearity scope
+      removes all three foil degeneracies as formal blockers. They remain
+      CANDIDATE parameters in CAL-PREREG-003; whether they are admitted is
+      decided by the rerun, not by this projection.
 
   calibration_preregistration.evaluation_budget.wall_clock:
     before: >
