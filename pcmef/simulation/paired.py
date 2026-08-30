@@ -145,7 +145,14 @@ def family_variation(class_label: str, family_index: int, n_families: int) -> Ph
     # n_families - 1 會得到 > 1，於是取值**跑出預註冊範圍**（實測 irradiance
     # 到 4.039，而 S3 的上界是 4.0）。除以 n_families 讓 u, v 落在 [0, 1)，
     # 取值因此嚴格落在宣告區間內。超出預註冊範圍的場景就是沒有依據的場景。
-    u = ((family_index + phase) % n_families) / n_families
+    #
+    # 兩個軸都用**與 n_families 互質的步長**，不用步長 1。步長 1 會讓
+    # family_index 與 nuisance 取值單調對應，而切分是對 family_index 連續切的
+    # —— 兩者相乘的結果是 nuisance 被 split 完美分層（實測 offset：
+    # train [-5, 0.9]、val [1, 2.9]、test [3, 4.9]，零重疊）。那樣的
+    # 「family split」其實是對 offset 的外插測試，而不是可交換的家族抽樣。
+    # 13 與 7 都與 20 互質，因此各自都是 f 的雙射，20 個 (u, v) 仍兩兩相異。
+    u = (((family_index * 13) + phase) % n_families) / n_families
     v = (((family_index * 7) + phase) % n_families) / n_families
     return PhysicalVariation(
         lateral_offset_mm=lo_off + u * (hi_off - lo_off),

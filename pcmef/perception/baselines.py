@@ -456,8 +456,11 @@ def run_baselines(
         "dataset": {
             "counts": manifest["counts"],
             "totals": manifest["totals"],
-            "per_class": manifest["per_class"],
-            "split_ratio": manifest["split_ratio"],
+            "families_per_class": manifest.get("families_per_class"),
+            "realizations_per_family": manifest.get("realizations_per_family"),
+            "family_split_counts": manifest.get("family_split_counts"),
+            "render": manifest.get("render"),
+            "physical_variation": manifest.get("physical_variation"),
             "leakage_audit": manifest["leakage_audit"],
             "simulator_identity_hash": manifest["simulator"]["identity_hash"],
             "calibrated_simulation_lock_hash": manifest["simulator"][
