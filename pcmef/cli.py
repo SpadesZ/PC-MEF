@@ -56,6 +56,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from pathlib import Path
 
 from pcmef import __version__
@@ -1306,6 +1307,201 @@ def _print_stage0_report(report: dict, path: Path) -> None:
     print(f"report: {path.resolve()}")
 
 
+def cmd_calibration_formal(args: argparse.Namespace) -> int:
+    """CAL-PREREG-003 stage 1-5：正式校準。
+
+    **會讀 calibration partition 的數值**，因此每次執行都在 append-only 帳本
+    留下一筆；**不讀 held-out**，本指令連它的路徑都不會組出來。算圖在子行程
+    執行（NOTE-012），父行程以 artifact 判定成敗。
+    """
+    import subprocess
+
+    out_dir = Path(args.out)
+    report_path = out_dir / "calibration_report.json"
+
+    if args.verify_identity:
+        from pcmef.experiments.calibration_identity import (
+            STAGE_ORDER,
+            IdentityError,
+            load_frozen_identity,
+            stage_bounds,
+            stage_declared_cells,
+            stage_dimensions,
+        )
+        from pcmef.experiments.calibration_plan import budget_per_stage
+
+        try:
+            identity = load_frozen_identity(args.freeze_dir, args.repo_root)
+        except IdentityError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        print("frozen identity verified")
+        for label, value in identity.to_artifact().items():
+            if isinstance(value, (str, int)):
+                print(f"  {label:34s}: {value}")
+        print(f"\n{'stage':32s} {'dims':>4} {'budget':>8}  parameters")
+        total = 0
+        for stage_id in STAGE_ORDER:
+            dimensions = stage_dimensions(identity, stage_id)
+            budget = budget_per_stage(len(dimensions), 15, 100, 3) if dimensions else 0
+            total += budget
+            bounds = stage_bounds(identity, dimensions)
+            detail = ", ".join(
+                f"{name}{list(bounds[name])}" for name in dimensions
+            ) or "NO_FREE_PARAMETERS (optimizer_run=false)"
+            print(f"  {stage_id:30s} {len(dimensions):>4} {budget:>8}  {detail}")
+            print(
+                f"  {'':30s} {'':>4} {'':>8}  optimised cells: "
+                f"{len(stage_declared_cells(identity, stage_id))}/16"
+            )
+        print(f"\n  total frozen evaluation budget: {total}")
+        print(f"  calibration_access_count      : {identity.calibration_access_count}")
+        print(f"  heldout_access_count          : {identity.heldout_access_count}")
+        return 0
+
+    if not args.in_worker:
+        command = [
+            sys.executable, "-m", "pcmef.cli", "calibration", "formal",
+            "--out", str(args.out),
+            "--freeze-dir", str(args.freeze_dir),
+            "--repo-root", str(args.repo_root),
+            "--source", str(args.source),
+            "--render-cache", str(args.render_cache),
+            "--in-worker",
+        ]
+        if args.smoke:
+            command.append("--smoke")
+        if args.resume:
+            command.append("--resume")
+        if args.allow_dirty:
+            command.append("--allow-dirty")
+        for flag, value in (("--maxiter", args.maxiter), ("--restarts", args.restarts)):
+            if value is not None:
+                command.extend([flag, str(value)])
+
+        completed = subprocess.run(command, check=False)
+        if not report_path.exists():
+            print(
+                f"error: worker exited with {completed.returncode} and wrote no "
+                "calibration report",
+                file=sys.stderr,
+            )
+            return completed.returncode or 1
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if completed.returncode != 0:
+            print(
+                f"\nnote: the render worker exited with {completed.returncode} "
+                "after the report was written (NOTE-012); judged from the report.",
+                file=sys.stderr,
+            )
+        _print_calibration_report(report, report_path)
+        if not report.get("scientific_result", True):
+            return 0 if report["overall_outcome"] != "CALIBRATION_INCOMPLETE" else 0
+        return 0 if report["overall_outcome"] == "CALIBRATION_COMPLETE" else 2
+
+    from pcmef.experiments.calibration_formal import (
+        FormalCalibrationError,
+        run_formal_calibration,
+    )
+    from pcmef.experiments.calibration_identity import IdentityError
+    from pcmef.experiments.calibration_journal import ResumeError
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+
+    require_mitsuba()
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if dirty and not args.allow_dirty and not args.smoke:
+        print(
+            "error: the working tree has uncommitted changes; an artifact that names "
+            "a commit must be produced from that commit. Commit first, or pass "
+            "--allow-dirty.",
+            file=sys.stderr,
+        )
+        return 2
+
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:8.1f}s] {message}", flush=True)
+
+    try:
+        run_formal_calibration(
+            out_root=args.out,
+            freeze_dir=args.freeze_dir,
+            repo_root=args.repo_root,
+            source_root=args.source,
+            code_version=commit,
+            resume=bool(args.resume),
+            scientific=not args.smoke,
+            maxiter=args.maxiter,
+            restarts=args.restarts,
+            render_cache_capacity=args.render_cache,
+            progress=say,
+        )
+    except (FormalCalibrationError, IdentityError, ResumeError) as error:
+        print(f"\nFAIL CLOSED: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _print_calibration_report(report: dict, path: Path) -> None:
+    """把最終報告印成可以一眼判讀的樣子。"""
+    banner = "" if report.get("scientific_result", True) else "  [NON-SCIENTIFIC SMOKE]"
+    print(f"\ncalibration report{banner}")
+    print(f"  path             : {path.resolve()}")
+    print(f"  outcome          : {report['overall_outcome']}")
+    if report.get("stopped_at_stage"):
+        print(
+            f"  stopped at       : {report['stopped_at_stage']} "
+            f"({report['stop_reason']})"
+        )
+    print(f"  raw data hash    : {report['identity']['raw_calibration_data_hash']}")
+    print(f"  s_f record       : CAL-SF-001 {report['identity']['sf_hash'][:16]}")
+    print(f"  access ledger    : {report['access_ledger']['calibration_access_count']}")
+    print(f"  heldout access   : {report['heldout_access_count']}")
+
+    print(f"\n  {'stage':30s} {'outcome':26s} {'evals':>12}  J before -> after")
+    for stage_id in report["stage_order"]:
+        summary = report["stage_summaries"].get(stage_id)
+        if summary is None:
+            print(f"  {stage_id:30s} {'NOT RUN':26s}")
+            continue
+        flags = ",".join(summary["flags"])
+        print(
+            f"  {stage_id:30s} {summary['outcome'] + (' ' + flags if flags else ''):26s} "
+            f"{summary['evaluations_used']:>5}/{summary['evaluations_budget']:<6} "
+            f"{summary['objective_before']:.6g} -> {summary['objective_after']:.6g}"
+        )
+
+    history = report["objective_history"]
+    print(
+        f"\n  full 16-term J   : {history['full_objective_initial']:.6g} -> "
+        f"{history['full_objective_calibrated']:.6g}"
+    )
+    print("\n  calibrated parameters")
+    for item in report["parameter_delta"]["parameters"]:
+        flag = "  <-- AT BOUNDARY" if item["at_boundary"] else ""
+        print(
+            f"    {item['name']:26s} {item['initial']:>14.6g} -> "
+            f"{item['calibrated']:<14.6g} [{item['fitted_in_stage']}]{flag}"
+        )
+    runtime = report["runtime_report"]
+    print(
+        f"\n  wall clock       : {runtime['wall_clock_h']:.2f} h "
+        f"({runtime['total_evaluations_used']}/{runtime['total_evaluations_budget']} "
+        "evaluations)"
+    )
+    cache = report["cache_stats"]["render_cache"]
+    print(
+        f"  render cache     : {cache['render_cache_hits']} hits / "
+        f"{cache['renders_executed']} renders"
+    )
+
+
 def cmd_calibration_stage0(args: argparse.Namespace) -> int:
     """CAL-PREREG-002 stage 0：純模擬的可辨識性探測（NOTE-043）。
 
@@ -2409,6 +2605,34 @@ def build_parser() -> argparse.ArgumentParser:
     cal_stage0.add_argument("--allow-dirty", action="store_true")
     cal_stage0.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
     cal_stage0.set_defaults(func=cmd_calibration_stage0)
+
+    cal_formal = cal_sub.add_parser(
+        "formal",
+        help="CAL-PREREG-003 stage 1-5 正式校準；讀 calibration partition，不碰 held-out",
+    )
+    cal_formal.add_argument("--out", default="outputs/calibration")
+    cal_formal.add_argument("--freeze-dir", default="freeze")
+    cal_formal.add_argument("--repo-root", default=".")
+    cal_formal.add_argument("--source", default="data/raw_real/edge_impulse_export")
+    cal_formal.add_argument(
+        "--verify-identity",
+        action="store_true",
+        help="只驗證凍結身分與各階段搜尋空間，不讀資料也不執行任何評估",
+    )
+    cal_formal.add_argument(
+        "--smoke",
+        action="store_true",
+        help="非科學冒煙：極小預算只驗證管線接得起來，產出一律標記為非科學結果",
+    )
+    cal_formal.add_argument(
+        "--resume", action="store_true", help="從既有 checkpoint 與日誌接續"
+    )
+    cal_formal.add_argument("--maxiter", type=int, default=None, help=argparse.SUPPRESS)
+    cal_formal.add_argument("--restarts", type=int, default=None, help=argparse.SUPPRESS)
+    cal_formal.add_argument("--render-cache", type=int, default=8)
+    cal_formal.add_argument("--allow-dirty", action="store_true")
+    cal_formal.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
+    cal_formal.set_defaults(func=cmd_calibration_formal)
 
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)
