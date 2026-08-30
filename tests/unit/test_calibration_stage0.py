@@ -586,3 +586,82 @@ def test_an_existing_stage0_record_is_never_overwritten(tmp_path):
             freeze_dir=tmp_path / "freeze",
             repo_root=REPO_ROOT,
         )
+
+
+# ---------------------------------------------------------------------------
+# 共線性 blocker 的範圍（AMD-004）
+# ---------------------------------------------------------------------------
+
+
+def _two_in_one_stage(span_a, span_b, shared=True):
+    """兩個同階段參數，響應落在同一個（或不同）own-stage observable 上。"""
+    stages = {"AMBIENT": ["ambient_energy_to_mcps", "signal_energy_to_mcps"]}
+    bounds = {"ambient_energy_to_mcps": (0.0, 1.0), "signal_energy_to_mcps": (0.0, 1.0)}
+    from pcmef.experiments.calibration_stage0 import declared_observables
+
+    obs = declared_observables("AMBIENT")
+    target = {"ambient_energy_to_mcps": obs[0],
+              "signal_energy_to_mcps": obs[0] if shared else obs[2]}
+    spans = {"ambient_energy_to_mcps": span_a, "signal_energy_to_mcps": span_b}
+
+    def evaluate(override, seed):
+        row = {n: 100.0 for n in NAMES}
+        if seed >= 0:
+            for n in NAMES:
+                row[n] = 100.0 + ((seed % 8) - 3.5)
+        if override is not None:
+            d = override["binding"].dimension
+            lo, hi = bounds[d]
+            row[target[d]] = 100.0 + spans[d] * (override["value"] - lo) / (hi - lo)
+        return row
+
+    return run_stage0(
+        resolved_bounds=bounds,
+        initial_values={k: 0.5 for k in bounds},
+        stage_parameters=stages,
+        stage0_settings=dict(SETTINGS),
+        evaluate=evaluate,
+    )
+
+
+def _pair(result):
+    return result["collinearity"][0]
+
+
+def test_two_admitted_collinear_parameters_are_a_formal_blocker():
+    """兩端都在搜尋空間內、又幾乎平行 -> 這才是真的簡併。"""
+    result = _two_in_one_stage(245.0, 245.0)
+    assert all(p["outcome"] == "ADMITTED" for p in result["parameters"])
+    pair = _pair(result)
+    assert pair["abs_cosine"] == pytest.approx(1.0, abs=1e-9)
+    assert pair["both_admitted"] is True
+    assert pair["degenerate"] is True
+
+
+def test_a_gauge_fixed_member_cannot_form_a_formal_blocker():
+    """AMD-004：被 gauge-fix 的參數不在搜尋空間裡，與誰共線都不影響任何擬合。
+
+    餘弦仍然照實記錄（abs_cosine_exceeds_threshold 為 True），
+    但 `degenerate` 必須為 False —— 否則流程會為了兩個永遠不會一起被擬合的
+    量停下來等裁決。
+    """
+    result = _two_in_one_stage(245.0, 0.0024)   # 第二個 own-stage 槓桿 ~0.001
+    outcomes = {p["dimension"]: p["outcome"] for p in result["parameters"]}
+    assert outcomes["ambient_energy_to_mcps"] == "ADMITTED"
+    assert outcomes["signal_energy_to_mcps"] == "GAUGE_FIXED"
+
+    pair = _pair(result)
+    assert pair["abs_cosine"] == pytest.approx(1.0, abs=1e-9)
+    assert pair["abs_cosine_exceeds_threshold"] is True   # 照實記錄
+    assert pair["both_admitted"] is False
+    assert pair["degenerate"] is False                    # 但不是 blocker
+
+
+def test_the_response_vector_uses_only_the_stages_own_observables():
+    """在別的階段才會被最佳化的通道上很像，不算本階段的簡併。"""
+    same = _pair(_two_in_one_stage(245.0, 245.0, shared=True))
+    apart = _pair(_two_in_one_stage(245.0, 245.0, shared=False))
+    assert same["abs_cosine"] == pytest.approx(1.0, abs=1e-9)
+    # 落在該階段宣告的**不同**分量上 -> 正交，不是簡併。
+    assert apart["abs_cosine"] == pytest.approx(0.0, abs=1e-9)
+    assert apart["degenerate"] is False

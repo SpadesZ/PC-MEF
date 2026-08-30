@@ -639,21 +639,26 @@ def run_stage0(
             )
         entry["outcome"] = outcome
 
-        # 響應向量：退化（INERT / DETERMINISTIC_RESPONSE）的分量記 0。
-        # DETERMINISTIC_RESPONSE 記 0 是刻意保守 —— 它沒有可用的正規化尺度，
-        # 硬給一個大數會讓餘弦被那一個分量獨佔，等於用發明的數字決定簡併。
+        # AMD-004：響應向量只用**該階段宣告的 observable**。
+        # 簡併是關於 optimizer 搜尋空間的敘述，而該階段的目標函數只看得到
+        # 自己那些項；用全部 32 個分量算餘弦，會把「在別的階段才會被最佳化的
+        # 通道上很像」也算成本階段的簡併。
+        #
+        # 退化（INERT / DETERMINISTIC_RESPONSE）的分量記 0：後者沒有可用的
+        # 正規化尺度，硬給一個大數會讓餘弦被那一個分量獨佔。
         vector = np.array(
             [
                 deltas[name] / sigma_mc[name]
                 if branches[name] == "RATIO"
                 else 0.0
-                for name in names
+                for name in stage_declared
             ]
         )
         response_vectors[dimension] = vector
         parameters.append(entry)
 
     # -- 階段內共線性 ------------------------------------------------------
+    outcomes = {e["dimension"]: e["outcome"] for e in parameters}
     collinearity: list[dict[str, Any]] = []
     for stage_id in stage_parameters:
         dims = [
@@ -667,13 +672,30 @@ def run_stage0(
                 cosine = cosine_similarity(
                     response_vectors[left], response_vectors[right]
                 )
+                # AMD-004：只有**兩端都仍在搜尋空間內**的配對才形成 formal
+                # blocker。簡併是關於 optimizer 搜尋空間的敘述；被 gauge-fix
+                # 的參數不在那個空間裡，它與誰共線都不影響任何擬合，
+                # 因此把它報成 blocker 等於要求裁決兩個永遠不會一起被擬合的量。
+                both_admitted = (
+                    outcomes.get(left, "").startswith("ADMITTED")
+                    and outcomes.get(right, "").startswith("ADMITTED")
+                )
                 collinearity.append(
                     {
                         "stage": stage_id,
                         "pair": [left, right],
                         "cosine": cosine,
                         "abs_cosine": None if cosine is None else abs(cosine),
+                        "both_admitted": both_admitted,
+                        "outcomes": [outcomes.get(left), outcomes.get(right)],
+                        # `degenerate` 是**形式上的 blocker 判定**，
+                        # 因此它同時要求「夠像」與「兩端都還在搜尋空間裡」。
                         "degenerate": (
+                            None
+                            if cosine is None
+                            else bool(abs(cosine) >= 0.98 and both_admitted)
+                        ),
+                        "abs_cosine_exceeds_threshold": (
                             None if cosine is None else bool(abs(cosine) >= 0.98)
                         ),
                     }

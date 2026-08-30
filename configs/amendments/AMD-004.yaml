@@ -148,6 +148,47 @@ changed_contracts:
       wrong. This mirrors the CG-1 boundary, under which only sigma_t is
       claimable.
 
+  calibration_preregistration.stage_0.collinearity_check.scope:
+    before: >
+      Pairwise cosine over ALL 20 optimizer dimensions within a stage, using
+      response vectors spanning all 32 observables, with every pair whose
+      |cos| >= 0.98 raising a formal confounding blocker regardless of whether
+      either member was actually going to be fitted.
+    after: >
+      The collinearity blocker is computed ONLY over pairs that are
+      (a) in the same stage, AND
+      (b) still ADMITTED or ADMITTED_DETERMINISTIC after own-stage admission.
+      The response vector uses ONLY that stage's declared observables,
+      component-wise normalised by sigma_MC.
+      A GAUGE_FIXED or NOT_ADMITTED member can NEVER form a formal confounding
+      blocker.
+      Reason: a degeneracy is a statement about the optimizer's search space.
+      A parameter that is gauge-fixed is not in that space, so it cannot be
+      confounded with anything -- reporting it as a blocker would demand a
+      ruling about two quantities that are never fitted together. Restricting
+      the vector to the stage's own channels follows for the same reason: the
+      objective the stage minimises is the only thing that can fail to
+      separate them.
+
+  calibration_preregistration.forbidden_parameters.gauge_fixed.CG-6:
+    before: >
+      (did not exist) _BOTTLE_SURFACE_ALPHA and light.cutoff_angle_deg were
+      measured at |cos| 0.9948 under the old global scope.
+    after: >
+      New confounded group CG-6_effective_illumination_cone. Under the new
+      scope the two are even less separable, not more: projected |cos| = 1.0000
+      over the six Empty observables that SCENE_GEOMETRY_SURFACE_FOIL declares.
+      Ruling (preregistered here, before the re-run): fix
+      _BOTTLE_SURFACE_ALPHA = 0.02 as CONVENTION and keep
+      light.cutoff_angle_deg fitted.
+      Provenance basis, as in CG-1/CG-2/CG-5: _BOTTLE_SURFACE_ALPHA is a GGX
+      roughness with no first-hand source, whereas the VCSEL cone half-angle
+      at least corresponds to a documented device property.
+      CLAIM BOUNDARY: the fitted light.cutoff_angle_deg may only be reported as
+      an EFFECTIVE ILLUMINATION CONE PARAMETER of the calibrated simulator. It
+      may NOT be claimed as the real VCSEL divergence, because it absorbs
+      whatever the fixed bottle-surface roughness got wrong.
+
   calibration_preregistration.stage_0.sigma_mc_degeneracy:
     before: >
       sigma_MC <= 0 made the leverage "undefined" and the parameter
@@ -229,6 +270,14 @@ changed_contracts:
       ADMIT only if S0-B1..S0-B5 all pass; otherwise GAUGE_FIX. The measured
       value 17.16 is explicitly NOT a reason to admit, and the criterion may
       not be edited after it has been run.
+      NO SEPARATE CG RULING IS TAKEN FOR sigma_snr_weight: S0-B4 already
+      decides it. Projected from the frozen CAL-PREREG-002 artifact over the
+      eight sigma_like observables the sigma stage declares,
+      |cos|(sigma_snr_weight, sigma_multipath_weight) = 0.9959 >= 0.98 while
+      |cos|(sigma_snr_weight, sigma_width_to_mm) = 0.9503, so S0-B4 fails
+      against an admitted member and the preregistered consequence is an
+      AUTOMATIC GAUGE_FIX. The binding value is the one the CAL-PREREG-003
+      re-run produces, not this projection.
 
   calibration_preregistration.evaluation_budget.wall_clock:
     before: >
@@ -344,9 +393,58 @@ rationale: >
   schedule is not a scientific argument. It is therefore registered as a named
   blocker for stage 1 and left for an explicit decision.
 
+  calibration_preregistration.stage_0.foil_group:
+    before: >
+      Three foil parameters were mutually collinear under the old global scope
+      (_FOIL_REFLECTANCE_940NM <-> _FOIL_SURFACE_ALPHA 0.9986,
+       _FOIL_SIZE_TO_DIAMETER_RATIO <-> _FOIL_SURFACE_ALPHA 0.9959,
+       _FOIL_REFLECTANCE_940NM <-> _FOIL_SIZE_TO_DIAMETER_RATIO 0.9945),
+      which would have demanded a gauge ruling.
+    after: >
+      NO RULING IS TAKEN, because under own-stage admission there is nothing
+      left to rule on. Projected from the frozen CAL-PREREG-002 artifact,
+      restricted to the six Empty observables that
+      SCENE_GEOMETRY_SURFACE_FOIL declares:
+        _FOIL_REFLECTANCE_940NM       0.9065     -> GAUGE_FIXED
+        _FOIL_SIZE_TO_DIAMETER_RATIO  0.0005576  -> GAUGE_FIXED
+        _FOIL_SURFACE_ALPHA           0.5751     -> GAUGE_FIXED
+        _FOIL_GAP_TO_BOTTLE_RATIO     10.64      -> BORDERLINE
+      Zero foil members remain ADMITTED, so all three foil degeneracies cease
+      to be formal blockers by the scope rule above. This is RECORDED, not
+      adjudicated; no CG group is opened for them. The binding classification
+      is whatever the CAL-PREREG-003 re-run produces.
+
 precondition_evidence:
   calibration_access_count: 0
   heldout_access_count: 0
+  projection_basis: >
+    The own-stage numbers quoted in this amendment are PROJECTIONS recomputed
+    from the frozen CAL-PREREG-002 stage 0 artifact
+    (outputs/calibration/stage_0/stage0_identifiability.json), which recorded
+    the full 20 x 32 leverage matrix and sigma_MC. They are valid as a
+    projection because CAL-PREREG-003 renames and reorders the stages but
+    keeps the same parameter groups and the same declared channel sets. They
+    are NOT the binding result: stage 0 must be re-run under CAL-PREREG-003
+    and its output is what gets frozen.
+  projected_admitted_after_own_stage_rule: 7
+  projected_open_blockers_after_this_amendment:
+    - >
+      SCENE_GEOMETRY_SURFACE_FOIL retains a three-way degeneracy among ADMITTED
+      members: _BOTTLE_SURFACE_ALPHA <-> light.cutoff_angle_deg 1.0000,
+      _BOTTLE_SURFACE_ALPHA <-> sensor.fov_deg 0.9998,
+      light.cutoff_angle_deg <-> sensor.fov_deg 0.9998. CG-6 fixes
+      _BOTTLE_SURFACE_ALPHA, but light.cutoff_angle_deg <-> sensor.fov_deg
+      0.9998 SURVIVES between two admitted members and is therefore still a
+      formal blocker under the scope rule. NOT ruled here.
+    - >
+      SCENE_PARTICIPATING_MEDIA would have ZERO admitted members
+      (medium.bubble_density 16.59 BORDERLINE, medium.turbidity 5.293
+      BORDERLINE, medium.mist_density 0.9401 GAUGE_FIXED), and the S0-B1..B5
+      secondary criterion is scoped to the sigma stage only, so those two
+      borderlines have no resolution rule.
+    - >
+      _FOIL_GAP_TO_BOTTLE_RATIO 10.64 BORDERLINE in the geometry stage, also
+      outside the scope of S0-B1..B5.
   calibration_access_ledger_entries: 0
   stage_0_frozen: false
   stage_0_freeze_path_exists: false
