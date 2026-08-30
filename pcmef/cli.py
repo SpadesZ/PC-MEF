@@ -1307,6 +1307,112 @@ def _print_stage0_report(report: dict, path: Path) -> None:
     print(f"report: {path.resolve()}")
 
 
+def cmd_perception_dataset(args: argparse.Namespace) -> int:
+    """產生 perception 的成對 synthetic dataset。算圖在子行程（NOTE-012）。"""
+    import subprocess
+
+    if not args.in_worker:
+        command = [
+            sys.executable, "-m", "pcmef.cli", "perception", "dataset",
+            "--per-class", str(args.per_class), "--out", str(args.out),
+            "--freeze-dir", str(args.freeze_dir), "--repo-root", str(args.repo_root),
+            "--in-worker",
+        ]
+        if args.run_name:
+            command.extend(["--run-name", args.run_name])
+        completed = subprocess.run(command, check=False)
+        return completed.returncode
+
+    from pcmef.perception.dataset import build_dataset
+    from pcmef.simulation.mitsuba_adapter import require_mitsuba
+
+    require_mitsuba()
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+
+    manifest = build_dataset(
+        per_class=args.per_class, out_root=args.out, run_name=args.run_name,
+        freeze_dir=args.freeze_dir, repo_root=args.repo_root,
+        code_version=commit, progress=say,
+    )
+    audit = manifest["leakage_audit"]
+    print(f"\ndataset  {manifest['run_dir']}")
+    print(f"  totals            : {manifest['totals']}")
+    print(f"  per class / split : {json.dumps(manifest['counts'])}")
+    print(f"  scenario_id disjoint      : {audit['scenario_id_disjoint']}")
+    print(f"  scenario_seed disjoint    : {audit['scenario_seed_disjoint']}")
+    print(f"  scene family disjoint     : {audit['physical_scene_family_disjoint']}")
+    print(f"  distinct scene families   : {audit['distinct_physical_families_total']} "
+          f"({audit['distinct_physical_families_per_class']})")
+    return 0
+
+
+def cmd_perception_train(args: argparse.Namespace) -> int:
+    """訓練兩個 baseline 與傳統融合。不需要 mitsuba。"""
+    import subprocess
+
+    from pcmef.perception.baselines import run_baselines
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+
+    report = run_baselines(
+        run_dir=args.run_dir, epochs=args.epochs, batch_size=args.batch_size,
+        lr=args.lr, code_version=commit, progress=say,
+    )
+    _print_perception_report(report)
+    return 0
+
+
+def _print_perception_report(report: dict) -> None:
+    from pcmef.core.constants import CLASS_ORDER
+
+    print("\nperception baselines")
+    print(f"  run dir     : {report['run_dir']}")
+    print(f"  dataset     : {report['dataset']['totals']}")
+    audit = report["dataset"]["leakage_audit"]
+    print(f"  leakage     : scenario_id disjoint={audit['scenario_id_disjoint']}  "
+          f"scene-family disjoint={audit['physical_scene_family_disjoint']}  "
+          f"(families/class={audit['distinct_physical_families_per_class']})")
+
+    print(f"\n  {'model':10s} {'params':>8s} {'train':>7s} {'val':>7s} {'test':>7s} "
+          f"{'testF1':>7s}  overfitting")
+    for name, block in report["models"].items():
+        print(
+            f"  {name:10s} {block['parameter_count']:>8d} "
+            f"{block['train']['accuracy']:>7.3f} {block['val']['accuracy']:>7.3f} "
+            f"{block['test']['accuracy']:>7.3f} {block['test']['macro_f1']:>7.3f}  "
+            f"{block['overfitting']['verdict']}"
+        )
+    fusion = report["fusion"]
+    print(
+        f"  {'fusion':10s} {'-':>8s} {fusion['train']['accuracy']:>7.3f} "
+        f"{fusion['val']['accuracy']:>7.3f} {fusion['test']['accuracy']:>7.3f} "
+        f"{fusion['test']['macro_f1']:>7.3f}  w={fusion['selected_w']:.2f} "
+        f"(chosen on val)"
+    )
+
+    for label, block in (
+        *[(n, b["test"]) for n, b in report["models"].items()],
+        ("fusion", fusion["test"]),
+    ):
+        print(f"\n  {label} test confusion (rows=true, cols=pred, {list(CLASS_ORDER)})")
+        for index, row in enumerate(block["confusion_matrix"]):
+            print(f"    {CLASS_ORDER[index]:14s} {row}")
+        print(f"    mean P(true class) = {block['mean_probability_of_true_class']:.4f}"
+              f"   mean max P = {block['mean_max_probability']:.4f}")
+
+
 def cmd_sim_paired_smoke(args: argparse.Namespace) -> int:
     """E1 -> E2 成對資料橋的 smoke。算圖在子行程執行（NOTE-012）。
 
@@ -3051,6 +3157,33 @@ def build_parser() -> argparse.ArgumentParser:
     cal_formal.add_argument("--allow-dirty", action="store_true")
     cal_formal.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
     cal_formal.set_defaults(func=cmd_calibration_formal)
+
+    perception_parser = subparsers.add_parser(
+        "perception", help="M4：單模態 baseline 與傳統融合（synthetic-only）"
+    )
+    perception_sub = perception_parser.add_subparsers(
+        dest="perception_command", required=True
+    )
+
+    perception_dataset = perception_sub.add_parser(
+        "dataset", help="以成對生成器產生 train/val/test synthetic dataset"
+    )
+    perception_dataset.add_argument("--per-class", type=int, default=100)
+    perception_dataset.add_argument("--out", default="outputs/perception")
+    perception_dataset.add_argument("--run-name", default=None)
+    perception_dataset.add_argument("--freeze-dir", default="freeze")
+    perception_dataset.add_argument("--repo-root", default=".")
+    perception_dataset.add_argument("--in-worker", action="store_true", help=argparse.SUPPRESS)
+    perception_dataset.set_defaults(func=cmd_perception_dataset)
+
+    perception_train = perception_sub.add_parser(
+        "train", help="訓練兩個 baseline 與傳統融合，並產出報告"
+    )
+    perception_train.add_argument("--run-dir", required=True)
+    perception_train.add_argument("--epochs", type=int, default=40)
+    perception_train.add_argument("--batch-size", type=int, default=16)
+    perception_train.add_argument("--lr", type=float, default=1e-3)
+    perception_train.set_defaults(func=cmd_perception_train)
 
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)

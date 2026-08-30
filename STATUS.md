@@ -181,7 +181,7 @@ sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
 | M2 Surrogate + E1 | **`E1 CLOSED — partial calibration success`** | 五階段跑完、E1 開啟一次並得 PASS。**只有 Ambient Rate 真的改善**，其餘三個 feature 維持 initial physics-constrained state。見「E1 已完成」專節 |
 | M3 Post-E1 Split | **`paired bridge smoke PASS / ready for perception`** | 成對 RGB-ToF 生成路徑已驗收（6/6 check PASS，identity `a00b3969…`）。synthetic split policy lock 本身仍未凍 |
-| M4 Perception | 進行中 | torch 2.10.0+cpu 可用；tensorflow / scikit-learn 未安裝且**不需要** |
+| M4 Perception | **baseline 完成，Vision 失效已具名** | ToF 1D-CNN test 0.975 / 融合 0.988；**Vision 0.425 且 train 只有 0.542** —— RGB 積分器丟掉參與介質，見「M4 Perception baseline」專節 |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
 | M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
@@ -1088,6 +1088,104 @@ Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
 > **initial physics-constrained state** —— 它們的參數更新被獨立證據否決，
 > 因此模擬器在這三個通道上就是 `initial_simulation.lock` 凍結的那個模型，
 > 既沒有被校準，也沒有退步。
+
+---
+
+## M4 Perception baseline —— ToF 可學、Vision 失效（2026-08-31）
+
+```
+outputs/perception/ds_v1/{dataset_manifest,preprocessing,perception_report}.json
+400 samples = 4 classes x 100 scenarios   train 240 / val 80 / test 80
+simulator identity a00b3969edccffdd（= E1 最終保留狀態，未重新校準）
+```
+
+| 模型 | 參數 | train | val | test | test macro-F1 | 過擬合 |
+|---|---|---|---|---|---|---|
+| Vision CNN | 23,956 | 0.542 | 0.550 | **0.425** | **0.320** | 訓練集都擬合不了 |
+| ToF 1D-CNN | 18,852 | 1.000 | 1.000 | **0.975** | 0.975 | 無 train-val 落差 |
+| Fusion (w=0.50) | — | 1.000 | 1.000 | **0.988** | 0.987 | 權重由 validation 選出 |
+
+融合是固定權重的機率加權平均，w 在 validation 上由 21 點網格選出；
+兩個模態在 val 上都達 1.000 因此全網格平手，平手規則取離 0.5 最近者 →
+w = 0.50（等權）。test 只算一次。
+
+### Vision 失效的證據 —— 不是解析度、也不是模型太小
+
+Vision 連**訓練集**都只有 0.542，因此不是過擬合、不是容量不足。
+它的 confusion matrix 有結構：
+
+```
+            pred:  Empty  Water  Bubbly  Misty
+Empty              [ 2      0      0      18 ]   <- 被判成 Misty
+Water-filled       [ 0     20      0       0 ]
+Bubbly             [ 0     20      0       0 ]   <- 全被判成 Water-filled
+Misty              [ 8      0      0      12 ]   <- 與 Empty 互相混淆
+```
+
+Bubbly 這一欄**從未被預測過**。混淆的配對是 (Empty, Misty) 與
+(Water-filled, Bubbly) —— 而那正好是 `_INTERIOR_BASE_IOR` 的分組：
+
+```python
+_INTERIOR_BASE_IOR = {"empty": "air", "misty": "air",
+                      "water": "water", "bubbly": "water"}
+```
+
+實測 train split 的 RGB 影像距離（log1p 後逐像素 L1）：
+
+| 配對 | 類間平均影像距離 | 類內 MC 雜訊 (pixel SD) |
+|---|---|---|
+| Empty vs **Misty** | **0.058** | 0.36 / 0.35 |
+| Water-filled vs **Bubbly** | **0.163** | 1.11 / 1.12 |
+| 其餘四組（air vs water） | 0.78 – 0.79 | — |
+
+**同 IOR 的兩對，其類間差遠小於類內雜訊。** RGB 實際上只看得到兩個場景
+（空氣內部 vs 水內部），不是四個。Vision 的上限因此是 50%，
+實測 42.5% 與這個上限一致。
+
+### 根因：RGB 積分器不支援參與介質
+
+`build_scene_dict()` 用的是 `{"type": "path"}`。Mitsuba 3 的 `path`
+**不做**參與介質輸運 —— 這與 NOTE-026 在 transient 側修掉的
+`transient_path` 靜默忽略 medium 是同一類問題，但 RGB 側從未修過。
+
+診斷實測（同一場景、只換積分器，未改動 repo）：
+
+```
+integrator = path      Bubbly 影像均值 1.060   Water-filled vs Bubbly 距離 0.500
+integrator = volpath   Bubbly 影像均值 0.378   Water-filled vs Bubbly 距離 0.555
+```
+
+Bubbly 的影像均值在換成 `volpath` 後掉了 2.8 倍，且它與 Empty 的距離從
+0.79 變成 0.248 —— 介質這時才真的參與成像。
+
+但**即使換成 `volpath`，Empty vs Misty 仍只有 0.177**，依舊低於類內雜訊
+0.35。因此有**兩個疊加的原因**，換積分器只解得掉一個：
+
+1. **RGB 積分器丟掉參與介質**（`path` → 需要 `volpath`）
+2. **spp=16 的 MC 雜訊與類間訊號同量級**（類內 pixel SD 0.35–1.12）
+
+第 2 點與 E1 校準被抑制的根因**是同一件事**：spp=16 的 Monte-Carlo 雜訊。
+它在 ToF 側壓掉了 signal / sigma 三個階段的校準，在 RGB 側壓掉了
+Misty 與 Empty 的區別。
+
+### 未自行修改，理由
+
+換 `path` → `volpath` 會改變 RGB 輸出。它**不影響** E1、不影響
+`calibrated_simulation.lock`（該 lock 只涵蓋 ToF 相關參數，積分器型別不在
+任何凍結參數集內），但它仍是 simulator 層的變更，依指示不自行執行。
+提高 spp 則會直接動到凍結的 `not_fitted` 項。兩者都需要明確裁決。
+
+### 這個資料集能支持什麼結論
+
+`dataset_manifest.leakage_audit` 已具名記下：
+scenario_id 與 scenario_seed **跨 split 不重疊**（無重複樣本），
+但**物理場景族只有 4 個、每類 1 個**，因此 train/val/test 是**同四個場景的
+不同 Monte-Carlo 實現**。
+
+> 因此 ToF 的 0.975 只證明「四個固定場景在算圖雜訊下分得開」，
+> **不證明**對未見過的瓶子配置有泛化能力，也完全不涉及真實感測器表現。
+> 要支持泛化宣稱，必須讓每類有多個物理場景（不同幾何 / 距離 / 濃度），
+> 而那需要先決定「scenario family」在 synthetic split policy 裡的定義。
 
 ---
 
