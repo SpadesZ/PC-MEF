@@ -1314,12 +1314,16 @@ def cmd_perception_dataset(args: argparse.Namespace) -> int:
     if not args.in_worker:
         command = [
             sys.executable, "-m", "pcmef.cli", "perception", "dataset",
-            "--per-class", str(args.per_class), "--out", str(args.out),
+            "--families-per-class", str(args.families_per_class),
+            "--realizations", str(args.realizations),
+            "--out", str(args.out),
             "--freeze-dir", str(args.freeze_dir), "--repo-root", str(args.repo_root),
             "--in-worker",
         ]
         if args.run_name:
             command.extend(["--run-name", args.run_name])
+        if args.rgb_spp is not None:
+            command.extend(["--rgb-spp", str(args.rgb_spp)])
         completed = subprocess.run(command, check=False)
         return completed.returncode
 
@@ -1336,7 +1340,10 @@ def cmd_perception_dataset(args: argparse.Namespace) -> int:
         print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
 
     manifest = build_dataset(
-        per_class=args.per_class, out_root=args.out, run_name=args.run_name,
+        families_per_class=args.families_per_class,
+        realizations_per_family=args.realizations,
+        rgb_spp=args.rgb_spp,
+        out_root=args.out, run_name=args.run_name,
         freeze_dir=args.freeze_dir, repo_root=args.repo_root,
         code_version=commit, progress=say,
     )
@@ -1344,6 +1351,10 @@ def cmd_perception_dataset(args: argparse.Namespace) -> int:
     print(f"\ndataset  {manifest['run_dir']}")
     print(f"  totals            : {manifest['totals']}")
     print(f"  per class / split : {json.dumps(manifest['counts'])}")
+    print(f"  families/class    : {manifest['families_per_class']} x "
+          f"{manifest['realizations_per_family']} realizations")
+    print(f"  render spp        : tof {manifest['render']['tof_spp']} (E1 frozen) / "
+          f"rgb {manifest['render']['rgb_spp']}")
     print(f"  scenario_id disjoint      : {audit['scenario_id_disjoint']}")
     print(f"  scenario_seed disjoint    : {audit['scenario_seed_disjoint']}")
     print(f"  scene family disjoint     : {audit['physical_scene_family_disjoint']}")
@@ -3168,7 +3179,12 @@ def build_parser() -> argparse.ArgumentParser:
     perception_dataset = perception_sub.add_parser(
         "dataset", help="以成對生成器產生 train/val/test synthetic dataset"
     )
-    perception_dataset.add_argument("--per-class", type=int, default=100)
+    perception_dataset.add_argument("--families-per-class", type=int, default=20)
+    perception_dataset.add_argument("--realizations", type=int, default=5)
+    perception_dataset.add_argument(
+        "--rgb-spp", type=int, default=None,
+        help="RGB 專用 spp；未給則沿用 ToF 的凍結 spp（僅供診斷）",
+    )
     perception_dataset.add_argument("--out", default="outputs/perception")
     perception_dataset.add_argument("--run-name", default=None)
     perception_dataset.add_argument("--freeze-dir", default="freeze")

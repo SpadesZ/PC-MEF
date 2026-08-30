@@ -463,6 +463,23 @@ def build_scene_dict(
         del scene["room_light"]
     elif illumination is Illumination.AMBIENT_ONLY:
         del scene["light"]
+
+    # NOTE(NOTE-026): 帶參與介質的場景必須用 volumetric 積分器。
+    # `path` **靜默忽略** interior medium —— 算得出圖、亮度也正常，
+    # 但四類的散射差異完全不見。這與 transient 側修掉的
+    # `transient_path` 是同一個問題，RGB 側先前沒有一併修：實測 Vision
+    # baseline 只分得出「空氣內部 vs 水內部」兩組，因為 (Empty, Misty) 與
+    # (Water-filled, Bubbly) 各自共用 interior IOR，而唯一能區分它們的
+    # 介質根本沒有進入光傳輸。依場景內容自動選擇，與 transient 側一致。
+    has_medium = any(
+        isinstance(node, dict) and "interior" in node
+        for node in scene.values()
+        if isinstance(node, dict)
+    )
+    scene["integrator"] = {
+        "type": "volpath" if has_medium else "path",
+        "max_depth": _MAX_DEPTH,
+    }
     return scene
 
 

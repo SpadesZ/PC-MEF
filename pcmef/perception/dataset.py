@@ -51,6 +51,7 @@ __all__ = [
     "PerceptionDatasetError",
     "physical_scene_family",
     "split_plan",
+    "family_split_plan",
     "build_dataset",
     "fit_preprocessing",
     "apply_rgb_preprocessing",
@@ -69,6 +70,26 @@ DEFAULT_RATIO = {"train": 0.60, "val": 0.20, "test": 0.20}
 #: 正規化尺度的退化下限，相對於該通道自己的量級。1e-8 的用意是「浮點意義下
 #: 沒有變化」，不是一個可以擋下真實訊號的軟門檻。
 _DEGENERATE_RELATIVE_FLOOR = 1.0e-8
+
+#: 構成「同一個物理場景」的欄位。**白名單而不是黑名單**：漏掉一個物理量
+#: 會讓兩個不同的場景被當成同一族，而黑名單在新增欄位時會安靜地失效。
+#:
+#: seed / spp / resolution / temporal_bins / max_depth 一律**不在**其中 ——
+#: 它們是數值積分與離散化設定，不是場景的物理狀態。RGB 提高 spp 之後
+#: 物理場景身分因此完全不變，這正是 family 的定義要能承受的事。
+_PHYSICAL_KEYS: tuple[str, ...] = (
+    "class_label",
+    "medium_preset",
+    "geometry",
+    "lighting",
+    "medium_parameters",
+    "scene_constants_applied",
+)
+
+#: family 資料集的預設形狀（4 classes x 20 families x 5 realizations = 400）。
+DEFAULT_FAMILIES_PER_CLASS = 20
+DEFAULT_REALIZATIONS_PER_FAMILY = 5
+DEFAULT_FAMILY_SPLIT = {"train": 12, "val": 4, "test": 4}
 
 
 class PerceptionDatasetError(RuntimeError):
@@ -89,12 +110,12 @@ def physical_scene_family(scene_parameters: dict[str, Any]) -> str:
     seed 的 scenario 是**同一個物理場景的兩次 Monte-Carlo 實現**。
     要回答「train 與 test 是不是同一個場景」，必須把 seed 拿掉再比。
     """
-    physical = {
-        key: value
-        for key, value in scene_parameters.items()
-        if key not in {"seed", "outputs"}
-    }
-    return hash_object(physical)
+    missing = [k for k in _PHYSICAL_KEYS if k not in scene_parameters]
+    if missing:
+        raise PerceptionDatasetError(
+            "SCENE_KEYS", f"scene_parameters is missing physical key(s) {missing}"
+        )
+    return hash_object({k: scene_parameters[k] for k in _PHYSICAL_KEYS})
 
 
 def split_plan(
@@ -126,74 +147,150 @@ def split_plan(
     return plan
 
 
+def family_split_plan(
+    n_families: int = DEFAULT_FAMILIES_PER_CLASS,
+    counts: dict[str, int] | None = None,
+) -> dict[str, list[int]]:
+    """把 **physical family** 的索引切成三段，不是把 sample 切成三段。
+
+    同一個 family 的全部 realization 因此必然落在同一側 —— 那是本階段
+    要修的東西：v1 以 sample 切分，而每類只有一個 family，於是 test 與
+    train 是同一個場景的不同 Monte-Carlo 實現。
+    """
+    counts = dict(counts or DEFAULT_FAMILY_SPLIT)
+    total = sum(counts.values())
+    if total != n_families:
+        raise PerceptionDatasetError(
+            "INVALID_FAMILY_SPLIT",
+            f"family split {counts} sums to {total}, not n_families={n_families}",
+        )
+    indices = list(range(n_families))
+    plan, cursor = {}, 0
+    for name in SPLIT_NAMES:
+        plan[name] = indices[cursor : cursor + counts[name]]
+        cursor += counts[name]
+    empty = [name for name, ids in plan.items() if not ids]
+    if empty:
+        raise PerceptionDatasetError(
+            "EMPTY_SPLIT", f"split(s) {empty} would hold no family"
+        )
+    return plan
+
+
 # ---------------------------------------------------------------------------
 # 生成
 # ---------------------------------------------------------------------------
 
 
 def build_dataset(
-    per_class: int = DEFAULT_PER_CLASS,
+    families_per_class: int = DEFAULT_FAMILIES_PER_CLASS,
+    realizations_per_family: int = DEFAULT_REALIZATIONS_PER_FAMILY,
+    rgb_spp: int | None = None,
     out_root: str | Path = "outputs/perception",
     run_name: str | None = None,
-    ratio: dict[str, float] | None = None,
+    family_split: dict[str, int] | None = None,
     freeze_dir: str | Path = "freeze",
     repo_root: str | Path = ".",
     code_version: str = "",
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """產生成對資料集並寫出 manifest。每個 sample 都經同一條成對路徑。"""
+    """產生 family 結構的成對資料集。
+
+    每個 class 有 `families_per_class` 個**物理場景**，每個場景有
+    `realizations_per_family` 次獨立的 Monte-Carlo 實現。切分以 family 為
+    單位，因此同一個場景的全部實現必然同側。
+    """
     from pcmef.simulation.paired import (
+        NUISANCE_PROVENANCE,
+        NUISANCE_RANGES,
+        family_scenario_seed,
+        family_variation,
         generate_paired_sample,
         load_calibrated_simulator,
-        scenario_seed,
     )
 
     say = progress or (lambda _m: None)
     identity, calibration = load_calibrated_simulator(freeze_dir, repo_root)
     say(f"simulator identity {identity.identity_hash()[:16]}")
+    say(
+        f"  tof spp {identity.simulation_settings['spp']} (E1 frozen)   "
+        f"rgb spp {rgb_spp if rgb_spp is not None else identity.simulation_settings['spp']}"
+    )
 
     stamp = run_name or datetime.now(timezone.utc).strftime("ds_%Y%m%dT%H%M%SZ")
     run_dir = Path(out_root) / stamp
     run_dir.mkdir(parents=True, exist_ok=True)
-    plan = split_plan(per_class, ratio)
+    plan = family_split_plan(families_per_class, family_split)
 
     samples: list[dict[str, Any]] = []
     for class_label in CLASS_ORDER:
-        for split, indices in plan.items():
-            for index in indices:
-                seed = scenario_seed(class_label, index)
-                scenario_id = (
-                    f"{class_label.lower().replace('-', '_')}_{index:04d}"
+        for split, family_indices in plan.items():
+            for family_index in family_indices:
+                variation = family_variation(
+                    class_label, family_index, families_per_class
                 )
-                sample = generate_paired_sample(
-                    identity, calibration, scenario_id, class_label, seed,
-                    run_dir / split,
-                )
-                row = sample.to_dict()
-                row["split"] = split
-                row["scenario_index"] = index
-                row["physical_scene_family"] = physical_scene_family(
-                    sample.scene_parameters
-                )
-                samples.append(row)
-        say(f"  {class_label}: {per_class} scenarios")
+                for realization in range(realizations_per_family):
+                    seed = family_scenario_seed(class_label, family_index, realization)
+                    scenario_id = (
+                        f"{class_label.lower().replace('-', '_')}"
+                        f"_f{family_index:02d}_r{realization:02d}"
+                    )
+                    sample = generate_paired_sample(
+                        identity, calibration, scenario_id, class_label, seed,
+                        run_dir / split, rgb_spp=rgb_spp, variation=variation,
+                    )
+                    row = sample.to_dict()
+                    row["split"] = split
+                    row["family_index"] = family_index
+                    row["realization_index"] = realization
+                    row["physical_scene_family"] = physical_scene_family(
+                        sample.scene_parameters
+                    )
+                    samples.append(row)
+        say(
+            f"  {class_label}: {families_per_class} families x "
+            f"{realizations_per_family} realizations"
+        )
 
     manifest = {
         "manifest_id": "perception_dataset",
         "scientific_result": False,
         "purpose": (
-            "Synthetic paired RGB-ToF dataset for the perception baselines. Every "
-            "sample comes from the E1-retained calibrated simulator through the same "
-            "paired path; RGB and ToF of one sample share a scenario and a seed."
+            "Synthetic paired RGB-ToF dataset with a real physical-family "
+            "structure. Splits are taken at the family level, so no physical scene "
+            "appears in more than one split."
         ),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "code_version": code_version,
         "run_dir": run_dir.as_posix(),
-        "per_class": per_class,
-        "split_ratio": dict(ratio or DEFAULT_RATIO),
-        "split_plan_indices": plan,
+        "families_per_class": families_per_class,
+        "realizations_per_family": realizations_per_family,
+        "family_split_counts": dict(family_split or DEFAULT_FAMILY_SPLIT),
+        "family_split_indices": plan,
         "class_order": list(CLASS_ORDER),
         "feature_order": list(TOF_SCHEMA),
+        "render": {
+            "tof_spp": int(identity.simulation_settings["spp"]),
+            "tof_spp_source": "E1 frozen initial_simulation.lock (not changed)",
+            "rgb_spp": int(
+                rgb_spp if rgb_spp is not None else identity.simulation_settings["spp"]
+            ),
+            "rgb_spp_source": (
+                "chosen by a render-convergence pilot; spp is numerical integration "
+                "precision, not scene physics, so it is decoupled from the ToF spp "
+                "and does not change the physical scene identity"
+            ),
+            "resolution": list(identity.simulation_settings["resolution"]),
+        },
+        "physical_variation": {
+            "axes": dict(NUISANCE_RANGES),
+            "provenance": dict(NUISANCE_PROVENANCE),
+            "rule": (
+                "deterministic stratified grid over the two preregistered nuisance "
+                "axes; one point per family, identical across the realizations of "
+                "that family"
+            ),
+        },
         "counts": {
             split: {
                 c: sum(

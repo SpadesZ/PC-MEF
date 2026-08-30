@@ -248,3 +248,124 @@ def test_generate_paired_sample_emits_one_scenario_two_modalities(simulator, tmp
     )
     assert repeat.tof_array_hash == sample.tof_array_hash
     assert repeat.rgb_exr_sha256 == sample.rgb_exr_sha256
+
+
+# ---------------------------------------------------------------------------
+# P0-1：RGB 必須用支援參與介質的積分器
+# ---------------------------------------------------------------------------
+
+
+def test_rgb_integrator_is_volumetric_exactly_when_a_medium_is_present(simulator):
+    """`path` 靜默忽略 interior medium，於是 (Empty, Misty) 與
+    (Water-filled, Bubbly) 在 RGB 上長得一樣 —— 因為唯一能區分它們的介質
+    根本沒有進入光傳輸。積分器必須依場景內容選，與 transient 側一致。
+    """
+    pytest.importorskip("mitsuba")
+    import mitsuba as mi
+
+    from pcmef.experiments.calibration_objective import scene_overrides
+    from pcmef.simulation.mitsuba_adapter import build_scene_dict, require_mitsuba
+    from pcmef.simulation.paired import _scenario_config
+
+    require_mitsuba()
+    identity, _calibration = simulator
+    expected = {
+        "Empty": "path",            # 無介質
+        "Water-filled": "volpath",
+        "Bubbly": "volpath",
+        "Misty": "volpath",
+    }
+    for class_label, integrator in expected.items():
+        config = _scenario_config(identity, class_label, scenario_seed(class_label, 0))
+        with scene_overrides(identity.scene_constants):
+            scene = build_scene_dict(mi, config)
+        has_medium = any(
+            isinstance(node, dict) and "interior" in node
+            for node in scene.values()
+            if isinstance(node, dict)
+        )
+        assert scene["integrator"]["type"] == integrator, (
+            f"{class_label}: integrator {scene['integrator']['type']} with "
+            f"has_medium={has_medium}"
+        )
+        assert has_medium == (integrator == "volpath")
+
+
+# ---------------------------------------------------------------------------
+# P1：RGB spp 與 ToF spp 解耦
+# ---------------------------------------------------------------------------
+
+
+def test_rgb_spp_does_not_change_the_physical_scene(simulator):
+    """spp 是數值積分精度，不是場景物理狀態。"""
+    from pcmef.perception.dataset import physical_scene_family
+    from pcmef.simulation.paired import _scenario_config
+
+    identity, _calibration = simulator
+    config = _scenario_config(identity, "Empty", scenario_seed("Empty", 0))
+    base = {
+        **config.to_dict(),
+        "scene_constants_applied": dict(identity.scene_constants),
+    }
+    high_rgb = {**base, "rgb_render_spp": 4096}
+    assert physical_scene_family(base) == physical_scene_family(high_rgb)
+
+
+def test_tof_spp_stays_at_the_e1_frozen_value(simulator):
+    """ToF 的 spp 不得被 RGB 的選擇帶著走。"""
+    from pcmef.simulation.paired import _scenario_config
+
+    identity, _calibration = simulator
+    config = _scenario_config(identity, "Empty", scenario_seed("Empty", 0))
+    assert config.spp == int(identity.simulation_settings["spp"]) == 16
+
+
+# ---------------------------------------------------------------------------
+# physical family 變異
+# ---------------------------------------------------------------------------
+
+
+def test_family_variation_is_deterministic_and_inside_preregistered_ranges():
+    from pcmef.simulation.paired import NUISANCE_RANGES, family_variation
+
+    lo_off, hi_off = NUISANCE_RANGES["geometry.lateral_offset_mm"]
+    lo_irr, hi_irr = NUISANCE_RANGES["lighting.irradiance"]
+    for class_label in CLASS_ORDER:
+        for index in range(20):
+            first = family_variation(class_label, index, 20)
+            assert first == family_variation(class_label, index, 20)
+            assert lo_off <= first.lateral_offset_mm <= hi_off
+            assert lo_irr <= first.irradiance <= hi_irr
+
+
+def test_families_within_a_class_are_distinct_scenes():
+    from pcmef.simulation.paired import family_variation
+
+    for class_label in CLASS_ORDER:
+        points = {
+            (round(v.lateral_offset_mm, 9), round(v.irradiance, 9))
+            for v in (family_variation(class_label, i, 20) for i in range(20))
+        }
+        assert len(points) == 20, f"{class_label} families collapse onto {len(points)} scenes"
+
+
+def test_family_seeds_are_unique_and_disjoint_from_earlier_ranges():
+    from pcmef.experiments.calibration_objective import CRN_SEEDS, VERIFICATION_SEEDS
+    from pcmef.experiments.e1_final import scenario_seed_matrix
+    from pcmef.simulation.paired import family_scenario_seed
+
+    seeds = [
+        family_scenario_seed(c, f, r)
+        for c in CLASS_ORDER for f in range(20) for r in range(5)
+    ]
+    assert len(set(seeds)) == len(seeds) == 400
+
+    e1 = scenario_seed_matrix()
+    earlier = (
+        set(CRN_SEEDS.values())
+        | set(VERIFICATION_SEEDS.values())
+        | set(e1["optical_transport_seeds"].values())
+        | set(e1["acquisition_seed_matrix"].values())
+        | {scenario_seed(c, i) for c in CLASS_ORDER for i in range(100)}
+    )
+    assert not set(seeds) & earlier

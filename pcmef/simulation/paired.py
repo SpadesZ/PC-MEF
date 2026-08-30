@@ -80,6 +80,79 @@ _PROVENANCE = {
 #: 因此其值等於凍結初值 —— 仍然明確套用，讓 artifact 記得住它是誰。
 _SCENE_DIMENSIONS = ("sensor.fov_deg",)
 
+#: 物理變異只用**已有預註冊依據**的 nuisance 變數，不自行發明範圍。
+#:
+#:   lateral_offset_mm  estimator_preregistration S4 明列「橫向偏移 ±5 mm
+#:                      （純幾何擾動）」，並附物理推導的容忍度；
+#:                      parameter_registry 亦記其為「偏移量測試的自變數」，
+#:                      provenance_status = CONFIRMED。
+#:   irradiance         estimator_preregistration S3 明列 1.0 -> 4.0 的
+#:                      不變性探針（純全域增益，CG-2）。
+#:
+#: 兩者都**不改變 class 身分**：瓶子擺得偏一點、室內亮一點，內容物不變。
+#: 沒有合法範圍的量（例如 sensor_to_bottle_mm）一律不動。
+NUISANCE_RANGES: dict[str, tuple[float, float]] = {
+    "geometry.lateral_offset_mm": (-5.0, 5.0),
+    "lighting.irradiance": (1.0, 4.0),
+}
+
+NUISANCE_PROVENANCE: dict[str, str] = {
+    "geometry.lateral_offset_mm": (
+        "estimator_preregistration S4: lateral offset +/-5 mm, a pure geometric "
+        "perturbation with a physics-derived tolerance"
+    ),
+    "lighting.irradiance": (
+        "estimator_preregistration S3: irradiance 1.0 -> 4.0 invariance probe "
+        "(pure global gain, CG-2)"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PhysicalVariation:
+    """一個 physical family 的 nuisance 取值。**不含 seed。**
+
+    同一個 PhysicalVariation 配上不同的 seed，就是同一個物理場景的多次
+    Monte-Carlo 實現；那正是 family split 要擋在同一側的東西。
+    """
+
+    lateral_offset_mm: float
+    irradiance: float
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "geometry.lateral_offset_mm": float(self.lateral_offset_mm),
+            "lighting.irradiance": float(self.irradiance),
+        }
+
+
+def family_variation(class_label: str, family_index: int, n_families: int) -> PhysicalVariation:
+    """第 k 個 physical family 的 nuisance 取值。
+
+    以**決定性**的分層網格取值而不是亂數抽樣：family 的身分因此只由
+    (class, family_index, n_families) 決定，重建資料集會得到同一組場景。
+    每個 class 用不同的相位偏移，避免四類的 family 在 nuisance 空間上重疊
+    成同一組點 —— 那會讓「不同 class 的同號 family」意外變成同一個場景。
+    """
+    lo_off, hi_off = NUISANCE_RANGES["geometry.lateral_offset_mm"]
+    lo_irr, hi_irr = NUISANCE_RANGES["lighting.irradiance"]
+    phase = CLASS_ORDER.index(class_label) / max(len(CLASS_ORDER), 1)
+
+    # 兩個軸用不同步長掃過網格，讓 20 個 family 覆蓋整個矩形而不是一條線。
+    #
+    # 分母是 n_families 而不是 n_families - 1：加了 class 相位之後
+    # `(family_index + phase)` 的最大值是 n_families - 1 + phase，除以
+    # n_families - 1 會得到 > 1，於是取值**跑出預註冊範圍**（實測 irradiance
+    # 到 4.039，而 S3 的上界是 4.0）。除以 n_families 讓 u, v 落在 [0, 1)，
+    # 取值因此嚴格落在宣告區間內。超出預註冊範圍的場景就是沒有依據的場景。
+    u = ((family_index + phase) % n_families) / n_families
+    v = (((family_index * 7) + phase) % n_families) / n_families
+    return PhysicalVariation(
+        lateral_offset_mm=lo_off + u * (hi_off - lo_off),
+        irradiance=lo_irr + v * (hi_irr - lo_irr),
+    )
+
+
 _MEDIUM_KEY_BY_CLASS: dict[str, str | None] = {
     "Empty": None,
     "Water-filled": "turbidity",
@@ -303,8 +376,17 @@ class PairedSample:
         }
 
 
-def _scenario_config(identity: SimulatorIdentity, class_label: str, seed: int):
-    """一個 scenario 的完整設定。RGB 與 ToF **共用這一份**。"""
+def _scenario_config(
+    identity: SimulatorIdentity,
+    class_label: str,
+    seed: int,
+    variation: PhysicalVariation | None = None,
+):
+    """一個 scenario 的完整設定。RGB 與 ToF **共用這一份**。
+
+    `variation` 為 None 時使用凍結初值，也就是 E1 評估過的那個場景；
+    給定時只覆寫兩個有預註冊依據的 nuisance 量，其餘一律不動。
+    """
     from pcmef.simulation.scenario import Geometry, Lighting, ScenarioConfig
 
     values = identity.parameter_values
@@ -312,6 +394,11 @@ def _scenario_config(identity: SimulatorIdentity, class_label: str, seed: int):
     # 介質密度是 SCENE_PARTICIPATING_MEDIA 的 NO_FREE_PARAMETERS 結局，
     # 也就是凍結初值 —— 不是 placeholder，因此以純量寫入。
     medium = {} if key is None else {key: float(values[f"medium.{key}"])}
+    lateral = float(values["geometry.lateral_offset_mm"])
+    irradiance = float(values["lighting.irradiance"])
+    if variation is not None:
+        lateral = float(variation.lateral_offset_mm)
+        irradiance = float(variation.irradiance)
     return ScenarioConfig(
         class_label=class_label,
         seed=int(seed),
@@ -319,11 +406,9 @@ def _scenario_config(identity: SimulatorIdentity, class_label: str, seed: int):
             sensor_to_bottle_mm=float(values["geometry.sensor_to_bottle_mm"]),
             bottle_diameter_mm=float(values["geometry.bottle_diameter_mm"]),
             wall_thickness_mm=float(values["geometry.wall_thickness_mm"]),
-            lateral_offset_mm=float(values["geometry.lateral_offset_mm"]),
+            lateral_offset_mm=lateral,
         ),
-        lighting=Lighting(
-            preset="nominal", irradiance=float(values["lighting.irradiance"])
-        ),
+        lighting=Lighting(preset="nominal", irradiance=irradiance),
         medium_parameters=medium,
         render_rgb=True,
         render_transient=True,
@@ -339,6 +424,8 @@ def generate_paired_sample(
     class_label: str,
     seed: int,
     out_root: str | Path,
+    rgb_spp: int | None = None,
+    variation: PhysicalVariation | None = None,
 ) -> PairedSample:
     """由**一個** ScenarioConfig 同時產出 RGB 與 500x4 ToF。
 
@@ -366,7 +453,11 @@ def generate_paired_sample(
     from pcmef.surrogate.temporal_model import TemporalModel
 
     settings = identity.simulation_settings
-    config = _scenario_config(identity, class_label, seed)
+    config = _scenario_config(identity, class_label, seed, variation)
+    # spp 是**數值積分精度**，不是場景的物理狀態，因此 RGB 與 ToF 沒有理由
+    # 綁在同一個值。ToF 一律用 E1 凍結的 spp（改它就不是被 E1 評估過的那個
+    # 模擬器）；RGB 可以獨立提高，物理場景 scenario_hash 完全不變。
+    effective_rgb_spp = int(rgb_spp if rgb_spp is not None else config.spp)
     sample_dir = Path(out_root) / scenario_id
     sample_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +469,7 @@ def generate_paired_sample(
     with scene_overrides(identity.scene_constants):
         # -- RGB：同一個場景，BOTH 照明 --------------------------------------
         rgb_scene = mi.load_dict(build_scene_dict(mi, config))
-        image = mi.render(rgb_scene, spp=int(config.spp), seed=int(config.seed))
+        image = mi.render(rgb_scene, spp=effective_rgb_spp, seed=int(config.seed))
         exr_path = sample_dir / "rgb.exr"
         png_path = sample_dir / "rgb.png"
         mi.Bitmap(image).write(str(exr_path))
@@ -428,6 +519,11 @@ def generate_paired_sample(
         "temporal_bins": temporal_bins,
         "max_depth": max_depth,
         "medium_values_are_frozen_initial": True,
+        # `spp` 欄位是 ToF 的（凍結值）；RGB 的另記，兩者刻意分開。
+        "tof_render_spp": int(config.spp),
+        "rgb_render_spp": effective_rgb_spp,
+        "physical_variation": (variation.to_dict() if variation else None),
+        "nuisance_provenance": (dict(NUISANCE_PROVENANCE) if variation else None),
     }
 
     return PairedSample(
@@ -461,6 +557,34 @@ def generate_paired_sample(
 # ---------------------------------------------------------------------------
 # smoke set
 # ---------------------------------------------------------------------------
+
+
+#: family 資料集的種子基底。與 v1 診斷資料集（50000-50399）、
+#: E1 評估（30000/40000 起）、校準（1001-2042）與 spp pilot（70000 起）
+#: 全部不相交。
+FAMILY_SEED_BASE = 60000
+
+
+def family_scenario_seed(class_label: str, family_index: int, realization: int) -> int:
+    """(class, family, realization) -> 唯一種子。
+
+    family 進位 10、class 進位 1000，因此 20 個 family x 5 個 realization
+    在每個 class 的區段內不會相撞，而四個 class 的區段也不重疊。
+    """
+    if not 0 <= realization < 10:
+        raise PairedGenerationError(
+            "SEED_RANGE", f"realization {realization} does not fit the seed layout"
+        )
+    if not 0 <= family_index < 100:
+        raise PairedGenerationError(
+            "SEED_RANGE", f"family_index {family_index} does not fit the seed layout"
+        )
+    return (
+        FAMILY_SEED_BASE
+        + 1000 * CLASS_ORDER.index(class_label)
+        + 10 * family_index
+        + realization
+    )
 
 
 def scenario_seed(class_label: str, index: int) -> int:

@@ -54,13 +54,79 @@ def test_split_plan_rejects_an_empty_split():
     assert excinfo.value.reason == "EMPTY_SPLIT"
 
 
-def test_physical_scene_family_ignores_seed_but_not_physics():
-    base = {"class_label": "Empty", "seed": 1, "spp": 16, "resolution": [64, 64],
-            "outputs": {"rgb": True}}
-    same_scene = {**base, "seed": 999}
-    other_scene = {**base, "spp": 32}
-    assert physical_scene_family(base) == physical_scene_family(same_scene)
-    assert physical_scene_family(base) != physical_scene_family(other_scene)
+def _scene(**overrides):
+    base = {
+        "class_label": "Empty",
+        "medium_preset": "empty",
+        "geometry": {"sensor_to_bottle_mm": 50.0, "lateral_offset_mm": 0.0},
+        "lighting": {"preset": "nominal", "irradiance": 1.0},
+        "medium_parameters": {},
+        "scene_constants_applied": {"sensor.fov_deg": 45.0},
+        "seed": 1,
+        "spp": 16,
+        "rgb_render_spp": 16,
+        "resolution": [64, 64],
+        "outputs": {"rgb": True},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_physical_scene_family_ignores_numerical_settings():
+    """seed 與 spp 都是數值設定，不是場景的物理狀態。
+
+    這一條直接支撐 RGB spp 解耦：把 RGB 的取樣數調高之後，物理場景身分
+    必須完全不變，否則 family split 會把同一個場景切成兩族。
+    """
+    base = _scene()
+    for key, value in (("seed", 999), ("spp", 32), ("rgb_render_spp", 4096),
+                       ("resolution", [128, 128])):
+        assert physical_scene_family(_scene(**{key: value})) == physical_scene_family(base), (
+            f"{key} must not change the physical family"
+        )
+
+
+def test_physical_scene_family_changes_with_real_physics():
+    base = physical_scene_family(_scene())
+    moved = physical_scene_family(
+        _scene(geometry={"sensor_to_bottle_mm": 50.0, "lateral_offset_mm": 3.0})
+    )
+    brighter = physical_scene_family(
+        _scene(lighting={"preset": "nominal", "irradiance": 4.0})
+    )
+    other_fov = physical_scene_family(
+        _scene(scene_constants_applied={"sensor.fov_deg": 40.0})
+    )
+    assert len({base, moved, brighter, other_fov}) == 4
+
+
+def test_physical_scene_family_rejects_missing_physical_keys():
+    """白名單缺項時必須拒絕，而不是安靜地少算一個物理量。"""
+    incomplete = _scene()
+    del incomplete["lighting"]
+    with pytest.raises(PerceptionDatasetError) as excinfo:
+        physical_scene_family(incomplete)
+    assert excinfo.value.reason == "SCENE_KEYS"
+
+
+def test_family_split_plan_keeps_families_whole():
+    from pcmef.perception.dataset import family_split_plan
+
+    plan = family_split_plan(20, {"train": 12, "val": 4, "test": 4})
+    assert [len(v) for v in plan.values()] == [12, 4, 4]
+    seen = set()
+    for indices in plan.values():
+        assert not set(indices) & seen
+        seen |= set(indices)
+    assert seen == set(range(20))
+
+
+def test_family_split_plan_rejects_a_mismatched_total():
+    from pcmef.perception.dataset import family_split_plan
+
+    with pytest.raises(PerceptionDatasetError) as excinfo:
+        family_split_plan(20, {"train": 10, "val": 4, "test": 4})
+    assert excinfo.value.reason == "INVALID_FAMILY_SPLIT"
 
 
 def _manifest(tmp_path, families_per_class: int = 1):

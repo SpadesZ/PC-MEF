@@ -181,7 +181,7 @@ sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment
 | M1 Simulation | **smoke 通過** | mitsuba 3.8.0 / drjit 1.3.1 / mitransient 1.3.0 已安裝 |
 | M2 Surrogate + E1 | **`E1 CLOSED — partial calibration success`** | 五階段跑完、E1 開啟一次並得 PASS。**只有 Ambient Rate 真的改善**，其餘三個 feature 維持 initial physics-constrained state。見「E1 已完成」專節 |
 | M3 Post-E1 Split | **`paired bridge smoke PASS / ready for perception`** | 成對 RGB-ToF 生成路徑已驗收（6/6 check PASS，identity `a00b3969…`）。synthetic split policy lock 本身仍未凍 |
-| M4 Perception | **baseline 完成，Vision 失效已具名** | ToF 1D-CNN test 0.975 / 融合 0.988；**Vision 0.425 且 train 只有 0.542** —— RGB 積分器丟掉參與介質，見「M4 Perception baseline」專節 |
+| M4 Perception | **corrective pass 進行中** | ds_v1 為 diagnostic（RGB 積分器缺陷 + 單一 family）；已修 RGB volumetric transport、RGB/ToF spp 解耦、20 families/class 的 family-level split，重跑中 |
 | M5 Reliability/Gate | 未開始 | 依賴 M4 |
 | M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
@@ -1091,7 +1091,95 @@ Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
 
 ---
 
-## M4 Perception baseline —— ToF 可學、Vision 失效（2026-08-31）
+## M4 corrective pass —— 三項資料生成修正（2026-08-31）
+
+ds_v1 的檢查揭露兩個**資料生成**問題（不是模型架構問題）。在進入
+PC-MEF formal gate 之前修掉，因此失真的 perception 表現沒有被帶進正式實驗。
+
+### P0-1 RGB participating-media transport（已修）
+
+`build_scene_dict()` 用 `{"type": "path"}`，而 Mitsuba 3 的 `path`
+**不做**參與介質輸運。改為依場景內容選擇，與 transient 側的 NOTE-026
+處置一致：
+
+```python
+has_medium = any("interior" in node for node in scene.values() if isinstance(node, dict))
+scene["integrator"] = {"type": "volpath" if has_medium else "path", ...}
+```
+
+Empty 沒有介質故仍為 `path`，其餘三類為 `volpath`。
+**不影響 E1**：E1 驗證的是 ToF simulator，RGB 積分器型別不在
+`calibrated_simulation.lock` 或任何凍結參數集內。ToF calibration、ToF spp
+與全部 E1 lock 一個位元都沒動。
+
+### P1 RGB spp 與 ToF spp 解耦（已修）
+
+`spp` 是數值積分精度，不是場景的物理狀態，因此沒有理由讓 RGB 相機被綁在
+E1 的 ToF `spp=16`。現在 `physical_scene_family` 明確**不含** seed / spp /
+resolution，因此提高 RGB spp 後物理場景身分完全不變。
+
+**RGB spp 由 render-convergence pilot 選定，不用 classifier accuracy。**
+在 8192-spp 參考影像上量相對 RMSE（線性空間）：
+
+| spp | rel_RMSE | 類內 spread | 最小類間 separation | sep/spread |
+|---|---|---|---|---|
+| 16 | 31.84 | 0.366 | 0.189 | 0.517 |
+| 64 | 11.89 | 0.507 | 0.276 | 0.545 |
+| 256 | 6.61 | 0.651 | 0.451 | 0.693 |
+| 512 | 4.53 | 0.660 | 0.471 | 0.714 |
+| 1024 | 3.14 | 0.668 | 0.496 | 0.743 |
+| 2048 | 2.33 | 0.659 | 0.575 | 0.872 |
+| **4096** | **1.66** | 0.607 | 0.599 | **0.987** |
+
+**選定 rgb_spp = 4096。** 兩件事必須誠實記下：
+
+1. **不存在 plateau。** rel_RMSE 嚴格依 1/√N 下降（每 4 倍 spp 約降一半），
+   因此事前宣告的「plateau 規則」退化成「取網格最大值」。該規則的前提
+   在這個場景上不成立。
+2. **即使 4096 spp 仍未收斂**：rel_RMSE = 1.66 代表 RMS 誤差仍是平均像素值的
+   166%。這個場景本質高變異 —— 粗糙介電質瓶身加箔片反射器會產生
+   caustic/specular 的重尾傳輸。
+
+選 4096 的實質理由是第二個獨立判準：類內 render spread 首次不再大於
+最小類間 separation（sep/spread 0.987 ≈ 1.0，2048 時為 0.872）。
+兩個判準都指向 4096，因此不是事後挑的。成本 12.1 s/render，400 樣本約 81 分鐘。
+
+**64×64 未動** —— 目前沒有任何證據指向 resolution。
+
+### P0-2 真正的 physical family 結構（已修）
+
+ds_v1 是「4 個場景 × 很多 MC 實現」。ds_v2 改為：
+
+```
+4 classes x 20 physical families x 5 realizations = 400 samples
+family split：train 12 / val 4 / test 4（每類），同一 family 的 5 個實現絕不跨 split
+```
+
+物理變異只用**已有預註冊依據**的 nuisance 變數，不自行發明範圍：
+
+| 變數 | 範圍 | 依據 |
+|---|---|---|
+| `geometry.lateral_offset_mm` | ±5 mm | estimator_preregistration **S4**「橫向偏移 ±5 mm（純幾何擾動）」，附物理推導容忍度；parameter_registry 記其為「偏移量測試的自變數」，provenance CONFIRMED |
+| `lighting.irradiance` | 1.0 – 4.0 | estimator_preregistration **S3** 的不變性探針（純全域增益，CG-2） |
+
+兩者都不改變 class 身分。`sensor_to_bottle_mm` 等沒有合法範圍的量一律不動。
+取值為決定性分層網格，因此 family 身分只由 (class, family_index) 決定。
+
+> 建構期間自己的測試抓到一個真實缺陷：加入 class 相位後除以
+> `n_families - 1` 會讓 irradiance 取到 **4.039**，超出 S3 宣告的上界 4.0。
+> 已改為除以 `n_families`，取值嚴格落在宣告區間內。超出預註冊範圍的場景
+> 就是沒有依據的場景，因此那一批已生成的資料整批作廢重跑。
+
+---
+
+## M4 Perception **diagnostic / pipeline smoke** —— ds_v1（2026-08-31）
+
+> **這一節的數字是 diagnostic，不是 baseline。**
+> 它們在兩個已知的資料生成缺陷下產生（RGB 積分器丟掉參與介質、
+> 每類只有一個 physical family），因此**不得**被引用為 perception 的
+> 最終表現，也不得帶進 PC-MEF gate。保留不刪除：它們是那兩個缺陷
+> 被發現的證據。修正後的結果見「M4 corrective pass」。
+
 
 ```
 outputs/perception/ds_v1/{dataset_manifest,preprocessing,perception_report}.json
