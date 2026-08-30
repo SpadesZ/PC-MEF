@@ -163,32 +163,54 @@ MEDIUM_KEY_BY_CLASS: dict[str, str | None] = {
 #: 兩個數字都記錄，是因為它們可能不一致 —— 而那個不一致本身就是 stage 0
 #: 應該回報的東西：一個參數可能靠某個「它所屬階段從不最佳化」的 observable
 #: 取得入場券，然後在該階段的目標函數裡幾乎不可見。
+#: CAL-PREREG-003 的 stage ID。順序即執行順序：physical scene / media 先，
+#: final measurement mappings 後（AMD-004）。**不得與 CAL-PREREG-002 的舊名
+#: 混用** —— 舊名為 AMBIENT / SIGNAL_SCALE / GEOMETRY_SURFACE_FOIL /
+#: PARTICIPATING_MEDIA / SENSOR_SURROGATE，它們在本 repo 內已全數退役。
 DECLARED_CHANNELS: dict[str, dict[str, tuple[str, ...]]] = {
-    "AMBIENT": {
-        "classes": CLASS_ORDER,
-        "features": ("ambient_rate_mcps",),
-    },
-    "SIGNAL_SCALE": {
-        "classes": CLASS_ORDER,
-        "features": ("signal_rate_mcps",),
-    },
-    "GEOMETRY_SURFACE_FOIL": {
+    "SCENE_GEOMETRY_SURFACE_FOIL": {
         "classes": ("Empty",),
         "features": ("distance_mm", "signal_rate_mcps", "sigma_like"),
     },
-    "PARTICIPATING_MEDIA": {
+    "SCENE_PARTICIPATING_MEDIA": {
         "classes": ("Water-filled", "Bubbly", "Misty"),
         "features": ("distance_mm", "signal_rate_mcps", "sigma_like"),
     },
-    "SENSOR_SURROGATE": {
+    "MAPPING_AMBIENT": {
+        "classes": CLASS_ORDER,
+        "features": ("ambient_rate_mcps",),
+    },
+    "MAPPING_SIGNAL": {
+        "classes": CLASS_ORDER,
+        "features": ("signal_rate_mcps",),
+    },
+    "MAPPING_SIGMA": {
         "classes": CLASS_ORDER,
         "features": ("sigma_like",),
     },
 }
 
+#: CAL-PREREG-002 的舊 stage ID。留著只為了讓「混用」在測試裡抓得到，
+#: **不得**用它們查 DECLARED_CHANNELS。
+RETIRED_STAGE_IDS: frozenset[str] = frozenset(
+    {
+        "AMBIENT",
+        "SIGNAL_SCALE",
+        "GEOMETRY_SURFACE_FOIL",
+        "PARTICIPATING_MEDIA",
+        "SENSOR_SURROGATE",
+    }
+)
+
 
 def declared_observables(stage_id: str | None) -> list[str]:
     """該階段宣告要最佳化的 observable 名稱。未知階段回傳空清單。"""
+    if stage_id in RETIRED_STAGE_IDS:
+        raise Stage0Error(
+            f"stage id {stage_id!r} is a retired CAL-PREREG-002 name. The protocol "
+            "and this runner must not mix old and new stage ids; use the "
+            f"CAL-PREREG-003 names {sorted(DECLARED_CHANNELS)}."
+        )
     spec = DECLARED_CHANNELS.get(stage_id or "")
     if spec is None:
         return []
@@ -275,10 +297,29 @@ def leverage_of(
     return None, "DETERMINISTIC_RESPONSE"
 
 
+#: 具名的 borderline 次級裁決規則。**只有列在這裡的參數**可以在落入
+#: BORDERLINE band 之後還有機會進入搜尋空間；其餘一律保守 gauge-fix。
+#:
+#: 這張表是**事前**寫定的：AMD-004 的 generic conservative rule 明令
+#: 「不得為個別 borderline parameter 臨時新增 rescue criterion」，
+#: 因此在看過某個參數的槓桿值之後才把它加進來，就是那條禁令要防的事。
+SECONDARY_ADJUDICATION_RULES: dict[str, str] = {
+    "sigma_snr_weight": "S0-B1..B5",
+}
+
+#: BORDERLINE 且無具名次級規則時的結局。名稱刻意寫全，讓 artifact 上
+#: 「因為分不出來所以固定」與「因為槓桿太小所以固定」看得出差別。
+BORDERLINE_DEFAULT_OUTCOME = "GAUGE_FIXED_AT_FROZEN_INITIAL_VALUE"
+
+
 def classify_leverage(
     leverage: float | None, threshold: float, band: tuple[float, float]
 ) -> str:
-    """依 CAL-PREREG-002 的 admission_threshold 判定，不做任何四捨五入。"""
+    """依 admission_threshold 判定，不做任何四捨五入。
+
+    回傳的 BORDERLINE 是**原始判定**；是否救得回來由
+    `resolve_borderline()` 依事前寫定的具名規則決定。
+    """
     low, high = band
     if leverage is None:
         return "UNDETERMINED"
@@ -287,6 +328,32 @@ def classify_leverage(
     if leverage >= threshold:
         return "ADMITTED"
     return "GAUGE_FIXED"
+
+
+def resolve_borderline(dimension: str, outcome: str) -> tuple[str, str]:
+    """AMD-004 B：generic conservative BORDERLINE rule。
+
+    落在 band 內、且在本 amendment **之前**沒有具名 secondary rule 的參數，
+    一律固定於凍結的 initial 值。回傳 (outcome, reason)。
+
+    這條規則是 parameter-agnostic 的，這正是重點：一個一個去救 borderline
+    參數，等於每次都在已經看過那個數字之後才發明判準。
+    """
+    if outcome != "BORDERLINE":
+        return outcome, ""
+    rule = SECONDARY_ADJUDICATION_RULES.get(dimension)
+    if rule is None:
+        return BORDERLINE_DEFAULT_OUTCOME, (
+            "own-stage leverage fell inside the preregistered borderline band and "
+            "no named secondary adjudication rule existed for this parameter "
+            "before the amendment, so the conservative default applies: hold it "
+            "at the frozen initial value. Inventing a rescue criterion for an "
+            "individual borderline parameter is forbidden."
+        )
+    return "BORDERLINE_PENDING_SECONDARY", (
+        f"own-stage leverage is inside the borderline band; the preregistered "
+        f"secondary criterion {rule} decides this parameter."
+    )
 
 
 #: 可行域推導的固定設定（AMD-004）。事前選定，執行中不得調整。
@@ -397,6 +464,7 @@ def run_stage0(
     stage0_settings: dict[str, Any],
     evaluate: Callable[[dict[str, Any] | None, int], dict[str, float]],
     progress: Callable[[str], None] | None = None,
+    secondary_probe: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """執行 stage 0 並回傳完整結果。
 
@@ -637,6 +705,11 @@ def run_stage0(
                 "identifiability evidence, so this is recorded as its own outcome "
                 "rather than as an invented infinite leverage."
             )
+        # AMD-004 B：borderline 的保守預設，或交給事前寫定的具名次級規則。
+        outcome, borderline_reason = resolve_borderline(dimension, outcome)
+        if borderline_reason:
+            entry["borderline_resolution"] = borderline_reason
+            entry["secondary_rule"] = SECONDARY_ADJUDICATION_RULES.get(dimension)
         entry["outcome"] = outcome
 
         # AMD-004：響應向量只用**該階段宣告的 observable**。
@@ -657,8 +730,71 @@ def run_stage0(
         response_vectors[dimension] = vector
         parameters.append(entry)
 
-    # -- 階段內共線性 ------------------------------------------------------
+    # -- S0-B1..B5：sigma 階段的 borderline 次級判準（AMD-004，事前寫定） ----
+    # 必須在共線性之前跑完，因為 S0-B4 要看「其餘 admitted 成員」，
+    # 而它自己的結論又會改變 admitted 集合。
     outcomes = {e["dimension"]: e["outcome"] for e in parameters}
+    for entry in parameters:
+        if entry["outcome"] != "BORDERLINE_PENDING_SECONDARY":
+            continue
+        dimension = entry["dimension"]
+        stage_declared = entry["declared_observables"]
+        peers = [
+            e["dimension"]
+            for e in parameters
+            if e["stage"] == entry["stage"]
+            and e["dimension"] != dimension
+            and outcomes.get(e["dimension"], "").startswith("ADMITTED")
+        ]
+        checks: dict[str, Any] = {}
+
+        # S0-B1 通道支配：最大槓桿必須落在該階段的通道上（此處即 sigma_like）。
+        best_obs = entry.get("max_leverage_declared_observable")
+        checks["S0-B1_channel_dominance"] = bool(
+            best_obs is not None and best_obs in stage_declared
+        )
+
+        # S0-B4 共線性：與**每一個** admitted 同階段成員的 |cos| 都必須 < 0.98。
+        own_vector = response_vectors.get(dimension)
+        worst_cos, worst_peer = 0.0, None
+        for peer in peers:
+            cosine = cosine_similarity(own_vector, response_vectors[peer])
+            if cosine is not None and abs(cosine) > worst_cos:
+                worst_cos, worst_peer = abs(cosine), peer
+        checks["S0-B4_collinearity"] = bool(worst_cos < 0.98)
+        entry["s0b4_worst_abs_cosine"] = worst_cos
+        entry["s0b4_worst_peer"] = worst_peer
+
+        # S0-B2 / B3 / B5 需要五點網格與驗證種子；由呼叫端提供的
+        # secondary_probe 執行。缺它時**不得**視為通過。
+        probe = (secondary_probe or {}).get(dimension)
+        if probe is None:
+            checks["S0-B2_monotonicity"] = None
+            checks["S0-B3_seed_stability"] = None
+            checks["S0-B5_no_unphysical_side_effect"] = None
+        else:
+            checks.update(probe)
+
+        entry["secondary_checks"] = checks
+        failed = [k for k, v in checks.items() if v is not True]
+        entry["secondary_failed"] = failed
+        if failed:
+            entry["outcome"] = BORDERLINE_DEFAULT_OUTCOME
+            entry["borderline_resolution"] = (
+                f"secondary criterion {SECONDARY_ADJUDICATION_RULES[dimension]} did "
+                f"not pass ({failed}); the preregistered consequence is to hold the "
+                "parameter at its frozen initial value. The measured borderline "
+                "leverage is explicitly not a reason to admit."
+            )
+        else:
+            entry["outcome"] = "ADMITTED"
+            entry["borderline_resolution"] = (
+                f"secondary criterion {SECONDARY_ADJUDICATION_RULES[dimension]} "
+                "passed in full"
+            )
+        outcomes[dimension] = entry["outcome"]
+
+    # -- 階段內共線性 ------------------------------------------------------
     collinearity: list[dict[str, Any]] = []
     for stage_id in stage_parameters:
         dims = [
@@ -725,7 +861,49 @@ def run_stage0(
             for e in parameters
             if e.get("infeasible_edges")
         },
+        # AMD-004 C：0 維階段是**合法且必須具名記錄**的結局。
+        "stage_status": _stage_status(parameters, stage_parameters, outcomes),
     }
+
+
+def _stage_status(
+    parameters: list[dict[str, Any]],
+    stage_parameters: dict[str, list[str]],
+    outcomes: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    """逐階段的維度數與狀態。
+
+    AMD-004 C：沒有任何 admitted 參數的階段**不是錯誤，也不得靜默跳過**。
+    它是一個具名結局：物理模型保留、參數維持凍結初值、optimizer 不執行，
+    理由是它沒有通過事前寫定的可辨識性入場判定。
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for stage_id in stage_parameters:
+        members = [e for e in parameters if e["stage"] == stage_id]
+        admitted = sorted(
+            e["dimension"] for e in members
+            if outcomes.get(e["dimension"], "").startswith("ADMITTED")
+        )
+        held = sorted(
+            e["dimension"] for e in members
+            if not outcomes.get(e["dimension"], "").startswith("ADMITTED")
+        )
+        zero = not admitted
+        out[stage_id] = {
+            "dimensions": len(admitted),
+            "admitted": admitted,
+            "held_at_frozen_initial_value": held,
+            "status": "NO_FREE_PARAMETERS" if zero else "HAS_FREE_PARAMETERS",
+            "optimizer_run": not zero,
+            "physical_model_retained": True,
+            "values": "frozen initial values" if zero else "fitted within frozen bounds",
+            "reason": (
+                "failed preregistered identifiability admission"
+                if zero
+                else "at least one parameter passed own-stage admission"
+            ),
+        }
+    return out
 
 
 def _registry_name(dimension: str) -> str:
@@ -1041,7 +1219,10 @@ def execute_stage0(
         by_outcome.get("ADMITTED", []) + by_outcome.get("ADMITTED_DETERMINISTIC", [])
     )
     admitted_deterministic = sorted(by_outcome.get("ADMITTED_DETERMINISTIC", []))
+    # 兩種固定分開記錄：「槓桿太小」與「分不出來所以保守固定」是不同的理由，
+    # 合併成一個數字會讓後者看不見。
     gauge_fixed = sorted(by_outcome.get("GAUGE_FIXED", []))
+    gauge_fixed_borderline = sorted(by_outcome.get(BORDERLINE_DEFAULT_OUTCOME, []))
     new_degeneracies = [
         c for c in result["collinearity"] if c.get("degenerate") is True
     ]
@@ -1067,10 +1248,17 @@ def execute_stage0(
     ]
 
     blockers: list[str] = []
-    if borderline:
+    # AMD-004 B：BORDERLINE 本身不再是 blocker —— generic conservative rule
+    # 已經給了它一個決定性的結局（固定於凍結初值）。只有**還沒被解決**的
+    # borderline（即仍掛在具名次級規則上）才算未決。
+    unresolved_borderline = sorted(
+        e["dimension"] for e in result["parameters"]
+        if e["outcome"] in {"BORDERLINE", "BORDERLINE_PENDING_SECONDARY"}
+    )
+    if unresolved_borderline:
         blockers.append(
-            f"{len(borderline)} dimension(s) landed inside the preregistered "
-            f"borderline band {result['borderline_band']}: {borderline}"
+            f"{len(unresolved_borderline)} dimension(s) are still awaiting a "
+            f"secondary adjudication: {unresolved_borderline}"
         )
     if undetermined:
         blockers.append(
@@ -1177,6 +1365,19 @@ def execute_stage0(
         "would_have_passed_under_global_scope": would_have_passed_under_global_scope,
         "sigma_mc_relative_floor": SIGMA_MC_RELATIVE_FLOOR,
         "feasible_domains": result["feasible_domains"],
+        "stage_status": result["stage_status"],
+        "secondary_adjudication_rules": dict(SECONDARY_ADJUDICATION_RULES),
+        "borderline_policy": {
+            "default_outcome": BORDERLINE_DEFAULT_OUTCOME,
+            "rule": (
+                "A parameter whose own-stage leverage falls inside the "
+                "preregistered borderline band, and for which no NAMED secondary "
+                "adjudication rule existed before AMD-004, is held at its frozen "
+                "initial value. Inventing a rescue criterion for an individual "
+                "borderline parameter after seeing its leverage is forbidden."
+            ),
+            "named_exception": "MAPPING_SIGMA.sigma_snr_weight via S0-B1..B5",
+        },
         "feasibility_rule": {
             "definition": (
                 "A value is feasible when all four classes, at the frozen initial "
@@ -1196,6 +1397,7 @@ def execute_stage0(
             "admitted": admitted,
             "admitted_deterministic": admitted_deterministic,
             "gauge_fixed": gauge_fixed,
+            "gauge_fixed_at_frozen_initial_value_borderline": gauge_fixed_borderline,
             "borderline": borderline,
             "undetermined": undetermined,
             "not_fitted": frozen_payload["not_fitted"],

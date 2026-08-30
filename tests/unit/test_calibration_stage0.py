@@ -249,8 +249,8 @@ def _make_evaluate(effects: dict[str, float], noise: float = 1.0):
 
 BOUNDS = {"ambient_energy_to_mcps": (0.0, 1.0), "signal_energy_to_mcps": (0.0, 1.0)}
 STAGES = {
-    "AMBIENT": ["ambient_energy_to_mcps"],
-    "SIGNAL_SCALE": ["signal_energy_to_mcps"],
+    "MAPPING_AMBIENT": ["ambient_energy_to_mcps"],
+    "MAPPING_SIGNAL": ["signal_energy_to_mcps"],
 }
 INITIAL = {"ambient_energy_to_mcps": 0.5, "signal_energy_to_mcps": 0.5}
 
@@ -278,23 +278,52 @@ def test_declared_channels_cover_every_stage_the_protocol_defines():
         declared_observables,
     )
 
+    from pcmef.experiments.calibration_stage0 import IMPLEMENTS_PREREGISTRATION
+
     protocol = yaml.safe_load(
         (REPO_ROOT / "configs" / "calibration_preregistration.yaml").read_text(
             encoding="utf-8"
         )
     )
     stages = {str(s["id"]) for s in protocol["stagewise"]}
-    assert set(DECLARED_CHANNELS) == stages
+
+    if str(protocol.get("preregistration_id")) == IMPLEMENTS_PREREGISTRATION:
+        # 協定已經是這個 runner 實作的那一份 -> 通道必須逐項相符。
+        assert set(DECLARED_CHANNELS) == stages
+    else:
+        # 協定還停在被取代的版本。此時**不比對**是正確的，但必須確認
+        # runner 真的跑不起來 —— 否則新舊 stage id 混用會產出一份宣稱舊協定
+        # 的 artifact。閘門就是這個不一致唯一被允許存在的理由。
+        from pcmef.experiments.calibration_stage0 import execute_stage0
+
+        assert set(DECLARED_CHANNELS) != stages
+        with pytest.raises(Stage0Error, match=IMPLEMENTS_PREREGISTRATION):
+            execute_stage0(freeze_dir=REPO_ROOT / "freeze", repo_root=REPO_ROOT)
+    # 以下對 runner 自己的通道表求值，不經協定 —— 協定可能還停在舊版。
     # 每個階段宣告的 observable 都必須是那 32 個之一，不得憑空造名。
-    for stage in stages:
+    for stage in DECLARED_CHANNELS:
         assert set(declared_observables(stage)) <= set(NAMES)
         assert declared_observables(stage)
-    # 只有 stage 1 把 ambient 列為要最佳化的通道。
+    # 只有 ambient 那一個 mapping 階段把 ambient 列為要最佳化的通道。
     ambient_stages = {
-        s for s in stages
+        s for s in DECLARED_CHANNELS
         if any("|ambient_rate_mcps|" in n for n in declared_observables(s))
     }
-    assert ambient_stages == {"AMBIENT"}
+    assert ambient_stages == {"MAPPING_AMBIENT"}
+
+
+def test_no_retired_stage_id_is_still_in_use():
+    """P1-1：舊名與新名不得混用。用舊名查通道必須直接拒絕，不得回空清單。"""
+    from pcmef.experiments.calibration_stage0 import (
+        DECLARED_CHANNELS,
+        RETIRED_STAGE_IDS,
+        declared_observables,
+    )
+
+    assert not (set(DECLARED_CHANNELS) & RETIRED_STAGE_IDS)
+    for retired in sorted(RETIRED_STAGE_IDS):
+        with pytest.raises(Stage0Error, match="retired CAL-PREREG-002 name"):
+            declared_observables(retired)
 
 
 def _run_with_channels(effects_by_observable, noise=1.0):
@@ -333,8 +362,8 @@ def test_a_parameter_loud_elsewhere_but_silent_in_its_own_stage_is_not_admitted(
     """
     from pcmef.experiments.calibration_stage0 import declared_observables
 
-    own = declared_observables("AMBIENT")[0]           # ambient 通道，屬 stage AMBIENT
-    other = declared_observables("SIGNAL_SCALE")[0]    # signal 通道，別的階段才最佳化
+    own = declared_observables("MAPPING_AMBIENT")[0]           # ambient 通道，屬 stage AMBIENT
+    other = declared_observables("MAPPING_SIGNAL")[0]    # signal 通道，別的階段才最佳化
 
     # sigma_MC 對這組序列恰為 2.4495；span 245 -> 槓桿約 100，span 0.0024 -> 約 0.001
     result = _run_with_channels(
@@ -373,7 +402,7 @@ def test_admission_uses_own_stage_even_when_that_makes_it_pass():
     「判定永遠拒絕」的情況下通過。"""
     from pcmef.experiments.calibration_stage0 import declared_observables
 
-    own = declared_observables("AMBIENT")[0]
+    own = declared_observables("MAPPING_AMBIENT")[0]
     result = _run_with_channels({"ambient_energy_to_mcps": {own: 245.0}})
     entry = next(
         p for p in result["parameters"] if p["dimension"] == "ambient_energy_to_mcps"
@@ -406,10 +435,19 @@ def test_a_parameter_the_optimizer_cannot_see_is_gauge_fixed():
     assert _outcome(result, "ambient_energy_to_mcps") == "GAUGE_FIXED"
 
 
-def test_a_parameter_inside_the_band_stops_the_flow():
+def test_a_parameter_inside_the_band_is_borderline_before_resolution():
+    """`classify_leverage` 仍照實回報 BORDERLINE；救不救得回來是下一步的事。
+
+    AMD-004 B 之後 band 內的參數不再讓流程停下來等裁決 —— generic
+    conservative rule 給它一個決定性結局。但原始判定必須保留，
+    否則 artifact 上看不出「它本來就在 band 內」。
+    """
+    from pcmef.experiments.calibration_stage0 import BORDERLINE_DEFAULT_OUTCOME
+
     # sigma_MC 的樣本 SD 對 seed%8-3.5 序列恰為 2.4495；乘 10 落在 band 內。
+    assert classify_leverage(24.495 / 2.4495, 10.0, (5.0, 20.0)) == "BORDERLINE"
     result = _run({"ambient_energy_to_mcps": 24.495, "signal_energy_to_mcps": 1000.0})
-    assert _outcome(result, "ambient_energy_to_mcps") == "BORDERLINE"
+    assert _outcome(result, "ambient_energy_to_mcps") == BORDERLINE_DEFAULT_OUTCOME
 
 
 def test_a_moving_observable_without_a_noise_reference_is_admitted_deterministically():
@@ -595,11 +633,11 @@ def test_an_existing_stage0_record_is_never_overwritten(tmp_path):
 
 def _two_in_one_stage(span_a, span_b, shared=True):
     """兩個同階段參數，響應落在同一個（或不同）own-stage observable 上。"""
-    stages = {"AMBIENT": ["ambient_energy_to_mcps", "signal_energy_to_mcps"]}
+    stages = {"MAPPING_AMBIENT": ["ambient_energy_to_mcps", "signal_energy_to_mcps"]}
     bounds = {"ambient_energy_to_mcps": (0.0, 1.0), "signal_energy_to_mcps": (0.0, 1.0)}
     from pcmef.experiments.calibration_stage0 import declared_observables
 
-    obs = declared_observables("AMBIENT")
+    obs = declared_observables("MAPPING_AMBIENT")
     target = {"ambient_energy_to_mcps": obs[0],
               "signal_energy_to_mcps": obs[0] if shared else obs[2]}
     spans = {"ambient_energy_to_mcps": span_a, "signal_energy_to_mcps": span_b}
@@ -665,3 +703,151 @@ def test_the_response_vector_uses_only_the_stages_own_observables():
     # 落在該階段宣告的**不同**分量上 -> 正交，不是簡併。
     assert apart["abs_cosine"] == pytest.approx(0.0, abs=1e-9)
     assert apart["degenerate"] is False
+
+
+# ---------------------------------------------------------------------------
+# AMD-004 B：generic conservative BORDERLINE rule
+# ---------------------------------------------------------------------------
+
+
+def test_a_borderline_parameter_without_a_named_rule_is_held_at_its_initial_value():
+    """不得為個別 borderline parameter 臨時發明 rescue criterion。"""
+    from pcmef.experiments.calibration_stage0 import (
+        BORDERLINE_DEFAULT_OUTCOME,
+        resolve_borderline,
+    )
+
+    outcome, reason = resolve_borderline("_FOIL_GAP_TO_BOTTLE_RATIO", "BORDERLINE")
+    assert outcome == BORDERLINE_DEFAULT_OUTCOME
+    assert "conservative default" in reason
+
+
+def test_the_only_named_exception_is_the_sigma_stage_secondary_rule():
+    """例外必須是**事前**寫定的一張表，而不是執行期臨時決定。"""
+    from pcmef.experiments.calibration_stage0 import (
+        SECONDARY_ADJUDICATION_RULES,
+        resolve_borderline,
+    )
+
+    assert set(SECONDARY_ADJUDICATION_RULES) == {"sigma_snr_weight"}
+    outcome, _ = resolve_borderline("sigma_snr_weight", "BORDERLINE")
+    assert outcome == "BORDERLINE_PENDING_SECONDARY"
+
+
+@pytest.mark.parametrize("outcome", ["ADMITTED", "GAUGE_FIXED", "UNDETERMINED"])
+def test_non_borderline_outcomes_are_untouched_by_the_borderline_rule(outcome):
+    from pcmef.experiments.calibration_stage0 import resolve_borderline
+
+    assert resolve_borderline("anything", outcome) == (outcome, "")
+
+
+def test_a_borderline_run_is_no_longer_a_blocker_but_is_named_in_the_artifact():
+    """band 內的參數現在有決定性結局，因此不該再讓流程停下來等裁決。"""
+    from pcmef.experiments.calibration_stage0 import BORDERLINE_DEFAULT_OUTCOME
+
+    result = _run({"ambient_energy_to_mcps": 24.495, "signal_energy_to_mcps": 1000.0})
+    assert _outcome(result, "ambient_energy_to_mcps") == BORDERLINE_DEFAULT_OUTCOME
+    entry = next(
+        p for p in result["parameters"] if p["dimension"] == "ambient_energy_to_mcps"
+    )
+    assert "conservative default" in entry["borderline_resolution"]
+
+
+def test_s0b4_gauge_fixes_a_borderline_sigma_parameter_collinear_with_an_admitted_one():
+    """S0-B4：與 admitted 同階段成員 |cos| >= 0.98 -> 自動 GAUGE_FIX。"""
+    from pcmef.experiments.calibration_stage0 import (
+        BORDERLINE_DEFAULT_OUTCOME,
+        declared_observables,
+    )
+
+    stages = {"MAPPING_SIGMA": ["sigma_snr_weight", "sigma_multipath_weight"]}
+    bounds = {"sigma_snr_weight": (0.0, 100.0), "sigma_multipath_weight": (0.0, 100.0)}
+    obs = declared_observables("MAPPING_SIGMA")[0]
+    spans = {"sigma_snr_weight": 42.0, "sigma_multipath_weight": 1000.0}
+
+    def evaluate(override, seed):
+        row = {n: 100.0 for n in NAMES}
+        if seed >= 0:
+            for n in NAMES:
+                row[n] = 100.0 + ((seed % 8) - 3.5)
+        if override is not None:
+            d = override["binding"].dimension
+            lo, hi = bounds[d]
+            row[obs] = 100.0 + spans[d] * (override["value"] - lo) / (hi - lo)
+        return row
+
+    result = run_stage0(
+        resolved_bounds=bounds,
+        initial_values={k: 1.0 for k in bounds},
+        stage_parameters=stages,
+        stage0_settings=dict(SETTINGS),
+        evaluate=evaluate,
+    )
+    entry = next(p for p in result["parameters"] if p["dimension"] == "sigma_snr_weight")
+    # 兩者的響應落在同一個分量上 -> 完全平行。
+    assert entry["s0b4_worst_abs_cosine"] == pytest.approx(1.0, abs=1e-9)
+    assert entry["s0b4_worst_peer"] == "sigma_multipath_weight"
+    assert entry["secondary_checks"]["S0-B4_collinearity"] is False
+    assert entry["outcome"] == BORDERLINE_DEFAULT_OUTCOME
+    assert "S0-B4_collinearity" in entry["secondary_failed"]
+
+
+def test_a_missing_secondary_probe_is_not_treated_as_a_pass():
+    """S0-B2/B3/B5 沒跑就是沒跑，不得因為「沒有失敗」而算通過。"""
+    from pcmef.experiments.calibration_stage0 import BORDERLINE_DEFAULT_OUTCOME
+
+    stages = {"MAPPING_SIGMA": ["sigma_snr_weight", "sigma_multipath_weight"]}
+    bounds = {"sigma_snr_weight": (0.0, 100.0), "sigma_multipath_weight": (0.0, 100.0)}
+    decl = __import__(
+        "pcmef.experiments.calibration_stage0", fromlist=["declared_observables"]
+    ).declared_observables("MAPPING_SIGMA")
+    target = {"sigma_snr_weight": decl[0], "sigma_multipath_weight": decl[2]}
+    spans = {"sigma_snr_weight": 42.0, "sigma_multipath_weight": 1000.0}
+
+    def evaluate(override, seed):
+        row = {n: 100.0 for n in NAMES}
+        if seed >= 0:
+            for n in NAMES:
+                row[n] = 100.0 + ((seed % 8) - 3.5)
+        if override is not None:
+            d = override["binding"].dimension
+            lo, hi = bounds[d]
+            row[target[d]] = 100.0 + spans[d] * (override["value"] - lo) / (hi - lo)
+        return row
+
+    result = run_stage0(
+        resolved_bounds=bounds,
+        initial_values={k: 1.0 for k in bounds},
+        stage_parameters=stages,
+        stage0_settings=dict(SETTINGS),
+        evaluate=evaluate,
+    )
+    entry = next(p for p in result["parameters"] if p["dimension"] == "sigma_snr_weight")
+    # S0-B4 這次通過（正交），但 B2/B3/B5 沒有 probe -> None -> 不算通過。
+    assert entry["secondary_checks"]["S0-B4_collinearity"] is True
+    assert entry["secondary_checks"]["S0-B2_monotonicity"] is None
+    assert entry["outcome"] == BORDERLINE_DEFAULT_OUTCOME
+
+
+# ---------------------------------------------------------------------------
+# AMD-004 C：zero-parameter stage semantics
+# ---------------------------------------------------------------------------
+
+
+def test_a_stage_with_no_admitted_parameter_is_named_not_an_error():
+    """0 維階段是合法結局：物理模型保留、參數維持凍結初值、optimizer 不執行。"""
+    result = _run({"ambient_energy_to_mcps": 0.0, "signal_energy_to_mcps": 1000.0})
+    ambient = result["stage_status"]["MAPPING_AMBIENT"]
+    assert ambient["status"] == "NO_FREE_PARAMETERS"
+    assert ambient["dimensions"] == 0
+    assert ambient["optimizer_run"] is False
+    assert ambient["physical_model_retained"] is True
+    assert ambient["values"] == "frozen initial values"
+    assert ambient["reason"] == "failed preregistered identifiability admission"
+    assert ambient["held_at_frozen_initial_value"] == ["ambient_energy_to_mcps"]
+
+    # 成對：有 admitted 成員的階段必須是另一個狀態，否則上一條沒有鑑別力。
+    signal = result["stage_status"]["MAPPING_SIGNAL"]
+    assert signal["status"] == "HAS_FREE_PARAMETERS"
+    assert signal["optimizer_run"] is True
+    assert signal["dimensions"] == 1
