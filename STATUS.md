@@ -127,12 +127,18 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~lock 的 environment 記錯~~ | — | **已解除**：ERR-001 勘誤層（NOTE-040） |
 | ~~沒有校準目標規格~~ | — | **已解除**：CAL-PREREG-001 已凍結（NOTE-041） |
 
-**目前的關鍵路徑是「stage 1 的兩道守衛都破了」的裁決**（見下方 Formal
-Calibration 專節）。stage 0 已凍結、s_f 已凍結、正式校準已執行，
-但它在 stage 1 依預註冊規則停下：`SEED_OVERFIT` 且 `SIDE_EFFECT_REGRESSION`。
-往下走需要 amendment，不是重跑。
+**E1 已完成（2026-08-30）。** 治理模式已由 AMD-005 改為 thesis-oriented
+protected-final-test：heldout 168 筆在讀值之前切成 probe 56 / final 112，
+校準守衛破線改為 `UPDATE_INHIBITED`（拒絕更新、保留原值、繼續下一階段）。
+校準五階段跑完（`CALIBRATION_COMPLETE`），E1 開啟 FORMAL_E1_FINAL 一次並得到
+`E1_SCIENTIFIC_PASS` —— **但通過的內容很窄，見下方 E1 專節的用字邊界。**
 
-**歷史關鍵路徑（已完成）：AMD-004 → CAL-PREREG-003 → 重跑並凍結 stage 0。**
+**下一步不是再跑一次校準。** 要讓 signal / sigma / distance 三個通道真的
+校準得起來，必須先處理 spp=16 的 Monte Carlo 雜訊（stage 0 已記錄
+sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment。
+
+**歷史關鍵路徑（已完成）：AMD-004 → CAL-PREREG-003 → 凍結 stage 0 →
+第一次合法讀取 → AMD-005 → 校準 → E1。**
 `locks status` 顯示 22 個 lock 已凍 2 個（`real_split_policy` /
 `initial_simulation`）、`calibrated_simulation` 與 `metric_config` 為 pending、
 其餘 18 個 BLOCKED。
@@ -1017,7 +1023,109 @@ float。**該值已凍進 lock，且 `parameter_ranges` 在勘誤的禁區內**�
 
 ---
 
-## Formal Calibration —— 已執行，停在 stage 1（2026-08-30）
+## E1 已完成 —— `E1_SCIENTIFIC_PASS`，但**通過的內容很窄**（2026-08-30，AMD-005）
+
+```
+outputs/e1/e1_final_report.json
+outcome E1_SCIENTIFIC_PASS      claim_mode tof_physics_calibrated
+FORMAL_E1_FINAL 開啟 1 次（112 筆），發生在六個 gate lock 全部凍結之後
+heldout_access_count 1          probe_access_count 0
+```
+
+### 三條凍結判準都過了
+
+| 條件 | 結果 |
+|---|---|
+| macro-mean Delta CI 下界 > 0 | **PASS** — 167.23（點估計 167.68，B=10000，seed 20260826，28 個 scenario） |
+| 每個 feature 的 macro Delta ≥ 0 | **PASS** |
+| distance_trend_consistency | **NOT_APPLICABLE**（見下） |
+
+### 但這三條加起來能宣稱的，比 `tof_physics_calibrated` 這個標籤少很多
+
+**16 格裡只有 4 格改善，而且全部是同一個 feature。**
+
+| feature | macro Delta | 讀法 |
+|---|---|---|
+| `ambient_rate_mcps` | **+670.71** | 四類全部大幅改善（908→1.6、783→0.13、377→3.0、619→0.17） |
+| `distance_mm` | 0.000 | **恰為 0** |
+| `signal_rate_mcps` | 0.000 | **恰為 0** |
+| `sigma_like` | 0.000 | **恰為 0** |
+
+那三個 0 **不是「校準後沒有變差」，是「根本沒有變」**：它們的參數更新
+被抑制了，所以 Initial 與 Calibrated 在這些通道上是**同一個模擬器**，
+逐位元相同。第二條 PASS 條件（`>= 0`）因此在四分之三的 feature 上是
+空過，不是證據。
+
+**校準後 `signal_rate_mcps` 仍然差得離譜**：
+
+```
+Water-filled  NW 418654  (W1 516787 MCPS)      Empty  NW 87462  (W1 107963)
+Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
+```
+
+第三條（趨勢）是 `NOT_APPLICABLE`：FORMAL_E1_FINAL 只有 baseline 一個分層，
+±offset 序列來自 CAL-PREREG-003 明列禁用的獨立採集。artifact 內
+`must_not_be_read_as` 已具名記下「這不是通過，是沒有證據」。
+
+### 因此論文可以寫什麼、不可以寫什麼
+
+`e1_outcome.lock` 依凍結對照表寫下 `claim_mode: tof_physics_calibrated`。
+**那個標籤對本結果過強**，不得原樣搬進論文。可以宣稱的是：
+
+> 在四個 ToF 特徵中，**ambient 通道**經校準後與真實感測器的分佈距離
+> 顯著縮小（macro Delta 670.7，成對重抽 CI 下界 167.2 > 0）；
+> distance、signal 與 sigma-like 三個通道的參數更新因獨立證據不支持而被
+> **抑制**，維持凍結初值，其分佈距離與 initial model 完全相同。
+> signal 通道的殘差仍達 NW 5x10^4 - 4x10^5 量級。
+
+不得宣稱整個 ToF 模擬器已 physics-calibrated；不得把三個 0 說成「無退步」；
+不得把趨勢的 NOT_APPLICABLE 說成趨勢一致。
+
+---
+
+## Formal Calibration（AMD-005 之後）—— `CALIBRATION_COMPLETE`（2026-08-30）
+
+五個階段全部走完，1.89 小時，17488/33936 次評估，**0 次失敗評估**。
+
+| stage | outcome | verification 劣化 | regression |
+|---|---|---|---|
+| SCENE_GEOMETRY_SURFACE_FOIL | **UPDATE_INHIBITED** | 8.26 | +28.5% |
+| SCENE_PARTICIPATING_MEDIA | NO_FREE_PARAMETERS | — | — |
+| MAPPING_AMBIENT | **CONVERGED** | **0.0071** | 0 |
+| MAPPING_SIGNAL | **UPDATE_INHIBITED** | 0.329 | ~0 |
+| MAPPING_SIGMA | **UPDATE_INHIBITED** | 1.505 | 0 |
+
+七個參數只有兩個真的動了：
+
+```
+ambient_energy_to_mcps    1    -> 0.00557953
+ambient_jitter_relative   0.05 -> 0.0636823
+其餘五個保留凍結初值（sensor.fov_deg 45、signal_energy_to_mcps 1、
+noise_relative_sigma 0.01、sigma_width_to_mm 1、sigma_multipath_weight 1）
+```
+
+**這個分佈本身就是那句假設的檢定。** 唯一 seed 穩定的通道
+（ambient，stage 0 記錄的 sd/mean ≈ 0.011）校準得起來、而且跨種子成立；
+三個 sd/mean 落在 0.17-0.67 的通道校準不起來，抑制規則把它們留在原地。
+根因是 spp=16 下 Monte Carlo 雜訊蓋過了參數效應 —— 那是
+`initial_simulation.lock` 的解析度問題，不是 optimizer 的問題
+（三次重啟每次都收斂，相對全距 1.6e-4）。
+
+> **報告用字的邊界**：`UPDATE_INHIBITED` 是**功能性啟發**的工程控制規則 ——
+> 獨立證據指出更新會傷害系統層級穩定度時，抑制該次狀態變更。
+> **不主張、不示範、也不構成任何生物神經抑制機制的證據。**
+
+### 已知的報告缺陷（不影響判定）
+
+`parameter_delta.boundary_report` 把 `ambient_energy_to_mcps`、
+`sigma_width_to_mm`、`signal_energy_to_mcps` 標成 AT BOUNDARY，那是
+**假陽性**。預註冊的規則是「距邊界 < 1% 範圍寬」，而這三個參數的登記範圍是
+[1e-6, 1e6]，1% 就是 10000 —— 於是任何小於 10000 的值都會被標記。
+規則是凍結的、實作是照字面做的，因此不改；但三者實際上都離邊界很遠。
+
+---
+
+## Formal Calibration（AMD-005 之前）—— 曾停在 stage 1（2026-08-30，已由 AMD-005 取代）
 
 **五個階段只跑完第一個就依凍結規則停下。這不是失敗，是預註冊的守衛在做它該做的事。**
 
