@@ -6,29 +6,37 @@
 #         calibration_report.json 等 artifact。**不凍結**
 #         calibrated_simulation.lock，那是獨立且需先過稽核的動作。
 # 檔案路徑: pcmef/experiments/calibration_formal.py
-# 產生時間: 2026-08-30 19:55 +08:00
-# 版本: v0.1.0
-# 功能說明: 依 CAL-PREREG-003 逐階段執行 differential evolution，把七個
-#           admitted 參數擬合到 16 項 NW 目標上；階段完成即凍結其參數，
-#           並在每個階段邊界檢查副作用退步、種子過擬合與預算。
+# 產生時間: 2026-08-30 23:20 +08:00
+# 版本: v0.2.0
+# 功能說明: 依 CAL-PREREG-003（經 AMD-005 修訂）逐階段執行 differential
+#           evolution，把七個 admitted 參數擬合到 16 項 NW 目標上；階段完成即
+#           凍結其參數，並在每個階段邊界檢查副作用退步、種子過擬合與預算。
+#           守衛破線時抑制該次更新並保留原值，而不是中止整條流程。
 # 模組定位: calibration 的執行層。判準全部來自凍結物 —— 預算、收斂、平手、
 #           重啟、退步容忍度都不是本檔的參數；本檔照著跑，跑完不得回頭改判準。
 # 主要責任:
 #   1. run_stage() 以三次重啟執行 DE，並以日誌重播支援中斷接續
 #   2. select_candidate() 依凍結的 tie_break 規則挑出該階段的結論
-#   3. regression_guard() 判定未被最佳化的項是否退步超過容忍度
-#   4. verification_seed_check() 以另一組種子確認改善不是種子專屬
-#   5. run_formal_calibration() 串起五個階段並寫出全部 artifact
+#   3. regression guard 判定未被最佳化的項是否退步超過容忍度
+#   4. verification seeds 以另一組種子確認改善不是種子專屬
+#   5. AMD-005 抑制控制：任一守衛破線即拒絕更新、保留原值、繼續下一階段
+#   6. run_formal_calibration() 串起五個階段並寫出全部 artifact
 # 維護提醒:
 #   - 不得為了讓執行變快而縮減預算、重啟次數或 maxiter。預算是上限不是目標，
 #     縮它等於換一個比較容易收斂的實驗。
 #   - 不得在預算用盡時取 best-so-far 並宣稱收斂；那是 NOT_CONVERGED，
 #     且 calibrated_simulation 不得凍結。
-#   - 不得在 SIDE_EFFECT_REGRESSION 或 SEED_OVERFIT 之後自動繼續下一階段。
-#     那兩個結局的意義就是「這個階段的改善買不起它的代價」。
+#   - 不得因為 UPDATE_INHIBITED 就放寬 verification_tolerance 或
+#     regression_tolerance。AMD-005 只改「破線之後怎麼辦」，判準一個位元都沒動；
+#     調鬆容忍度會讓抑制永遠不觸發，那等於把守衛拆了。
+#   - 不得把 UPDATE_INHIBITED 說成證明了任何生物神經抑制機制。它是功能性啟發的
+#     工程控制規則，claim boundary 隨每一份 artifact 一起寫出。
 #   - 不得讓後面的階段移動前面階段已凍結的參數；階段隔離是逐階段可辨識性
 #     論證成立的前提。
-#   - 不得開啟 heldout_real，也不得在本檔組出它的路徑。
+#   - 不得開啟 FORMAL_E1_FINAL，也不得在本檔組出 heldout 的路徑。
+#   - v0.2.0 變更：AMD-005 抑制控制取代 SEED_OVERFIT / SIDE_EFFECT_REGRESSION
+#     的中止語意；兩者改為 flags，終止狀態只剩 NOT_CONVERGED 與
+#     UNSTABLE_LANDSCAPE。
 #   - v0.1.0 新增：首版 formal calibration 執行器（CAL-PREREG-003 stage 1-5）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_calibration_resume.py -v
@@ -87,18 +95,17 @@ __all__ = [
     "run_formal_calibration",
 ]
 
-RUNNER_VERSION = "v0.1.0"
+RUNNER_VERSION = "v0.2.0"
 
-#: 這些結局一律中止流程。它們不是「這次不太好」，而是「在這個結果上繼續
-#: 往下跑，後面每一個階段的前提都不成立」。
-_TERMINAL_OUTCOMES = frozenset(
-    {
-        "NOT_CONVERGED",
-        "SIDE_EFFECT_REGRESSION",
-        "SEED_OVERFIT",
-        "UNSTABLE_LANDSCAPE",
-    }
-)
+#: 這些結局一律中止流程。它們說的是「optimizer 根本沒把事情做完」，
+#: 因此在這個結果上繼續往下跑，後面每一個階段的前提都不成立。
+#:
+#: AMD-005 把 SEED_OVERFIT 與 SIDE_EFFECT_REGRESSION 移出這個集合：
+#: 它們說的是「找到的答案應該被拒絕」，那是另一件事，處置為
+#: UPDATE_INHIBITED（拒絕更新、保留原值、繼續下一階段）。
+#: 抑制一次更新的前提是真的有一個成形的更新可以抑制 —— 搜尋沒收斂、
+#: 或五分之一的地形算不出來時，並沒有。
+_TERMINAL_OUTCOMES = frozenset({"NOT_CONVERGED", "UNSTABLE_LANDSCAPE"})
 
 
 class FormalCalibrationError(RuntimeError):
@@ -597,46 +604,44 @@ def run_stage(
         if multimodal:
             stage_flags.append("MULTIMODAL")
 
-    # -- 階段結束後的完整 16 項（CRN 種子） ---------------------------------
-    progress(f"[{stage_id}] measuring the stage end point")
+    # -- 候選點的完整 16 項（CRN 種子） -------------------------------------
+    progress(f"[{stage_id}] measuring the proposed candidate")
     evaluator.seed_mode = "CRN"
-    after_record = evaluator.evaluate_point(selected_values)
-    if after_record.status != "OK":
+    candidate_record = evaluator.evaluate_point(selected_values)
+    if candidate_record.status != "OK":
         journal.close()
         raise FormalCalibrationError(
             "NON_FINITE_OBJECTIVE",
             f"stage {stage_id} selected a point that does not evaluate: "
-            f"{after_record.error}",
+            f"{candidate_record.error}",
         )
-    objective_after = after_record.stage_objective
-    monitored_after = sum_cells(after_record.objective_terms, monitored_cells)
+    candidate_objective = candidate_record.stage_objective
+    monitored_candidate = sum_cells(candidate_record.objective_terms, monitored_cells)
 
-    # -- regression guard --------------------------------------------------
+    # -- regression guard（量在候選點上） -----------------------------------
     if monitored_before > 0:
-        monitored_relative = (monitored_after - monitored_before) / abs(monitored_before)
+        monitored_relative = (
+            monitored_candidate - monitored_before
+        ) / abs(monitored_before)
     else:
-        monitored_relative = 0.0 if monitored_after == monitored_before else math.inf
+        monitored_relative = 0.0 if monitored_candidate == monitored_before else math.inf
     regression = {
         "monitored_cells": [f"{c}|{f}" for c, f in monitored_cells],
         "monitored_nw_sum_before": monitored_before,
-        "monitored_nw_sum_after": monitored_after,
+        "monitored_nw_sum_at_candidate": monitored_candidate,
         "relative_change": monitored_relative,
         "tolerance": regression_tolerance,
         "violated": bool(monitored_relative > regression_tolerance),
     }
-    if regression["violated"]:
-        outcome = "SIDE_EFFECT_REGRESSION"
-        # `outcome` 只有一格，但兩道守衛可以同時破。把每一道都記進 flags，
-        # 否則後面覆寫掉的那一道就只剩在巢狀欄位裡，掃 outcome 的人看不到。
-        stage_flags.append("SIDE_EFFECT_REGRESSION")
 
-    # -- verification seeds（每階段只用一次） --------------------------------
+    # -- verification seeds（每階段只用一次，量在候選點上） -------------------
     evaluator.seed_mode = "VERIFICATION"
     verification_record = evaluator.evaluate_point(selected_values)
     evaluator.seed_mode = "CRN"
     if n == 0:
         seed_check = {
             "status": "NOT_APPLICABLE_ZERO_DIMENSIONAL",
+            "violated": False,
             "reason": (
                 "the optimizer did not run, so there is no seed-specific improvement "
                 "that could be overfitted"
@@ -644,21 +649,19 @@ def run_stage(
         }
     elif verification_record.status != "OK":
         seed_check = {"status": "VERIFICATION_EVALUATION_FAILED",
+                      "violated": True,
                       "error": verification_record.error}
-        outcome = "SEED_OVERFIT"
-        stage_flags.append("SEED_OVERFIT")
     else:
-        scale = abs(objective_after) if objective_after else 1.0
-        degradation = (verification_record.stage_objective - objective_after) / scale
+        scale = abs(candidate_objective) if candidate_objective else 1.0
+        degradation = (
+            verification_record.stage_objective - candidate_objective
+        ) / scale
         seed_check = {
             "status": "OK",
             "relative_degradation": degradation,
             "tolerance": verification_tolerance,
             "violated": bool(degradation > verification_tolerance),
         }
-        if seed_check["violated"]:
-            outcome = "SEED_OVERFIT"
-            stage_flags.append("SEED_OVERFIT")
     seed_check.update(
         {
             "seeds": dict(VERIFICATION_SEEDS),
@@ -668,6 +671,72 @@ def run_stage(
             "used_once_per_stage": True,
         }
     )
+
+    # -- AMD-005 抑制控制 ---------------------------------------------------
+    # 兩道守衛任一破線，就**拒絕這次更新並保留原值**，而不是中止整條流程。
+    # 一個被獨立證據否決的提案，說的是「這個參數不該動」，不是「後面的階段
+    # 也不成立」。保留凍結初值本身是一個站得住的狀態 —— 它正是 initial
+    # freeze 當初凍下來的那個模型。
+    #
+    # UPDATE_INHIBITED 是**功能性啟發**的命名：獨立證據指出更新會傷害系統層級
+    # 穩定度時，抑制該次狀態變更。它是工程控制規則，**不主張任何生物神經
+    # 抑制機制**（AMD-005 changed_contracts.stage_guard_terminal_state）。
+    violated_guards = [
+        name
+        for name, violated in (
+            ("SIDE_EFFECT_REGRESSION", regression["violated"]),
+            ("SEED_OVERFIT", bool(seed_check.get("violated"))),
+        )
+        if violated
+    ]
+    inhibited = bool(violated_guards) and outcome not in _TERMINAL_OUTCOMES
+    rejected_candidate = dict(selected)
+
+    if inhibited:
+        # 保留前一個凍結值（本階段維度即凍結初值），並把終點量測換回起點。
+        selected = {name: float(identity.initial_values[name]) for name in dimensions}
+        selected_values = dict(frozen_parameters)
+        selected_values.update(selected)
+        after_record = start_record
+        outcome = "UPDATE_INHIBITED"
+        stage_flags.extend(violated_guards)
+        stage_flags.append("UPDATE_INHIBITED")
+        progress(
+            f"[{stage_id}] UPDATE_INHIBITED by {violated_guards}; "
+            f"rejecting {rejected_candidate} and retaining "
+            f"{ {k: float(identity.initial_values[k]) for k in dimensions} }"
+        )
+    else:
+        after_record = candidate_record
+        stage_flags.extend(violated_guards)
+
+    objective_after = after_record.stage_objective
+    monitored_after = sum_cells(after_record.objective_terms, monitored_cells)
+
+    inhibition = {
+        "mechanism": "UPDATE_INHIBITED",
+        "amendment": "AMD-005",
+        "inhibited": inhibited,
+        "violated_guards": violated_guards,
+        "rejected_candidate": rejected_candidate if inhibited else None,
+        "rejected_candidate_stage_objective": candidate_objective if inhibited else None,
+        "retained_values": dict(selected),
+        "retained_source": (
+            "frozen initial value (initial_simulation.lock)" if inhibited else None
+        ),
+        "rule": (
+            "if verification-seed degradation OR the regression guard exceeds its "
+            "preregistered tolerance, reject the candidate parameter update, retain "
+            "the previous frozen/initial value, mark UPDATE_INHIBITED and continue "
+            "to the next stage"
+        ),
+        "claim_boundary": (
+            "Functionally inspired only: a proposed state change is suppressed when "
+            "independent evidence indicates the update harms system-level stability. "
+            "This is an engineering control rule. It does NOT model, demonstrate or "
+            "provide evidence for any biological neural inhibition mechanism."
+        ),
+    }
 
     elapsed = time.perf_counter() - started_at
     summary: dict[str, Any] = {
@@ -689,9 +758,14 @@ def run_stage(
                 "bounds": list(bounds_map[name]),
                 "at_boundary": _at_boundary(selected[name], bounds_map[name]),
                 "relative_position": _relative_position(selected[name], bounds_map[name]),
+                "update_inhibited": inhibited,
+                "rejected_candidate": (
+                    rejected_candidate[name] if inhibited else None
+                ),
             }
             for name in dimensions
         },
+        "inhibition": inhibition,
         "objective_before": objective_before,
         "objective_after": objective_after,
         "objective_improvement": objective_before - objective_after,
@@ -1027,8 +1101,16 @@ def _build_report(
 
     total_used = sum(s["evaluations_used"] for s in by_stage.values())
     total_budget = sum(s["evaluations_budget"] for s in by_stage.values())
+    # AMD-005：UPDATE_INHIBITED 是一個**已解決**的階段結局 —— 參數留在凍結初值，
+    # 物理模型完整保留。它不阻止校準完成，也不阻止凍結。
     all_converged = all(
-        s["outcome"] in {"CONVERGED", "NO_IMPROVEMENT_REQUIRED", "NO_FREE_PARAMETERS"}
+        s["outcome"]
+        in {
+            "CONVERGED",
+            "NO_IMPROVEMENT_REQUIRED",
+            "NO_FREE_PARAMETERS",
+            "UPDATE_INHIBITED",
+        }
         for s in by_stage.values()
     )
     complete = len(by_stage) == len(STAGE_ORDER) and stopped_at is None
@@ -1193,6 +1275,25 @@ def _build_report(
         "side_effect_regression_checks": {
             stage_id: summary["regression_guard"]
             for stage_id, summary in by_stage.items()
+        },
+        "inhibitory_control": {
+            "amendment": "AMD-005",
+            "per_stage": {
+                stage_id: summary.get("inhibition")
+                for stage_id, summary in by_stage.items()
+            },
+            "inhibited_stages": [
+                stage_id
+                for stage_id, summary in by_stage.items()
+                if (summary.get("inhibition") or {}).get("inhibited")
+            ],
+            "claim_boundary": (
+                "Functionally inspired only. A proposed parameter update is "
+                "suppressed when independent evidence (verification seeds or the "
+                "regression guard) indicates it harms system-level stability. This "
+                "is an engineering control rule and is NOT evidence for any "
+                "biological neural inhibition mechanism."
+            ),
         },
         "evaluation_counts": {
             "per_stage": {

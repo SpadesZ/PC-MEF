@@ -1,0 +1,8 @@
+{
+  "amendment_id": "AMD-005",
+  "definition": "One access = reading the VALUE of any recording in E1_DEVELOPMENT_PROBE. Reading the frozen id set does not count. FORMAL_E1_FINAL accesses are NOT recorded here; they increment split_registry.heldout_access_count.",
+  "entries": [],
+  "ledger": "e1_development_probe_access",
+  "note": "Append-only. Probe values may be inspected during method development, but every inspection leaves a record.",
+  "probe_access_count": 0
+}
