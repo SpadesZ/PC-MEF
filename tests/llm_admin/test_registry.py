@@ -275,6 +275,30 @@ def test_an_unbound_model_profile_can_be_deleted(seeded):
     assert seeded.embed_only_id not in remaining
 
 
+def test_a_probed_but_unbound_connection_can_still_be_deleted(seeded):
+    """按過 Test 之後仍然要刪得掉。
+
+    llm_verification_logs 以 FK 指向 llm_models，因此一次 probe 就足以讓
+    `DELETE FROM llm_models` 撞上外鍵。舊版沒有一併清掉 log，於是
+    sqlite3.IntegrityError 一路冒到 Flask，UI 得到一個沒有任何訊息的 500 ——
+    而使用者做的只是「試了連線，然後想把它刪掉」這件再正常不過的事。
+    """
+    registry = seeded.registry
+    _verify_all(registry, seeded.full_model_id, required_capabilities("physics_agent"))
+    assert registry.verification_logs(seeded.full_model_id), "前提：probe 有留下記錄"
+
+    registry.delete_connection(seeded.connection_id)
+
+    assert seeded.connection_id not in {
+        c.connection_id for c in registry.list_connections()
+    }
+    assert seeded.full_model_id not in {
+        m.model_profile_id for m in registry.list_models()
+    }
+
+
+
+
 # ---------------------------------------------------------------------------
 # Audit
 # ---------------------------------------------------------------------------
@@ -317,7 +341,15 @@ def test_binding_identity_excludes_the_human_readable_alias(seeded):
 
 
 def test_foreign_keys_are_enforced(seeded):
-    with pytest.raises(sqlite3.IntegrityError):
+    """外鍵仍然強制執行，但以 RegistryError 呈現而非原始 sqlite 例外。
+
+    型別會變是刻意的：外鍵違反的意思是「這個操作在目前狀態下不合法」，
+    不是伺服器壞掉。讓 sqlite3.IntegrityError 一路冒到 Flask，UI 只會得到
+    一個沒有任何訊息的 HTTP 500 —— 實測發生過：刪除一條按過 Test 的
+    connection 就是這樣，而使用者完全看不出該怎麼辦。
+    訊息仍必須說得出是外鍵擋下來的。
+    """
+    with pytest.raises(RegistryError, match="FOREIGN KEY"):
         with seeded.registry.connect() as db:
             db.execute(
                 "INSERT INTO llm_task_bindings (task_code, model_profile_id, "

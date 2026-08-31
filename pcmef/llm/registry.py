@@ -340,6 +340,17 @@ class LLMRegistry:
         try:
             yield connection
             connection.commit()
+        except sqlite3.IntegrityError as error:
+            # 外鍵/唯一性違反是「這個操作在目前狀態下不合法」，不是伺服器壞掉。
+            # 讓原始的 sqlite3.IntegrityError 逃出去，UI 會得到一個沒有任何
+            # 訊息的 HTTP 500（實測：刪除有 probe 記錄的 connection 就是這樣），
+            # 而操作者完全看不出該怎麼辦。轉成 RegistryError 後會走
+            # routes_llm 的 400 處理器並把原因顯示在頁面上。
+            connection.rollback()
+            raise RegistryError(
+                f"the database refused this change: {error}. "
+                "Something still references the row you are changing."
+            ) from error
         except Exception:
             connection.rollback()
             raise
@@ -467,6 +478,20 @@ class LLMRegistry:
                 dependents,
             )
         with self.connect() as db:
+            # llm_verification_logs 也以 FK 指向 llm_models，因此只要按過一次
+            # Test 就不能直接刪 model —— 舊版少了這一句，刪除會以
+            # sqlite3.IntegrityError 冒出來，在 UI 上變成一個沒有訊息的 500。
+            #
+            # 選擇連 probe 記錄一起刪，而不是拒絕刪除：這裡是 **draft**
+            # registry，那些記錄描述的是一個即將不存在的 model。具科學效力的
+            # 稽核軌跡在 freeze/llm_runtime.lock 的
+            # capability_probe_artifact_hashes，不在這張草稿表，
+            # 且已凍結的 lock 不受本操作影響。
+            db.execute(
+                "DELETE FROM llm_verification_logs WHERE model_profile_id IN "
+                "(SELECT model_profile_id FROM llm_models WHERE connection_id = ?)",
+                (connection_id,),
+            )
             db.execute(
                 "DELETE FROM llm_models WHERE connection_id = ?", (connection_id,)
             )
