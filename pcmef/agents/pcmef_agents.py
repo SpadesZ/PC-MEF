@@ -366,8 +366,9 @@ def _class_distribution(proba: Sequence[float]) -> dict[str, float]:
 
 def build_case_evidence(
     *,
-    rgb: np.ndarray,
+    rgb: np.ndarray | None = None,
     tof: np.ndarray,
+    image: Mapping[str, str] | None = None,
     p_vision: Sequence[float],
     p_tof: Sequence[float],
     q_vision: float,
@@ -383,6 +384,12 @@ def build_case_evidence(
     這兩者在 pilot 被證實是**不同的東西**；payload 若只給一個數字，
     模型沒有辦法不把它們混為一談。
     """
+    if (rgb is None) == (image is None):
+        raise AgentError(
+            "supply exactly one of rgb (an array to encode) or image "
+            "(an already-encoded entry); supplying both makes it ambiguous "
+            "which one actually reached the provider"
+        )
     return {
         "schema_version": "1.0",
         "representation_mode": REPRESENTATION_MODE,
@@ -421,7 +428,13 @@ def build_case_evidence(
             **{k: round(float(v), 6) for k, v in sorted(duq.items())},
         },
         "gate_route": route,
-        EVIDENCE_IMAGES_KEY: [encode_image_evidence(rgb)],
+        # image 允許傳入**已編碼**的影像：real validation 把 perception 放在
+        # 主機（需要 torch）、把 provider 呼叫放在容器（需要 vault），兩段之間
+        # 傳的是 PNG bytes 而不是 EXR 路徑。編碼結果與 encode_image_evidence
+        # 相同，因此 evidence_hash 不受影響。
+        EVIDENCE_IMAGES_KEY: [
+            dict(image) if image is not None else encode_image_evidence(rgb)
+        ],
     }
 
 

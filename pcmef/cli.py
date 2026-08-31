@@ -2919,6 +2919,46 @@ def cmd_locks_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def cmd_llm_prepare_evidence(args: argparse.Namespace) -> int:
+    """主機端：用 frozen 模型算出 case 證據，供容器端的 real validation 取用。
+
+    分兩段是因為 perception 需要 torch（在主機），而 registry 與 vault 只存在
+    於容器的具名 volume。兩邊都掛得到 outputs/，所以拿它當交接點。
+    """
+    from pcmef.experiments.llm_real_validation import prepare_evidence_cases
+
+    path = prepare_evidence_cases(limit=args.cases, progress=lambda m: print(m))
+    print(f"now run inside the container: pcmef llm validate-agents --cases {args.cases}")
+    print(f"evidence: {path}")
+    return 0
+
+
+def cmd_llm_validate_agents(args: argparse.Namespace) -> int:
+    """freeze 前的 real-agent 驗證。任何一條 CHECK 失敗即 exit 2。
+
+    刻意用 formal-blocking 的 exit code：這道閘的用途就是擋住
+    「執行路徑還沒驗證就去凍 llm_runtime.lock」。
+    """
+    from pcmef.experiments.llm_real_validation import run_real_validation
+
+    document = run_real_validation(
+        store_dir=Path(args.registry_db).parent,
+        out_dir=args.out,
+        cases=args.cases,
+        progress=lambda message: print(message),
+    )
+    print()
+    for check in document["checks"]:
+        mark = "PASS" if check["passed"] else "FAIL"
+        print(f"  [{mark}] {check['check']}: {check['detail']}")
+    print(f"\nREADY_FOR_FINAL_E2 = {document['READY_FOR_FINAL_E2']}")
+    if not document["all_checks_passed"]:
+        failed = [c["check"] for c in document["checks"] if not c["passed"]]
+        print(f"failing checks: {failed}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _add_llm_store_arguments(parser: argparse.ArgumentParser) -> None:
     """LLM admin 子指令共用的儲存位置參數。
 
@@ -3539,6 +3579,22 @@ def build_parser() -> argparse.ArgumentParser:
     cache_audit = cache_sub.add_parser("audit", help="列出快取內容與費用帳")
     cache_audit.add_argument("--cache-root", default="artifacts/agents")
     cache_audit.set_defaults(func=cmd_llm_cache_audit)
+
+    prepare_cmd = llm_sub.add_parser(
+        "prepare-evidence",
+        help="在主機算好 real validation 用的 case 證據（需要 torch）",
+    )
+    prepare_cmd.add_argument("--cases", type=int, default=3)
+    prepare_cmd.set_defaults(func=cmd_llm_prepare_evidence)
+
+    validate_cmd = llm_sub.add_parser(
+        "validate-agents",
+        help="以真實 provider 跑四 agent 並檢查執行路徑（freeze 前的最後一道閘）",
+    )
+    validate_cmd.add_argument("--cases", type=int, default=3)
+    validate_cmd.add_argument("--out", default="outputs/llm_validation")
+    validate_cmd.add_argument("--registry-db", default="registry/llm_admin.db")
+    validate_cmd.set_defaults(func=cmd_llm_validate_agents)
 
     for llm_command in (
         conn_add, conn_list, conn_fetch, conn_select, conn_test, conn_lock,
