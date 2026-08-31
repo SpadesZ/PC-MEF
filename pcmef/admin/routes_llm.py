@@ -113,17 +113,35 @@ def _payload() -> dict:
     return {key: value for key, value in request.form.items()}
 
 
-def _redirect_with_flash(message: str, category: str = "ok"):
+def _redirect_with_flash(message: str, category: str = "ok", code: int = 302):
     """把訊息放進 server-side session 後轉址。
 
     **絕不把訊息放進 query string。** 訊息可能含使用者剛送出的 secret_ref，
     而 query string 會留在瀏覽器歷史、Referer header 與伺服器 access log。
     這是 auth.py 對 CSRF 權杖寫過的同一條理由。
+
+    code 可調是因為錯誤路徑必須用 303：見 _html_error()。
     """
     if message:
         session["flash"] = message
         session["flash_category"] = category
-    return redirect(url_for("llm_admin.page"))
+    return redirect(url_for("llm_admin.page"), code=code)
+
+
+def _html_error(message: str):
+    """表單送出後發生錯誤時，回一個瀏覽器**會跟隨**的轉址。
+
+    先前這裡是 `redirect(...), 400`（或 409）—— 一個帶 Location 標頭但狀態碼
+    不是 3xx 的回應。瀏覽器不跟隨非 3xx 的轉址，於是使用者看到的是 Flask
+    那頁 "Redirecting... You should be redirected automatically" 的裸 HTML，
+    **而錯誤訊息整個消失**：他只知道按下去壞了，不知道壞在哪。
+    實測發生在按 Unlock（該線路仍被 task 綁著，409）。
+
+    改用 303 See Other：語意正好是「你的 POST 收到了，結果請去 GET 那一頁」，
+    瀏覽器會跟隨並以 GET 取回頁面，flash 訊息就顯示得出來。
+    JSON API 那條路不受影響，仍回 400 / 409（§50 的契約）。
+    """
+    return _redirect_with_flash(message, "error", code=303)
 
 
 def _respond(body: dict, status: int = 200, message: str = "", category: str = "ok"):
@@ -143,12 +161,20 @@ def _dependency(error: DependencyError):
     body = {"error": str(error), "dependent_tasks": list(error.tasks)}
     if _wants_json():
         return jsonify(body), 409
-    return _redirect_with_flash(str(error), "error"), 409
+    return _html_error(str(error))
 
 
 @blueprint.errorhandler(AdminSecurityError)
 def _security(error: AdminSecurityError):
-    return jsonify({"error": str(error)}), 403
+    """CSRF / token 失敗。
+
+    HTML 表單也走轉址：這裡最常見的觸發原因是頁面開太久、CSRF 權杖過期，
+    而使用者原本會拿到一頁裸 JSON，看不出「重新整理就好」。
+    JSON API 仍維持 403。
+    """
+    if _wants_json():
+        return jsonify({"error": str(error)}), 403
+    return _html_error(f"{error}（請重新整理頁面後再試一次）")
 
 
 @blueprint.errorhandler(RegistryError)
@@ -158,7 +184,7 @@ def _bad_request(error: Exception):
     body = {"error": str(error)}
     if _wants_json():
         return jsonify(body), 400
-    return _redirect_with_flash(str(error), "error"), 400
+    return _html_error(str(error))
 
 
 # ---------------------------------------------------------------------------

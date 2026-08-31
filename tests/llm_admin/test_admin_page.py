@@ -235,6 +235,54 @@ def test_llm_ui_04_deleting_a_bound_model_profile_returns_409_with_dependencies(
     assert registry.get_model_profile(seeded.full_model_id) is not None
 
 
+def test_a_form_error_redirects_so_the_browser_shows_the_reason(client, csrf, seeded):
+    """表單送出後出錯，必須回一個瀏覽器**會跟隨**的轉址。
+
+    先前錯誤路徑回的是 `redirect(...), 409` —— 有 Location 標頭但狀態碼
+    不是 3xx。瀏覽器不跟隨非 3xx 轉址，使用者因此看到 Flask 那頁裸的
+    "Redirecting... You should be redirected automatically"，
+    **而錯誤訊息整個消失**。實測發生在按 Unlock 的時候。
+
+    JSON API 那條路仍必須回 409（見上面那個測試），兩者不衝突。
+    """
+    registry = seeded.registry
+    _verify(
+        registry, seeded.full_model_id,
+        (Capability.CHAT, Capability.VISION, Capability.STRUCTURED_JSON),
+    )
+    _lock_line(registry, seeded.connection_id, seeded.full_model_id)
+    for task_code in ("observation_agent", "physics_agent"):
+        registry.set_binding(
+            task_code, seeded.full_model_id, required_capabilities(task_code)
+        )
+
+    response = client.post(
+        f"/api/admin/llm/models/{seeded.full_model_id}/delete",
+        headers={"X-CSRF-Token": csrf},
+        data={},  # 表單送出，不是 JSON
+    )
+
+    assert response.status_code == 303, "非 3xx 的話瀏覽器不會跟隨"
+    assert response.headers["Location"].endswith("/admin/llm-setup")
+
+    # 跟隨轉址後，原因必須真的顯示在頁面上。
+    page = client.get("/admin/llm-setup").get_data(as_text=True)
+    assert "observation_agent" in page
+
+
+def test_a_stale_csrf_token_explains_itself_instead_of_dumping_json(client, seeded):
+    """CSRF 過期最常見的原因是頁面開太久，使用者需要看到「重新整理」。"""
+    response = client.post(
+        f"/api/admin/llm/connections/{seeded.connection_id}/lock",
+        headers={"X-CSRF-Token": "stale-token-that-does-not-match"},
+        data={},
+    )
+
+    assert response.status_code == 303
+    page = client.get("/admin/llm-setup").get_data(as_text=True)
+    assert "重新整理" in page
+
+
 def test_deleting_an_unbound_model_profile_succeeds(client, csrf, seeded):
     response = client.post(
         f"/api/admin/llm/models/{seeded.embed_only_id}/delete",
