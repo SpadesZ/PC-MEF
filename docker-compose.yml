@@ -1,7 +1,7 @@
 # PC-MEF Research System source maintenance contract
 # 上下游: 由 docker compose 讀取；建置 Dockerfile 定義的映像，
 #         把主機的 data/ outputs/ freeze/ registry/ secrets/ provenance/
-#         artifacts/ 掛進容器；console 服務對外開 127.0.0.1:8787。
+#         artifacts/ 掛進容器；console 服務對外開 127.0.0.1:8790。
 # 檔案路徑: docker-compose.yml
 # 產生時間: 2026-08-27 11:10 +08:00
 # 版本: v0.1.0
@@ -11,7 +11,7 @@
 #           這套系統是 local-first 研究平台。
 # 主要責任:
 #   1. pcmef 服務：一次性 CLI，預設不啟動（profile: cli）
-#   2. console 服務：本機網頁主控台，綁 127.0.0.1:8787
+#   2. console 服務：本機網頁主控台，主機端綁 127.0.0.1:8790
 #   3. 以具名 volume 保存 registry 與 secrets，避免權限與誤刪
 #   4. 以 bind mount 讓 data/ 與 outputs/ 在主機上直接可見
 # 維護提醒:
@@ -24,7 +24,7 @@
 # 驗證方式:
 #   - docker compose build
 #   - docker compose run --rm pcmef pytest -q
-#   - docker compose up console   然後開 http://127.0.0.1:8787
+#   - docker compose up console   然後開 http://localhost:8790
 # ------------------------------------------------------------
 
 name: pcmef
@@ -69,11 +69,16 @@ services:
     ports:
       # 只綁主機的 loopback。容器內聽 0.0.0.0 是因為要讓 Docker 轉發，
       # 但主機端的曝露面仍然只有 127.0.0.1。
-      # 預設 8801 而非 8787：8787 是 `pcmef admin serve` 的預設埠，
-      # 本機直接跑 CLI 時就會佔住它，接著 docker compose up 會撞埠而啟動失敗。
-      # 讓容器用另一個埠，本機與容器就能同時開著互相對照。
-      # 仍可由 PCMEF_CONSOLE_PORT 覆蓋。
-      - "127.0.0.1:${PCMEF_CONSOLE_PORT:-8801}:8787"
+      #
+      # 主機埠與 `pcmef admin serve` 的預設埠**刻意相同**（8790）：
+      # 不管是本機直接跑還是容器跑，操作者記一個 http://localhost:8790 就好。
+      # 代價是兩者不能同時開 —— 同時開時後啟動的那個會撞埠。
+      # 真的需要同時對照時用 PCMEF_CONSOLE_PORT 指定另一個埠：
+      #   PCMEF_CONSOLE_PORT=8791 docker compose up console
+      #
+      # 容器內側固定 8787，由上面的 command 明確指定，不受 DEFAULT_PORT 影響。
+      # 內側用哪個埠對操作者不可見，因此不需要跟著改。
+      - "127.0.0.1:${PCMEF_CONSOLE_PORT:-8790}:8787"
     environment:
       PCMEF_SECRET_MASTER_KEY: ${PCMEF_SECRET_MASTER_KEY:-}
       PCMEF_STUB_MODELS: ${PCMEF_STUB_MODELS:-}

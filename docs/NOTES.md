@@ -2142,8 +2142,8 @@ py -3.10 -m pcmef.cli surrogate smoke \
 **驗證**：
 ```
 py -3.10 -m pytest tests/console -v
-py -3.10 -m pcmef.cli admin serve            # http://127.0.0.1:8787/console
-docker compose up console                    # http://127.0.0.1:8801
+py -3.10 -m pcmef.cli admin serve            # http://localhost:8790/console
+docker compose up console                    # http://localhost:8790
 ```
 實機驗收：在瀏覽器按下「開始模擬」，log 逐行出現、結束時徽章由 running
 轉 succeeded、重新整理後四條 transient 曲線與能量長條圖正確呈現；
@@ -2154,9 +2154,12 @@ docker compose up console                    # http://127.0.0.1:8801
 - 不得把 log 用 `innerHTML` 附加。伺服器輸出含使用者可控的檔名與錯誤字串，
   必須以 `createTextNode` 附加，否則就是 XSS；
   `test_the_live_log_is_appended_as_text_not_html` 守住這一條。
-- Docker 的主機埠預設 **8801** 而非 8787：8787 是 `pcmef admin serve` 的
-  預設埠，本機直接跑 CLI 時就會佔住它，接著 `docker compose up` 會撞埠。
-  兩者用不同埠才能同時開著互相對照。
+- Docker 的主機埠與本機 CLI **同為 8790**（2026-08-31 起，原為 8787 / 8801）。
+  改動原因：8787 在開發機上被另一個常駐服務長期佔用，而 Flask 撞埠的錯誤
+  只出現在終端機 —— 瀏覽器看到的是**佔用者**回的頁面（實測是一個 503），
+  症狀因此看起來像「PC-MEF 壞了」，實際上它根本沒起來。
+  兩邊同埠的代價是不能同時開；真要同時對照時用
+  `PCMEF_CONSOLE_PORT=8791 docker compose up console`。
 
 相關：[NOTE-005]、[NOTE-012]、[NOTE-019]、[NOTE-022]
 

@@ -42,7 +42,13 @@ from pcmef.secrets.vault import DEFAULT_VAULT_PATH, SecretVault
 
 __all__ = ["create_app", "serve", "DEFAULT_PORT"]
 
-DEFAULT_PORT = 8787
+#: 本機主控台的預設埠。
+#:
+#: 2026-08-31 由 8787 改為 8790：8787 被這台機器上另一個常駐服務長期佔用，
+#: 而 Flask 撞埠時的錯誤訊息不會出現在瀏覽器裡 —— 瀏覽器看到的是**佔用者**
+#: 回的頁面（實測是一個 503），於是症狀看起來像「PC-MEF 壞了」，
+#: 實際上 PC-MEF 根本沒起來。換一個沒人用的埠比每次都重新診斷一次便宜。
+DEFAULT_PORT = 8790
 
 _HERE = Path(__file__).resolve().parent
 

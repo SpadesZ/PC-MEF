@@ -158,7 +158,7 @@ def _bad_request(error: Exception):
 def index():
     """根路徑轉到執行台 —— 那才是日常最常用的頁面。
 
-    留一個 404 在根路徑沒有任何好處：操作者打開 http://127.0.0.1:8787
+    留一個 404 在根路徑沒有任何好處：操作者打開 http://localhost:8790
     看到 Not Found，只會以為服務壞了。
     """
     return redirect(url_for("console.page"))

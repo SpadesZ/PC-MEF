@@ -20,7 +20,7 @@ cp .env.example .env      # 填 PCMEF_ADMIN_TOKEN 與 PCMEF_SECRET_MASTER_KEY
 docker compose build
 docker compose run --rm pcmef version          # 一次性 CLI
 docker compose run --rm --entrypoint python pcmef -m pytest -q
-docker compose up console                      # http://127.0.0.1:8787
+docker compose up console                      # http://localhost:8790
 ```
 
 已實測：容器內 **1101 passed**、`sim smoke` 算得出 transient，
@@ -97,7 +97,7 @@ py -3.10 -m pcmef.cli llm binding audit
 py -3.10 -m pcmef.cli llm snapshot                   # 算 candidate hash 並列出未達前提
 py -3.10 -m pcmef.cli llm snapshot --freeze          # 前提齊備才寫 lock，否則 exit 2
 py -3.10 -m pcmef.cli llm cache audit --formal
-py -3.10 -m pcmef.cli admin serve                    # 127.0.0.1:8787/admin/llm-setup
+py -3.10 -m pcmef.cli admin serve                    # localhost:8790/admin/llm-setup
 ```
 
 **無憑證也能把整條流程走完**（供交接驗證）：
@@ -2352,8 +2352,8 @@ py -3.10 -m pytest tests/simulation tests/surrogate -q
 網頁執行台：**一鍵跑模擬 → 即時逐行看輸出 → 看曲線與數據**。
 
 ```powershell
-py -3.10 -m pcmef.cli admin serve      # http://127.0.0.1:8787/console
-docker compose up console              # http://127.0.0.1:8801
+py -3.10 -m pcmef.cli admin serve      # http://localhost:8790/console
+docker compose up console              # http://localhost:8790
 ```
 
 | 頁面 | 內容 |

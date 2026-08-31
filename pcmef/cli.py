@@ -3541,7 +3541,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--host", default="127.0.0.1",
         help="預設只綁本機；非 loopback 需 admin token 與 TLS（SRC-SAI §46）",
     )
-    serve_cmd.add_argument("--port", type=int, default=8787)
+    # 預設值從 admin.app 取，不在這裡再寫一次數字：兩處各寫一份的話，
+    # 改了一處另一處就會靜靜指向錯的埠，而症狀是「打不開」，不是錯誤訊息。
+    from pcmef.admin.app import DEFAULT_PORT as _CONSOLE_PORT
+
+    serve_cmd.add_argument("--port", type=int, default=_CONSOLE_PORT)
     serve_cmd.add_argument(
         "--enable-ui-bind", action="store_true",
         help="開放 UI 的 Bind 按鈕；仍只寫 draft registry，lock 一律走 CLI",
