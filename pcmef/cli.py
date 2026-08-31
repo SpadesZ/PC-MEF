@@ -1307,6 +1307,92 @@ def _print_stage0_report(report: dict, path: Path) -> None:
     print(f"report: {path.resolve()}")
 
 
+def cmd_perception_gate(args: argparse.Namespace) -> int:
+    """gate-validation：溫度、severity、門檻全部在這裡決定。"""
+    import subprocess
+
+    from pcmef.perception.gate import run_gate_validation
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+
+    document = run_gate_validation(
+        ds_dir=args.ds_dir, gate_val_dir=args.gate_val_dir, out_dir=args.out,
+        fusion_weight=args.fusion_weight, code_version=commit, progress=say,
+    )
+    print("\ngate validation")
+    for name, block in document["calibration"].items():
+        b, a = block["before"], block["after"]
+        print(f"  {name:7s} T={block['temperature']:.4f}  "
+              f"NLL {b['nll']:.4f}->{a['nll']:.4f}  "
+              f"ECE {b['ece']:.4f}->{a['ece']:.4f}  "
+              f"Brier {b['brier']:.4f}->{a['brier']:.4f}  "
+              f"acc {b['accuracy']:.3f}->{a['accuracy']:.3f}  "
+              f"preds_unchanged={block['predictions_unchanged']}")
+    print(f"\n  severity: vision={document['stress']['severity']['vision']} "
+          f"tof={document['stress']['severity']['tof']}")
+    print(f"  gate rule: {json.dumps(document['gate_rule'], ensure_ascii=False)[:200]}")
+    print(f"  gate-validation routed accuracy: "
+          f"{document['gate_search']['gate_validation_accuracy']:.4f}")
+    print(f"  escalation rate: {document['gate_search']['escalation_rate']:.4f}")
+    print("\n  condition summary (gate-validation)")
+    for condition, block in document["stress"]["condition_summary"].items():
+        print(f"    {condition:16s} n={block['n']:4d} vision={block['vision_accuracy']:.3f} "
+              f"tof={block['tof_accuracy']:.3f}  V>T={block['vision_right_tof_wrong']:3d} "
+              f"T>V={block['tof_right_vision_wrong']:3d} both_wrong={block['both_wrong']:3d}")
+    return 0
+
+
+def cmd_perception_e2(args: argparse.Namespace) -> int:
+    """Formal E2。一次性 —— 跑完就是結論。"""
+    import subprocess
+
+    from pcmef.perception.gate import run_formal_e2
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+
+    document = run_formal_e2(
+        ds_dir=args.ds_dir, gate_rule_path=args.gate_rule, e2_dir=args.e2_dir,
+        out_dir=args.out, code_version=commit, progress=say,
+    )
+    print("\nFormal E2")
+    print(f"  arbiter: {document['arbiter'][:80]}...")
+    print(f"  LLM arm evaluated: {document['llm_arm_evaluated']}")
+    print(f"\n  {'arm':14s} {'accuracy':>9s} {'macroF1':>9s} {'errors':>7s}")
+    total = document["dataset"]["total_rows"]
+    for name, block in document["results"].items():
+        errors = int(round((1 - block["accuracy"]) * total))
+        print(f"  {name:14s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f} "
+              f"{errors:>7d}")
+    print("\n  per condition accuracy")
+    conditions = sorted(next(iter(document["per_condition"].values())))
+    print(f"  {'arm':14s} " + " ".join(f"{c:>16s}" for c in conditions))
+    for name, block in document["per_condition"].items():
+        print(f"  {name:14s} " + " ".join(
+            f"{block[c]['accuracy']:>16.4f}" for c in conditions))
+    print("\n  PC-MEF vs baselines (paired bootstrap over base scenarios)")
+    for name, block in document["comparisons"].items():
+        print(f"    {name:32s} delta {block['delta_accuracy']:+.4f}  "
+              f"CI [{block['ci_lower']:+.4f}, {block['ci_upper']:+.4f}]  "
+              f"h={block['cohens_h']:+.3f}  sig={block['significant_at_95']}")
+    routing = document["routing"]
+    print(f"\n  routing: {routing['counts']}")
+    print(f"  LLM call rate (would-be): {routing['llm_call_rate']:.4f}  "
+          f"actual LLM calls: {routing['llm_calls_actually_made']}")
+    return 0
+
+
 def cmd_perception_dataset(args: argparse.Namespace) -> int:
     """產生 perception 的成對 synthetic dataset。算圖在子行程（NOTE-012）。"""
     import subprocess
@@ -3200,6 +3286,24 @@ def build_parser() -> argparse.ArgumentParser:
     perception_train.add_argument("--batch-size", type=int, default=16)
     perception_train.add_argument("--lr", type=float, default=1e-3)
     perception_train.set_defaults(func=cmd_perception_train)
+
+    perception_gate = perception_sub.add_parser(
+        "gate", help="溫度校準 + severity 選定 + D/U/Q 門檻（只看 gate-validation）"
+    )
+    perception_gate.add_argument("--ds-dir", default="outputs/perception/ds_v2")
+    perception_gate.add_argument("--gate-val-dir", default="outputs/perception/gate_validation")
+    perception_gate.add_argument("--out", default="outputs/perception/gate")
+    perception_gate.add_argument("--fusion-weight", type=float, default=0.5)
+    perception_gate.set_defaults(func=cmd_perception_gate)
+
+    perception_e2 = perception_sub.add_parser(
+        "e2", help="Formal E2：baseline vs PC-MEF，一次性，不得改門檻重跑"
+    )
+    perception_e2.add_argument("--ds-dir", default="outputs/perception/ds_v2")
+    perception_e2.add_argument("--gate-rule", default="outputs/perception/gate/gate_rule.json")
+    perception_e2.add_argument("--e2-dir", default="outputs/perception/formal_e2")
+    perception_e2.add_argument("--out", default="outputs/perception/e2")
+    perception_e2.set_defaults(func=cmd_perception_e2)
 
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)

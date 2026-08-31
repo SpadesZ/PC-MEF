@@ -402,6 +402,13 @@ def run_baselines(
             split: evaluate(f"{name}/{split}", probabilities[name][split], splits[split].labels)
             for split in ("train", "val", "test")
         }
+        # 凍結權重：後續 gate / E2 一律載入這一份，不得重訓也不得再調參。
+        # 訓練是決定性的（固定 seed，見 test_training_is_reproducible），
+        # 因此這份 checkpoint 與報告裡的分數是同一個模型。
+        import torch as _torch
+
+        checkpoint = directory / f"{name}_weights.pt"
+        _torch.save(model.state_dict(), checkpoint)
         parameters = sum(p.numel() for p in model.parameters())
         results[name] = {
             "architecture": str(model),
@@ -411,6 +418,7 @@ def run_baselines(
             "batch_size": batch_size,
             "learning_rate": lr,
             "seed": seed,
+            "weights_path": checkpoint.as_posix(),
             "history": history,
             **report,
             "overfitting": _overfitting(history, report),

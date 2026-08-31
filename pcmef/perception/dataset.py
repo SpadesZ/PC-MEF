@@ -55,6 +55,7 @@ __all__ = [
     "split_plan",
     "family_split_plan",
     "build_dataset",
+    "build_flat_dataset",
     "fit_preprocessing",
     "apply_rgb_preprocessing",
     "apply_tof_preprocessing",
@@ -316,6 +317,102 @@ def build_dataset(
         "samples": samples,
     }
     manifest["leakage_audit"] = audit_split_leakage(manifest)
+    (run_dir / "dataset_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def build_flat_dataset(
+    family_indices: list[int],
+    family_domain: int,
+    realizations_per_family: int,
+    split_label: str,
+    rgb_spp: int | None = None,
+    out_root: str | Path = "outputs/perception",
+    run_name: str | None = None,
+    freeze_dir: str | Path = "freeze",
+    repo_root: str | Path = ".",
+    code_version: str = "",
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """產生**一整包同屬一個 split** 的 family 集合。
+
+    給 gate-validation 與 Formal E2 用：兩者各自是一個獨立的 family 區段，
+    與 ds_v2 的 0..19 不重疊。`family_domain` 是 family_variation 的正規化
+    分母 —— 用與 ds_v2 不同的 domain，可以確保 nuisance 取值本身也不同，
+    而不是只有索引不同。實際的互斥性由 audit 以 physical_scene_family
+    逐一比對確認，不靠推論。
+    """
+    from pcmef.simulation.paired import (
+        NUISANCE_PROVENANCE,
+        NUISANCE_RANGES,
+        family_scenario_seed,
+        family_variation,
+        generate_paired_sample,
+        load_calibrated_simulator,
+    )
+
+    say = progress or (lambda _m: None)
+    identity, calibration = load_calibrated_simulator(freeze_dir, repo_root)
+    stamp = run_name or datetime.now(timezone.utc).strftime("flat_%Y%m%dT%H%M%SZ")
+    run_dir = Path(out_root) / stamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    samples: list[dict[str, Any]] = []
+    for class_label in CLASS_ORDER:
+        for family_index in family_indices:
+            variation = family_variation(class_label, family_index, family_domain)
+            for realization in range(realizations_per_family):
+                seed = family_scenario_seed(class_label, family_index, realization)
+                scenario_id = (
+                    f"{class_label.lower().replace('-', '_')}"
+                    f"_f{family_index:02d}_r{realization:02d}"
+                )
+                sample = generate_paired_sample(
+                    identity, calibration, scenario_id, class_label, seed,
+                    run_dir / split_label, rgb_spp=rgb_spp, variation=variation,
+                )
+                row = sample.to_dict()
+                row["split"] = split_label
+                row["family_index"] = family_index
+                row["realization_index"] = realization
+                row["physical_scene_family"] = physical_scene_family(
+                    sample.scene_parameters
+                )
+                samples.append(row)
+        say(f"  {class_label}: {len(family_indices)} families")
+
+    manifest = {
+        "manifest_id": f"perception_{split_label}",
+        "scientific_result": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "code_version": code_version,
+        "run_dir": run_dir.as_posix(),
+        "split_label": split_label,
+        "family_indices": list(family_indices),
+        "family_domain": family_domain,
+        "realizations_per_family": realizations_per_family,
+        "families_per_class": len(family_indices),
+        "class_order": list(CLASS_ORDER),
+        "feature_order": list(TOF_SCHEMA),
+        "render": {
+            "tof_spp": int(identity.simulation_settings["spp"]),
+            "rgb_spp": int(
+                rgb_spp if rgb_spp is not None else identity.simulation_settings["spp"]
+            ),
+        },
+        "physical_variation": {
+            "axes": dict(NUISANCE_RANGES),
+            "provenance": dict(NUISANCE_PROVENANCE),
+        },
+        "counts": {split_label: {c: sum(1 for s in samples if s["class_label"] == c)
+                                 for c in CLASS_ORDER}},
+        "totals": {split_label: len(samples)},
+        "simulator": identity.to_artifact(),
+        "samples": samples,
+    }
     (run_dir / "dataset_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
