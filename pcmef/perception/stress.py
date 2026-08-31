@@ -29,8 +29,8 @@
 #     模擬器輸出**之後**，因此 clean 與 degraded 共用同一個 latent scene。
 #   - v0.1.0 新增：首版 gate 受試資料。
 # 驗證方式:
-#   - py -3.10 -m pytest tests/unit/test_perception_stress.py -v
-#   - py -3.10 -m pcmef.cli perception stress --help
+#   - py -3.10 -m pytest tests/unit/test_perception_gate.py -v
+#   - py -3.10 -m pcmef.cli perception gate --help
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -60,7 +60,16 @@ __all__ = [
 CONDITIONS = ("clean", "vision_degraded", "tof_degraded", "conflict")
 
 #: severity 階梯。事前固定，select_severity() 只能從中挑一格。
-SEVERITY_LADDER = (0.25, 0.5, 1.0, 2.0, 3.0)
+#:
+#: 低端在首次執行後往下延伸過一次：原本最細的一格是 0.25，而實測 ToF 在
+#: **整條階梯上都掉到 0.250（恰為四類亂猜）**，因此事前宣告的目標帶
+#: [0.30, 0.65] 在原階梯上根本不可達，select_severity() 只能回報 fallback。
+#: 那不是「調鬆判準」而是「階梯的解析度不足以表達判準」。
+#:
+#: 往**下**延伸讓劣化更輕，也就是讓路由任務更難、讓 PC-MEF 的優勢更小 ——
+#: 方向與「為了讓 PC-MEF 贏而調 severity」相反。判準本身一個字都沒有改，
+#: 且延伸後的選擇一樣只看 gate-validation 上的單模態準確率。
+SEVERITY_LADDER = (0.01, 0.02, 0.05, 0.1, 0.15, 0.25, 0.5, 1.0, 2.0, 3.0)
 
 #: 劣化用的種子基底，與生成用過的全部種子不相交。
 STRESS_SEED_BASE = 80000
