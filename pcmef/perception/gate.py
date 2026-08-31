@@ -750,3 +750,150 @@ def run_formal_e2(
         encoding="utf-8",
     )
     return document
+
+
+# ---------------------------------------------------------------------------
+# 可靠度 q_m —— 與 p_m(y|x) 完全分離
+# ---------------------------------------------------------------------------
+
+#: q_m 的來源白名單。**max softmax 不在其中，也永遠不得加入。**
+#:
+#: pilot（families 28-35）確立的 negative result：溫度校準把 ToF 調到
+#: T = 0.0498，於是 ToF 一旦劣化就「高信心地錯」，而信心加權仲裁正好被
+#: 拉向錯的那一邊（conflict 0.302，單看 Vision 反而有 0.677）。
+#: 那不是仲裁器寫壞了，是**把預測信心當成感測可靠度**這個假設本身錯了。
+RELIABILITY_EVIDENCE: tuple[str, ...] = (
+    "sensor_quality",       # Q：由輸入本身算出的劣化證據（銳利度 / SNR）
+    "degradation_margin",   # Q 相對於 gate-validation 門檻的裕度
+    "cross_modal_support",  # D：另一個模態是否支持（同意時互相加分）
+)
+
+
+@dataclass(frozen=True)
+class ReliabilityModel:
+    """由 gate-validation 的 clean 分佈定出的可靠度標定。
+
+    只記錄「乾淨時 Q 長什麼樣」與門檻，因此 q_m 是一個**相對於已知乾淨
+    基線的感測品質分數**，而不是模型對自己的信心。
+    """
+
+    q_vision_clean_median: float
+    q_tof_clean_median: float
+    q_vision_degraded_anchor: float
+    q_tof_degraded_anchor: float
+    q_vision_scale: float
+    q_tof_scale: float
+    fitted_on: str = "gate_validation_clean"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "q_vision_clean_median": self.q_vision_clean_median,
+            "q_tof_clean_median": self.q_tof_clean_median,
+            "q_vision_degraded_anchor": self.q_vision_degraded_anchor,
+            "q_tof_degraded_anchor": self.q_tof_degraded_anchor,
+            "q_vision_scale": self.q_vision_scale,
+            "q_tof_scale": self.q_tof_scale,
+            "fitted_on": self.fitted_on,
+            "anchor_rule": (
+                "the sigmoid is centred on the clean 5th percentile and scaled by "
+                "the clean IQR, both from the gate-validation CLEAN subset only. It "
+                "deliberately does NOT reuse the gate's q thresholds: those were "
+                "fitted as routing cuts on the full stress set, and the ToF one "
+                "(17.008) sits ABOVE the clean median (15.341), so using it as a "
+                "reliability centre would score even clean ToF as unreliable."
+            ),
+            "evidence_sources": list(RELIABILITY_EVIDENCE),
+            "forbidden_sources": [
+                "max softmax probability",
+                "predictive entropy of the modality being scored",
+                "anything derived from p_m(y|x)",
+            ],
+            "why": (
+                "The pilot established that classifier confidence is not modality "
+                "reliability: temperature scaling made ToF sharp (T=0.0498), so a "
+                "degraded ToF is confidently wrong and a confidence-weighted arbiter "
+                "is pulled towards the wrong modality. q_m therefore reads only "
+                "sensor-side degradation evidence and cross-modal support."
+            ),
+        }
+
+
+def reliability_scores(
+    signals: dict[str, np.ndarray], model: ReliabilityModel
+) -> dict[str, np.ndarray]:
+    """q_vision / q_tof in [0, 1]。**完全不看 p_m(y|x)。**
+
+    每個模態的 q 由兩部分相乘：
+      * degradation margin：Q 相對於門檻與乾淨中位數的位置，
+        壓成 [0, 1]。低於門檻 -> 迅速趨近 0。
+      * cross-modal support：兩個模態一致時（D 小）互相加分。
+        一致不能證明兩個都對，但它是**獨立於各自信心**的證據，
+        因此可以進 q；不一致時這一項退為中性 0.5 而不是 0，
+        否則 conflict 會把兩邊的 q 一起壓垮而讓 q 失去區分力。
+    """
+    def margin(q: np.ndarray, anchor: float, scale: float) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-(q - anchor) / max(scale, 1e-9)))
+
+    m_vision = margin(signals["Q_vision"], model.q_vision_degraded_anchor,
+                      model.q_vision_scale)
+    m_tof = margin(signals["Q_tof"], model.q_tof_degraded_anchor, model.q_tof_scale)
+    support = 0.5 + 0.5 * (1.0 - np.clip(signals["D"], 0.0, 1.0))
+    return {
+        "q_vision": np.clip(m_vision * support, 0.0, 1.0),
+        "q_tof": np.clip(m_tof * support, 0.0, 1.0),
+    }
+
+
+def fit_reliability_model(
+    signals: dict[str, np.ndarray], clean_mask: np.ndarray, rule: GateRule
+) -> ReliabilityModel:
+    """由 gate-validation 的 **clean** 子集定出可靠度標定。
+
+    刻意**不**沿用 gate 的 q 門檻。那兩個值是在完整 stress set 上以
+    routing accuracy 搜出來的**切點**，不是「劣化邊界」——實測 ToF 那個
+    切點 17.008 落在 clean 中位數 15.341 **之上**，拿它當可靠度中心會讓
+    乾淨的 ToF 也被評為不可靠（實測 q_tof = 0.180）。
+    改以 clean 分佈自己的第 5 百分位當中心、IQR 當尺度：
+    「這個輸入看起來還像不像乾淨時的樣子」。
+    """
+    def calibrate(values: np.ndarray) -> tuple[float, float]:
+        clean = values[clean_mask]
+        p5, p25, p75 = np.percentile(clean, [5.0, 25.0, 75.0])
+        return float(p5), float(max(p75 - p25, 1e-9))
+
+    v_anchor, v_scale = calibrate(signals["Q_vision"])
+    t_anchor, t_scale = calibrate(signals["Q_tof"])
+    return ReliabilityModel(
+        q_vision_clean_median=float(np.median(signals["Q_vision"][clean_mask])),
+        q_tof_clean_median=float(np.median(signals["Q_tof"][clean_mask])),
+        q_vision_degraded_anchor=v_anchor,
+        q_tof_degraded_anchor=t_anchor,
+        q_vision_scale=v_scale,
+        q_tof_scale=t_scale,
+    )
+
+
+#: 可靠度路由的三條分支（事前宣告，與 pilot 的規則同一套門檻）。
+RELIABILITY_ROUTING = (
+    "1) exactly one modality reliable -> that modality dominates; "
+    "2) both reliable and they agree -> traditional fixed fusion; "
+    "3) both weak, or both reliable but disagreeing -> escalate to the arbiter."
+)
+
+RELIABLE_MARGIN = 0.5
+
+
+def reliability_route(
+    q: dict[str, np.ndarray], signals: dict[str, np.ndarray], rule: GateRule
+) -> np.ndarray:
+    """回傳每筆的路由標籤。純函式，只看 q 與 D。"""
+    reliable_v = q["q_vision"] >= RELIABLE_MARGIN
+    reliable_t = q["q_tof"] >= RELIABLE_MARGIN
+    agree = signals["D"] <= rule.disagreement_threshold
+
+    route = np.empty(len(signals["D"]), dtype=object)
+    route[:] = "escalated"
+    route[reliable_v & ~reliable_t] = "trust_vision"
+    route[reliable_t & ~reliable_v] = "trust_tof"
+    route[reliable_v & reliable_t & agree] = "fusion"
+    return route

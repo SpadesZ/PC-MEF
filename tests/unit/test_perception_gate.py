@@ -315,3 +315,74 @@ def test_paired_bootstrap_reports_no_difference_when_there_is_none():
     assert result["ci_lower"] == pytest.approx(0.0)
     assert result["ci_upper"] == pytest.approx(0.0)
     assert result["significant_at_95"] is False
+
+
+# ---------------------------------------------------------------------------
+# 可靠度與預測信心分離
+# ---------------------------------------------------------------------------
+
+
+def test_reliability_never_reads_the_predictive_distribution():
+    """q_m 必須完全不隨 p_m(y|x) 改變。
+
+    pilot 的 negative result 就是「把信心當可靠度」造成的：
+    ToF 劣化後高信心地錯，信心加權仲裁被拉向錯的一邊。
+    """
+    from pcmef.perception.gate import ReliabilityModel, reliability_scores
+
+    model = ReliabilityModel(
+        q_vision_clean_median=4.0, q_tof_clean_median=15.0,
+        q_vision_degraded_anchor=2.0, q_tof_degraded_anchor=13.0,
+        q_vision_scale=1.0, q_tof_scale=1.0,
+    )
+    base = {"D": np.array([0.2]), "Q_vision": np.array([4.0]), "Q_tof": np.array([15.0]),
+            "U_vision": np.array([0.1]), "U_tof": np.array([0.9])}
+    flipped = {**base, "U_vision": np.array([0.9]), "U_tof": np.array([0.1])}
+    assert reliability_scores(base, model) == pytest.approx(
+        reliability_scores(flipped, model)
+    ), "q_m changed when only the predictive uncertainty changed"
+
+
+def test_reliability_falls_when_sensor_quality_falls():
+    from pcmef.perception.gate import ReliabilityModel, reliability_scores
+
+    model = ReliabilityModel(
+        q_vision_clean_median=4.0, q_tof_clean_median=15.0,
+        q_vision_degraded_anchor=2.0, q_tof_degraded_anchor=13.0,
+        q_vision_scale=1.0, q_tof_scale=1.0,
+    )
+    good = {"D": np.array([0.1]), "Q_vision": np.array([5.0]), "Q_tof": np.array([16.0])}
+    bad = {"D": np.array([0.1]), "Q_vision": np.array([0.5]), "Q_tof": np.array([16.0])}
+    assert reliability_scores(bad, model)["q_vision"][0] < \
+        reliability_scores(good, model)["q_vision"][0]
+
+
+def test_max_softmax_is_a_forbidden_reliability_source():
+    from pcmef.perception.gate import RELIABILITY_EVIDENCE, ReliabilityModel
+
+    assert "max_softmax" not in RELIABILITY_EVIDENCE
+    forbidden = ReliabilityModel(
+        q_vision_clean_median=1.0, q_tof_clean_median=1.0,
+        q_vision_degraded_anchor=0.0, q_tof_degraded_anchor=0.0,
+        q_vision_scale=1.0, q_tof_scale=1.0,
+    ).to_dict()["forbidden_sources"]
+    assert any("softmax" in f for f in forbidden)
+
+
+def test_reliability_routing_has_the_three_declared_branches():
+    from pcmef.perception.gate import reliability_route
+
+    rule = _rule(disagreement_threshold=0.5)
+    q = {"q_vision": np.array([0.9, 0.2, 0.9, 0.2]),
+         "q_tof": np.array([0.2, 0.9, 0.9, 0.2])}
+    signals = {"D": np.array([0.1, 0.1, 0.1, 0.9])}
+    route = reliability_route(q, signals, rule)
+    assert list(route) == ["trust_vision", "trust_tof", "fusion", "escalated"]
+
+
+def test_both_reliable_but_disagreeing_escalates():
+    from pcmef.perception.gate import reliability_route
+
+    rule = _rule(disagreement_threshold=0.3)
+    q = {"q_vision": np.array([0.9]), "q_tof": np.array([0.9])}
+    assert reliability_route(q, {"D": np.array([0.8])}, rule)[0] == "escalated"

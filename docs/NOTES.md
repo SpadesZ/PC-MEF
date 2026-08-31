@@ -324,6 +324,49 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-046 Agent 的 representation mode 與 bounded retry 次數核定
+
+**決策日期**：2026-08-31
+
+**適用範圍**：`configs/base.yaml` 的 `agents.representation_mode` 與
+`agents.retry.max_attempts`；`pcmef/perception/agents.py` 的 prompt 組裝與
+retry 迴圈；後續任何呼叫四個 agent 的 formal run。
+
+**決策**：
+
+1. **`agents.representation_mode = FIXED_SUMMARY`。**
+   ToF 的 500x4 逐點序列不進 prompt，改以固定欄位的統計摘要表示。
+2. **`agents.retry.max_attempts = 2`**（第一次 + 一次 retry）。
+   耗盡即 **ABORT FORMAL RUN**，**不得 drop case**。
+
+**原因**：
+
+FULL_500x4 的 token 成本隨 recording 線性成長，而 500 個點絕大多數是
+同分佈的重複取樣 —— 付出的 token 買不到對應的資訊量。更關鍵的是
+**長度一致性**：不同長度的 prompt 會讓 case 之間的條件不同，那是一個
+在比較兩個 arm 時無法被控制掉的額外變因。FIXED_SUMMARY 讓每個 case 的
+prompt 結構完全相同，模態證據的差異因此是唯一的變數。
+
+retry 取 2 而不是更多：bounded retry 的意義是「暫態失敗可以再試一次，
+但系統性失敗必須被看見」。次數放大只會把系統性失敗磨成偶發失敗。
+耗盡後 abort 而不是 drop，是因為丟掉一個算不出來的 case 會讓分母悄悄
+變小 —— 那正是 SRC-SAI §28 / FR-013 要防的事：一個 100 case 的實驗
+悄悄變成 97 case，而報告上仍然寫 100。
+
+兩項都在 families 36-43 的 Formal E2 **產生之前**核定，且核定當下
+沒有看過任何 final 結果。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli config check
+```
+
+`agents.representation_mode` 與 `agents.retry.max_attempts` 不再出現在
+待核定清單（由 10 項降為 8 項）。
+
+---
+
 ## NOTE-044 Ambient 抖動的下界、σ_MC 退化的三個分支，與不可行登記界線的可行域推導
 
 **決策日期**：2026-08-30

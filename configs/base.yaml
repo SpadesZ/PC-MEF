@@ -246,13 +246,26 @@ agents:
   task_codes: [observation_agent, physics_agent, visual_semantic_agent, arbitration_agent]
   # SRC-SAI §18：representation mode 由 Model/Gate Validation Split 決定，
   # 決定後 formal scenarios 全程一致。
-  representation_mode: !required
-    source: "SRC-SAI §18"
-    reason: "FULL_500x4 或 FIXED_SUMMARY 取決於 token budget 實測，需在 validation 後鎖定"
+  # 教授核定 2026-08-31（NOTE-046）。核定發生在 families 36-43 的
+  # Formal E2 產生**之前**，且未看過任何 final 結果。
+  representation_mode: FIXED_SUMMARY
+  representation_mode_decided_by: advisor
+  representation_mode_decided_on: "2026-08-31"
+  representation_mode_source: "SRC-SAI §18"
+  representation_mode_rationale: >
+    FULL_500x4 會把 500x4 逐點序列塞進 prompt，token 成本隨 recording 線性成長
+    且絕大多數是同分佈的重複取樣；FIXED_SUMMARY 以固定欄位的統計摘要取代，
+    在 token budget 內而且逐 case 長度一致。長度一致本身是必要的：
+    不同長度的 prompt 會讓 case 之間的條件不同，那是額外變因。
   retry:
-    max_attempts: !required
-      source: "SRC-SAI §28 / FR-013"
-      reason: "bounded retry 次數需核定；耗盡後一律 ABORT FORMAL RUN，不得 drop case"
+    # 第一次 + 一次 retry = 2。耗盡即 ABORT FORMAL RUN，**不得 drop case** ——
+    # 丟掉一個算不出來的 case 會讓分母悄悄變小，而那正是 bounded retry
+    # 要防的事（SRC-SAI §28 / FR-013）。
+    max_attempts: 2
+    decided_by: advisor
+    decided_on: "2026-08-31"
+    source: "SRC-SAI §28 / FR-013"
+    on_exhaustion: ABORT_FORMAL_RUN
 
 # ---------------------------------------------------------------------------
 # E2

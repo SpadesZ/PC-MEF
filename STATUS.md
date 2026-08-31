@@ -182,7 +182,7 @@ sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment
 | M2 Surrogate + E1 | **`E1 CLOSED — partial calibration success`** | 五階段跑完、E1 開啟一次並得 PASS。**只有 Ambient Rate 真的改善**，其餘三個 feature 維持 initial physics-constrained state。見「E1 已完成」專節 |
 | M3 Post-E1 Split | **`paired bridge smoke PASS / ready for perception`** | 成對 RGB-ToF 生成路徑已驗收（6/6 check PASS，identity `a00b3969…`）。synthetic split policy lock 本身仍未凍 |
 | M4 Perception | **corrective pass 完成** | ds_v2：Vision 1.000 / ToF 0.988 / Fusion 1.000（family-level split，80 families，無 leakage）。**但三者都在天花板，量不出 gate 價值**，見「M4 corrective pass 結果」 |
-| M5 Reliability/Gate | **D/U/Q 路由已評估；LLM 臂阻塞** | Formal E2 完成：PC-MEF 勝過 fusion/tof-only 但**未勝過 vision-only**。LLM 仲裁未設定亦未核定，見「Formal E2」專節 |
+| M5 Reliability/Gate | **pilot 完成；final E2 待 LLM** | deterministic-gate pilot（families 28-35）：路由成功、信心加權仲裁失敗。families 36-43 **尚未產生亦未動用**，保留給接上 LLM 後的 final Formal E2 |
 | M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
 | M8 Formal E2 | 未開始 | 依賴全部 |
@@ -1091,7 +1091,85 @@ Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
 
 ---
 
-## Formal E2 —— PC-MEF **未勝過最佳單模態**（2026-08-31）
+## Full PC-MEF —— **阻塞：沒有 LLM provider**（2026-08-31）
+
+### 已完成
+
+| 項目 | 狀態 |
+|---|---|
+| `agents.representation_mode = FIXED_SUMMARY` | 已核定並寫入 config（NOTE-046） |
+| `agents.retry.max_attempts = 2`（耗盡即 ABORT，不得 drop case） | 已核定並寫入 config（NOTE-046） |
+| families 28-35 改名為 deterministic-gate pilot / pre-LLM benchmark | 完成，結果一字未改 |
+| `q_m` 與 `p_m(y|x)` 分離 | 完成，見下 |
+| 待核定數值 | 由 10 項降為 8 項 |
+
+### 阻塞：LLM provider 不存在
+
+```
+.env                             不存在（只有 .env.example）
+data/llm_registry.sqlite3        不存在 —— 沒有任何 connection 被建立
+freeze/llm_runtime.lock.json     不存在
+```
+
+因此**無法**執行：接 provider、跑 capability probes、凍結 `llm_runtime.lock`、
+以及四個 agent 的任何一次真實呼叫。Full PC-MEF 這個 arm 在這台機器上
+跑不起來，不是「跑了但沒贏」。
+
+### 因此 families 36-43 **未產生、未動用**
+
+final Formal E2 是一次性的。把唯一一組沒讀過的 family 花在一個
+**缺了它要測的那個 arm** 的比較上，等於用掉最後一個乾淨基準去測一個
+不完整的東西。因此 36-43 保留原封不動，等 LLM 接上再跑。
+
+### `q_m` 與 `p_m(y|x)` 的分離（已實作，並在 gate-validation 上量過）
+
+pilot 的 negative result 指出「把預測信心當可靠度」是錯的。新的 `q_m`
+只讀三種證據：`sensor_quality`、`degradation_margin`、`cross_modal_support`，
+且 `max softmax` 被**明文列為禁止來源**，有測試盯著
+（只改 `U_vision`/`U_tof` 時 `q_m` 必須完全不動）。
+
+在 gate-validation 上量到**兩個誠實的發現**：
+
+**其一，第一版錨點是錯的。** 起初沿用 gate 的 `q_tof_threshold = 17.008`
+當可靠度中心，但那個值是在完整 stress set 上以 routing accuracy 搜出來的
+**切點**，而 clean 的 ToF SNR 中位數只有 **15.341** —— 門檻在乾淨基線
+**之上**，於是連乾淨的 ToF 都被評為不可靠（q_tof = 0.180）。
+改以 clean 分佈自己的第 5 百分位為中心、IQR 為尺度後恢復正常
+（clean: q_vision 0.684 / q_tof 0.753）。
+
+**其二，修好之後反而更差。**
+
+| arm | overall | clean | vision_deg | tof_deg | conflict |
+|---|---|---|---|---|---|
+| vision_only | 0.7708 | 0.9479 | 0.5938 | 0.9479 | 0.5938 |
+| pilot_confidence_gate | **0.7839** | 0.9479 | 0.9896 | 0.9271 | 0.2708 |
+| reliability_gate | 0.6849 | 0.9688 | 1.0000 | 0.5104 | 0.2604 |
+
+> **pilot gate 在 `tof_degraded` 上的 0.927 有很大一部分是假的。**
+> 它用的門檻 17.008 高於 clean 中位數 15.341，等於**無條件不信任 ToF**；
+> 它在 ToF 壞掉時表現好，不是因為偵測到劣化，而是因為它本來就不信 ToF。
+> 換成真正以「這個輸入還像不像乾淨時的樣子」為準的 `q_m` 之後，
+> `tof_degraded` 掉到 0.510 —— 那才是 log-SNR 這個代理量在 severity 0.05
+> 下的真實鑑別力。
+
+這一條**不再往下調**。再調就是拿 gate-validation 去雕刻一個好看的數字，
+而那正是整套方法論要防的事。
+
+### 給論文的定位
+
+> D/U/Q 路由在「單一模態明確劣化」時有效；
+> 但一旦把可靠度估計從預測信心換成真正獨立的感測證據，
+> 現有的 sensor-quality 代理量（log SNR）在選定的 severity 下
+> **不足以可靠區分 clean 與 degraded 的 ToF**。
+> 這是感測品質代理量的限制，不是 gate 架構的限制。
+
+---
+
+## E2 deterministic-gate pilot / pre-LLM benchmark（families 28-35，2026-08-31）
+
+> **這不是 final Formal E2，不得如此引用。** 它用的是確定性信心加權仲裁、
+> 沒有 LLM。保留全部結果不刪不改：它的價值在於確立一個 negative result ——
+> **classifier confidence 不是 modality reliability 的代理量**。
 
 ```
 outputs/perception/e2/formal_e2_report.json      一次性，門檻未回頭調整
