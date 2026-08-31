@@ -1131,7 +1131,8 @@ resolution，因此提高 RGB spp 後物理場景身分完全不變。
 | 2048 | 2.33 | 0.659 | 0.575 | 0.872 |
 | **4096** | **1.66** | 0.607 | 0.599 | **0.987** |
 
-**選定 rgb_spp = 4096。** 兩件事必須誠實記下：
+**選定 rgb_spp = 4096，定位為 pragmatic variance-control operating point，
+不是 converged render。** 兩件事必須誠實記下：
 
 1. **不存在 plateau。** rel_RMSE 嚴格依 1/√N 下降（每 4 倍 spp 約降一半），
    因此事前宣告的「plateau 規則」退化成「取網格最大值」。該規則的前提
@@ -1179,7 +1180,7 @@ outputs/perception/ds_v2/{dataset_manifest,preprocessing,perception_report}.json
 4 classes x 20 physical families x 5 realizations = 400 samples
 family split 12/4/4 -> train 240 / val 80 / test 80
 simulator identity 3b2c296c601b0878   calibrated lock 079b248980eaff85（未變）
-render: tof spp 16（E1 凍結）/ rgb spp 4096（convergence pilot 選定）
+render: tof spp 16（E1 凍結）/ rgb spp 4096（variance-control operating point，非收斂）
 ```
 
 | 模型 | 參數 | train | val | **test** | test macro-F1 | 過擬合 |

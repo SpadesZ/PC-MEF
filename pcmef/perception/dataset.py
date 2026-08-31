@@ -25,8 +25,10 @@
 #   - 不得把 clipped PNG 當正式訓練輸入。EXR 是 HDR，PNG 在 uint8 就飽和了；
 #     用 PNG 等於把 VCSEL 高光那一段資訊丟掉再宣稱模型學得起來。
 #   - 不得為了模型表現改動 frozen simulation resolution / spp / temporal_bins。
-#   - 不得把 scenario_id 不重疊講成「沒有 leakage」。當前生成器每類只有
-#     **一個**物理場景，因此 scene family 必然跨 split；那件事必須照實回報。
+#   - 不得把 scenario_id 不重疊講成「沒有 leakage」。真正的判準是
+#     physical_scene_family 不跨 split（ds_v2 起成立：80 families，每類 20）。
+#     interpretation 必須由實測結果生成，不得寫死某一版資料集的敘述 ——
+#     一段與事實相反的 interpretation 會被原樣抄進 manifest 與報告。
 #   - v0.1.0 新增：首版 perception dataset。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_perception_dataset.py -v
@@ -276,9 +278,15 @@ def build_dataset(
                 rgb_spp if rgb_spp is not None else identity.simulation_settings["spp"]
             ),
             "rgb_spp_source": (
-                "chosen by a render-convergence pilot; spp is numerical integration "
-                "precision, not scene physics, so it is decoupled from the ToF spp "
-                "and does not change the physical scene identity"
+                "pragmatic variance-control operating point, not a converged render. "
+                "Chosen by a render-noise pilot against a high-spp reference; the "
+                "relative RMSE follows 1/sqrt(N) with no plateau and is still ~166% "
+                "of the mean pixel value at this setting, so the render is NOT "
+                "converged and must not be described as such. What this operating "
+                "point buys is that the within-class seed-to-seed spread stops "
+                "exceeding the smallest between-class separation. spp is numerical "
+                "integration precision, not scene physics, so it is decoupled from "
+                "the ToF spp and does not change the physical scene identity."
             ),
             "resolution": list(identity.simulation_settings["resolution"]),
         },
@@ -318,6 +326,45 @@ def build_dataset(
 # ---------------------------------------------------------------------------
 # leakage 稽核
 # ---------------------------------------------------------------------------
+
+
+def _leakage_interpretation(
+    ids_disjoint: bool, seeds_disjoint: bool, families_disjoint: bool, n_families: int
+) -> str:
+    """依**實測結果**寫結論，不寫死某一版資料集的敘述。
+
+    先前這裡寫死了 ds_v1 的情況（每類一個場景、family 必然跨 split）。
+    ds_v2 改成 20 families/class 之後那段敘述就與事實相反，而它會被原樣
+    抄進 manifest 與報告 —— 一段**說謊的 interpretation 比沒有更糟**。
+    """
+    sample_level = (
+        "scenario_id and scenario_seed are disjoint across splits, so no sample "
+        "appears twice."
+        if ids_disjoint and seeds_disjoint
+        else "WARNING: scenario ids or seeds repeat across splits; samples are shared."
+    )
+    if families_disjoint:
+        family_level = (
+            f"Physical scene families are disjoint as well: {n_families} distinct "
+            "families, none appearing in more than one split, so every evaluated "
+            "scene is one the model never trained on. Accuracy therefore measures "
+            "generalisation across the nuisance axes that define the families "
+            "(placement and illumination), NOT merely separability of fixed scenes "
+            "under render noise."
+        )
+    else:
+        family_level = (
+            f"Physical scene families are NOT disjoint ({n_families} distinct "
+            "families in total): at least one physical scene appears in more than "
+            "one split, so those splits are Monte-Carlo realizations of the same "
+            "scene. Accuracy measures separability under render noise, NOT "
+            "generalisation to unseen physical configurations."
+        )
+    scope = (
+        "In every case this says nothing about real-sensor performance: the data is "
+        "entirely synthetic."
+    )
+    return f"{sample_level} {family_level} {scope}"
 
 
 def audit_split_leakage(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -367,13 +414,11 @@ def audit_split_leakage(manifest: dict[str, Any]) -> dict[str, Any]:
         "distinct_physical_families_per_class": {
             c: len(v) for c, v in families_by_class.items()
         },
-        "interpretation": (
-            "scenario_id and scenario_seed are disjoint across splits, so no sample "
-            "appears twice. Physical scene families are NOT disjoint: the paired "
-            "generator produces exactly one physical scene per class, so train, val "
-            "and test are Monte-Carlo realizations of the same four scenes. Accuracy "
-            "here measures separability of four fixed scenes under render noise, NOT "
-            "generalisation to unseen physical configurations."
+        "interpretation": _leakage_interpretation(
+            all(not v for v in id_overlap.values()),
+            all(not v for v in seed_overlap.values()),
+            all(not v for v in family_overlap.values()),
+            len(all_families),
         ),
     }
 

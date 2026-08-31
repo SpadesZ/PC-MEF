@@ -218,3 +218,38 @@ def test_preprocessing_records_that_exr_is_the_input(tmp_path, monkeypatch):
     assert "EXR" in spec["source"]
     assert "PNG is never used" in spec["source"]
     assert spec["tonemap"].startswith("log1p")
+
+
+def test_leakage_interpretation_follows_the_measurement(tmp_path):
+    """interpretation 必須由實測結果生成，不得寫死某一版資料集的敘述。
+
+    先前這段話寫死了 ds_v1 的情況（每類一個場景、family 必然跨 split），
+    ds_v2 之後它就與事實相反 —— 而它會被原樣抄進 manifest 與報告。
+    """
+    disjoint = audit_split_leakage(_manifest(tmp_path, families_per_class=6))
+    assert "families are disjoint" in disjoint["interpretation"]
+    assert "NOT merely separability" in disjoint["interpretation"]
+    assert "NOT generalisation" not in disjoint["interpretation"]
+
+    shared = audit_split_leakage(_manifest(tmp_path, families_per_class=1))
+    assert "NOT disjoint" in shared["interpretation"]
+    assert "NOT generalisation" in shared["interpretation"]
+
+    # 兩種情況都不得宣稱與真實感測器有關。
+    for audit in (disjoint, shared):
+        assert "entirely synthetic" in audit["interpretation"]
+
+
+def test_rgb_spp_is_not_described_as_converged():
+    """4096 spp 是 variance-control operating point，不是收斂。
+
+    rel_RMSE 依 1/sqrt(N) 下降且無 plateau，在該設定仍是均值的 ~166%。
+    把它講成 converged 會讓後續每一份引用這個資料集的報告都跟著錯。
+    """
+    import inspect
+
+    from pcmef.perception import dataset as module
+
+    source = inspect.getsource(module.build_dataset)
+    assert "variance-control operating point" in source
+    assert "is NOT " in source and "converged" in source
