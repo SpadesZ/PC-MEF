@@ -19,6 +19,11 @@
 # 維護提醒:
 #   - 不得為了「方便手機看一下」而預設 bind 0.0.0.0。§46 的 Fail Behavior
 #     明訂不符合即拒絕非-loopback 啟動，這個頁面可以寫入 provider 憑證。
+#   - 不得把 PCMEF_ADMIN_CONFINED_FORWARD 設在 compose 以外的地方。它宣告的是
+#     「上游轉發層已把入口限縮成 loopback」，只有寫得出 port mapping 的那一層
+#     有資格宣告；在一般 shell 裡設它，等於在沒有任何限縮的情況下關掉檢查。
+#   - 不得把該旗標的適用範圍從 wildcard 放寬到任意 host。明確綁一個可路由
+#     位址是操作者刻意選了一張實體網卡，那時放行就不是限縮而是開門。
 #   - 不得以 == 比對權杖；字串比較會提早返回，形成時間側通道。
 #   - 不得把 CSRF 權杖放進 URL query；它會留在瀏覽器歷史與伺服器 access log。
 #   - 不得把 admin token 寫進 config 或 repo；它只能來自環境變數。
@@ -39,6 +44,9 @@ __all__ = [
     "AdminSecurityError",
     "ADMIN_TOKEN_ENV",
     "ADMIN_TLS_ENV",
+    "CONFINED_FORWARD_ENV",
+    "WILDCARD_HOSTS",
+    "is_wildcard",
     "DEFAULT_HOST",
     "LOOPBACK_HOSTS",
     "is_loopback",
@@ -50,6 +58,17 @@ __all__ = [
 
 ADMIN_TOKEN_ENV = "PCMEF_ADMIN_TOKEN"
 ADMIN_TLS_ENV = "PCMEF_ADMIN_TLS"
+
+#: 宣告「這個行程雖然綁 0.0.0.0，但實際入口已在轉發層限縮成 loopback」。
+#:
+#: 唯一預期的使用者是 docker-compose 的 console 服務：容器內必須綁 0.0.0.0
+#: 才收得到 Docker 的埠轉發，但主機端的 ports 只寫 127.0.0.1，因此對外
+#: 其實沒有任何路由進得來。
+#:
+#: 做成明確旗標而不是「一律放行 0.0.0.0」，是因為這個程序**無法自己驗證**
+#: 上游的 port mapping 是什麼 —— 它只看得到自己綁在哪。因此這裡放行的
+#: 依據不是偵測，而是操作者的宣告，而宣告要留下痕跡。
+CONFINED_FORWARD_ENV = "PCMEF_ADMIN_CONFINED_FORWARD"
 
 DEFAULT_HOST = "127.0.0.1"
 
@@ -74,6 +93,21 @@ def is_loopback(host: str) -> bool:
         return False
 
 
+#: 「綁全部介面」的兩個寫法。容器情境只會是這兩個之一。
+WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::"})
+
+
+def is_wildcard(host: str) -> bool:
+    """host 是否為 wildcard 綁定。
+
+    CONFINED_FORWARD_ENV 只在 wildcard 時有效：綁 wildcard 代表「我不挑
+    介面，交給上游決定入口」，那正是容器把入口交給 Docker port mapping 的
+    情形。反過來，明確綁一個可路由位址（例如 192.168.1.50）是操作者
+    刻意選了一張實體網卡，那時再放行就不是限縮而是開門。
+    """
+    return host in WILDCARD_HOSTS
+
+
 def assert_network_policy(
     host: str, environ: Mapping[str, str] | None = None
 ) -> None:
@@ -85,6 +119,18 @@ def assert_network_policy(
     """
     env = environ if environ is not None else os.environ
     if is_loopback(host):
+        return
+    if is_wildcard(host) and env.get(CONFINED_FORWARD_ENV, "").lower() in (
+        "1", "true", "yes"
+    ):
+        # 操作者已宣告入口在轉發層被限縮成 loopback（容器情境）。
+        # 這裡刻意不再要求 token：token 的用途是擋住「從網路上來的人」，
+        # 而在這個宣告成立時根本沒有那條路。
+        #
+        # 殘留風險，寫下來讓下一個人看得到：本程序驗證不了這個宣告。
+        # 若有人把 compose 的 ports 從 127.0.0.1:8790:8787 改成
+        # 0.0.0.0:8790:8787 而忘了拿掉這個旗標，這道防線就不再作用，
+        # 且沒有任何症狀。改 ports 的人有責任一併重新評估。
         return
     missing = []
     if not env.get(ADMIN_TOKEN_ENV):

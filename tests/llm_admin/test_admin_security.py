@@ -29,6 +29,7 @@ import pytest
 from pcmef.admin.auth import (
     ADMIN_TLS_ENV,
     ADMIN_TOKEN_ENV,
+    CONFINED_FORWARD_ENV,
     AdminSecurityError,
     assert_network_policy,
     check_csrf,
@@ -90,6 +91,46 @@ def test_serve_allows_non_loopback_with_token_and_tls():
     assert_network_policy(
         "192.168.1.10", environ={ADMIN_TOKEN_ENV: "t" * 32, ADMIN_TLS_ENV: "1"}
     )
+
+
+# ---------------------------------------------------------------------------
+# 受限轉發（容器情境）
+# ---------------------------------------------------------------------------
+
+
+def test_confined_forward_allows_a_wildcard_bind_without_a_token():
+    """容器內綁 0.0.0.0、主機端只綁 127.0.0.1 —— 對外沒有路由進得來。
+
+    這是 docker-compose 的 console 服務的情形。要求操作者為一個
+    只有 loopback 入口的頁面另外產生 admin token，擋不到任何人。
+    """
+    assert_network_policy("0.0.0.0", environ={CONFINED_FORWARD_ENV: "1"})
+    assert_network_policy("::", environ={CONFINED_FORWARD_ENV: "1"})
+
+
+def test_confined_forward_does_not_apply_to_a_routable_bind():
+    """明確綁一張實體網卡時，這個旗標**不得**放行。
+
+    綁 wildcard 是「入口交給上游決定」；綁 192.168.1.10 是操作者自己
+    選了一張對外的網卡。後者再放行就不是限縮，是開門。
+    """
+    with pytest.raises(AdminSecurityError, match=ADMIN_TOKEN_ENV):
+        assert_network_policy(
+            "192.168.1.10", environ={CONFINED_FORWARD_ENV: "1"}
+        )
+
+
+@pytest.mark.parametrize("value", ["", "0", "no", "false", "maybe"])
+def test_confined_forward_must_be_explicitly_affirmative(value):
+    """只有明確的肯定值才算宣告；空字串或任意字串都不算。"""
+    with pytest.raises(AdminSecurityError):
+        assert_network_policy("0.0.0.0", environ={CONFINED_FORWARD_ENV: value})
+
+
+def test_confined_forward_is_off_by_default():
+    """沒設就是沒設 —— 預設不得放行 wildcard 綁定。"""
+    with pytest.raises(AdminSecurityError):
+        assert_network_policy("0.0.0.0", environ={})
 
 
 # ---------------------------------------------------------------------------

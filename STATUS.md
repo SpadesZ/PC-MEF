@@ -16,12 +16,16 @@
 **方式一：Docker（推薦給交接的人）** —— 不必自己處理 LLVM-C.dll 那串坑。
 
 ```powershell
-cp .env.example .env      # 填 PCMEF_ADMIN_TOKEN 與 PCMEF_SECRET_MASTER_KEY
 docker compose build
 docker compose run --rm pcmef version          # 一次性 CLI
 docker compose run --rm --entrypoint python pcmef -m pytest -q
-docker compose up console                      # http://localhost:8790
+docker compose up -d console                   # http://localhost:8790
 ```
+
+**不需要 `.env`**（2026-08-31 起）。console 的入口已由 compose 的 ports
+限縮成 127.0.0.1 並以 `PCMEF_ADMIN_CONFINED_FORWARD` 明確宣告，因此不再
+要求 admin token。想在 UI 直接貼 API key 才需要 `PCMEF_SECRET_MASTER_KEY`；
+用 `env:<NAME>` 參考的話連它都不用。
 
 已實測：容器內 **1101 passed**、`sim smoke` 算得出 transient，
 Empty 場景總能量 **3908.9**，與本機 Batch 5 記錄的 3909 一致 —— 容器重現本機數字。

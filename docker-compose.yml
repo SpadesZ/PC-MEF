@@ -66,6 +66,10 @@ services:
       - 0.0.0.0
       - --port
       - "8787"
+      # 容器跑起來就能在 UI 綁定四個 agent。只寫 draft registry ——
+      # formal identity 仍然只能由 CLI 的 `llm snapshot --freeze` 產生，
+      # 這一條沒有被放寬。
+      - --enable-ui-bind
     ports:
       # 只綁主機的 loopback。容器內聽 0.0.0.0 是因為要讓 Docker 轉發，
       # 但主機端的曝露面仍然只有 127.0.0.1。
@@ -83,14 +87,20 @@ services:
       PCMEF_SECRET_MASTER_KEY: ${PCMEF_SECRET_MASTER_KEY:-}
       PCMEF_STUB_MODELS: ${PCMEF_STUB_MODELS:-}
       # 容器內必須綁 0.0.0.0 才收得到 Docker 的埠轉發，而 §46 規定
-      # 非 loopback 曝露要同時具備 admin token 與 TLS。這裡不繞過它：
-      # ports 已把主機端限制在 127.0.0.1（等同 TLS 那條的「reverse proxy」情境），
-      # token 則要求操作者自己設。缺 token 時 compose 直接報錯並說明怎麼設 ——
-      # 讓它「預設就能跑」的唯一辦法是拿掉一道兩批之前才建立的安全控制。
-      # 缺 token 時不在這裡用 `:?` 擋 —— 那會連 build 與跑測試都一起擋掉。
-      # 把關點留在 admin.auth.assert_network_policy()：一件事一個把關點，
-      # 而那裡的錯誤訊息已經寫明缺什麼、為什麼、以及怎麼補。
-      PCMEF_ADMIN_TLS: "1"
+      # 非 loopback 曝露要同時具備 admin token 與 TLS。
+      #
+      # 上面的 ports 已經把主機端入口限縮成 127.0.0.1，因此對外沒有任何
+      # 路由進得來 —— 這裡用 PCMEF_ADMIN_CONFINED_FORWARD 明確宣告這件事。
+      # 宣告只在 wildcard 綁定時生效（見 admin/auth.py 的 is_wildcard），
+      # 而且宣告不等於偵測：**改動下面那行 ports 的人，有責任一併重新評估**。
+      # 把 127.0.0.1 改成 0.0.0.0 而留著這個旗標，這道防線就不再作用。
+      #
+      # 2026-08-31 之前這裡是要求操作者自備 PCMEF_ADMIN_TOKEN。改掉的原因是
+      # 那個 token 擋不到任何人（入口本來就只有 loopback），卻讓
+      # `docker compose up console` 在沒有 .env 時進入無聲的重啟迴圈 ——
+      # 瀏覽器看到的是別的服務，症狀完全指不到真正的原因。
+      PCMEF_ADMIN_CONFINED_FORWARD: "1"
+      # 仍然可以自備 token；設了就會在寫入端點被要求。
       PCMEF_ADMIN_TOKEN: ${PCMEF_ADMIN_TOKEN:-}
     restart: unless-stopped
 
