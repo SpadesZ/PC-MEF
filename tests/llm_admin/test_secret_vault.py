@@ -36,12 +36,14 @@ import pytest
 from pcmef.core import logging_setup
 from pcmef.secrets.crypto import MASTER_KEY_ENV, crypto_available, fingerprint, new_salt
 from pcmef.secrets.vault import (
+    LOCAL_MASTER_KEY_FILENAME,
     SCHEME_SESSION,
     SCHEME_VAULT,
     SecretError,
     SecretRef,
     SecretVault,
     SessionSecretStore,
+    ensure_local_master_key,
 )
 
 # 測試用假值。刻意做成明顯的假字串，但長度/前綴符合真實樣式，
@@ -88,6 +90,29 @@ def test_parse_rejects_an_env_ref_whose_identifier_is_not_a_variable_name():
     """env:<值> 的形狀擋不住 parse 的前綴檢查，所以名稱本身也要驗。"""
     with pytest.raises(SecretError, match="environment variable"):
         SecretRef.parse("env:not a var name")
+
+
+def test_parse_rejects_a_key_pasted_after_the_env_scheme():
+    """`env:<真的 key>` —— 實測外洩過的那條路徑。
+
+    這種輸入躲得過兩道檢查：
+      * `_looks_like_plaintext_key` 的樣式錨在字串開頭，`env:AIza…`
+        因為多了前綴而不匹配；
+      * API key 幾乎都是純英數，因此 `AIzaSy…` **完全符合**合法環境
+        變數名的語法，`_ENV_NAME` 也放行。
+    結果 key 被當成變數名存進 registry，之後 resolve 失敗的錯誤訊息
+    再把整把 key 帶進 flash 與網址列。
+    """
+    for key in (FAKE_OPENAI_KEY, FAKE_GOOGLE_KEY):
+        with pytest.raises(SecretError, match="looks like the API key itself"):
+            SecretRef.parse(f"env:{key}")
+
+
+def test_the_rejection_message_does_not_echo_the_key_back():
+    """錯誤訊息會進 flash、log 與稽核記錄，所以它不能包含那把 key。"""
+    with pytest.raises(SecretError) as caught:
+        SecretRef.parse(f"env:{FAKE_GOOGLE_KEY}")
+    assert FAKE_GOOGLE_KEY not in str(caught.value)
 
 
 def test_session_refs_are_not_persistent():
@@ -199,6 +224,97 @@ def test_persisting_without_a_master_key_is_refused(tmp_path):
     assert vault.can_persist is False
     with pytest.raises(SecretError, match=MASTER_KEY_ENV):
         vault.store(FAKE_OPENAI_KEY)
+
+
+# ---------------------------------------------------------------------------
+# 本機自動保管的 master key（§46 的本機主控台例外）
+# ---------------------------------------------------------------------------
+
+
+def test_the_library_default_still_refuses_to_invent_a_master_key(tmp_path):
+    """預設值必須維持 §46 原文：不自己產生金鑰，也不留下任何檔案。
+
+    這條與下一條是一對。例外之所以可以接受，正是因為它必須在每個組裝點
+    被明確寫出來；預設值一旦翻過去，例外就從「一處可見的決定」變成
+    「到處都在、沒人記得為什麼」。
+    """
+    vault = _vault(tmp_path, master_key=None)
+    assert vault.can_persist is False
+    assert vault.master_key_source == "none"
+    assert not (tmp_path / LOCAL_MASTER_KEY_FILENAME).exists()
+
+
+@pytest.mark.skipif(not crypto_available(), reason="需要 cryptography 才會產生金鑰")
+def test_opting_in_makes_persisting_work_without_any_environment_setup(tmp_path):
+    """本機主控台走的就是這條：什麼都不設，貼上 key 就存得起來。"""
+    vault = SecretVault(
+        path=tmp_path / "vault.json", master_key=None, environ={},
+        local_master_key=True,
+    )
+
+    assert vault.can_persist is True
+    assert vault.master_key_source == "local-file"
+    ref = vault.store(FAKE_OPENAI_KEY)
+    assert ref.scheme == SCHEME_VAULT
+    assert vault.resolve(ref) == FAKE_OPENAI_KEY
+
+
+@pytest.mark.skipif(not crypto_available(), reason="需要 cryptography 才會產生金鑰")
+def test_the_key_survives_a_restart_so_stored_secrets_stay_readable(tmp_path):
+    """金鑰每次重開都換一把的話，vault 裡的密文就全部變成解不開的垃圾。"""
+    first = SecretVault(
+        path=tmp_path / "vault.json", environ={}, local_master_key=True
+    )
+    ref = first.store(FAKE_GOOGLE_KEY)
+
+    second = SecretVault(
+        path=tmp_path / "vault.json", environ={}, local_master_key=True
+    )
+    assert second.resolve(ref) == FAKE_GOOGLE_KEY
+
+
+def test_an_environment_master_key_still_wins_over_the_local_file(tmp_path):
+    """環境變數優先，本機檔案完全不參與 —— 接 KMS 或 OS keychain 時的前提。"""
+    vault = SecretVault(
+        path=tmp_path / "vault.json",
+        environ={MASTER_KEY_ENV: MASTER},
+        local_master_key=True,
+    )
+
+    assert vault.master_key_source == "environment"
+    assert not (tmp_path / LOCAL_MASTER_KEY_FILENAME).exists()
+
+
+@pytest.mark.skipif(not crypto_available(), reason="需要 cryptography 才會產生金鑰")
+def test_the_stored_secret_is_still_ciphertext_not_plaintext(tmp_path):
+    """自動產生金鑰**不等於**退回明文保存。
+
+    roothinks 在缺 FERNET_KEY 時會把 key 明文寫進 DB；本系統沒有那條退路，
+    而 §46 的整套遮蔽與指紋設計，前提就是落盤的一定是密文。
+    """
+    vault = SecretVault(
+        path=tmp_path / "vault.json", environ={}, local_master_key=True
+    )
+    vault.store(FAKE_OPENAI_KEY)
+
+    on_disk = (tmp_path / "vault.json").read_text(encoding="utf-8")
+    assert FAKE_OPENAI_KEY not in on_disk
+    for start in range(0, len(FAKE_OPENAI_KEY) - 8):
+        assert FAKE_OPENAI_KEY[start : start + 8] not in on_disk
+
+
+def test_ensure_local_master_key_is_idempotent(tmp_path):
+    first = ensure_local_master_key(tmp_path)
+    second = ensure_local_master_key(tmp_path)
+    assert first == second
+    assert first.strip() == first and first != ""
+
+
+def test_ensure_local_master_key_replaces_an_empty_file(tmp_path):
+    """空檔案代表上一次寫到一半。沿用它等於得到一把空金鑰，而 derive_key
+    對空字串會直接拋錯 —— 症狀是主控台起不來，原因指不到這個檔案。"""
+    (tmp_path / LOCAL_MASTER_KEY_FILENAME).write_text("   \n", encoding="utf-8")
+    assert ensure_local_master_key(tmp_path) != ""
 
 
 def test_session_secret_verify_still_works_without_a_master_key(tmp_path):

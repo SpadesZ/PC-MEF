@@ -139,6 +139,99 @@ def test_charts_carry_an_accessible_label():
 
 
 # ---------------------------------------------------------------------------
+# 可讀性：圖必須答得出它宣稱要回答的問題
+# ---------------------------------------------------------------------------
+
+
+def _tick_texts(svg: str) -> list[str]:
+    return re.findall(r'class="tick"[^>]*>([^<]*)</text>', svg)
+
+
+def test_both_axes_start_at_zero():
+    """transient 波形的意義是「訊號從零長起來、多久之後到峰值」。
+
+    x 軸截在第一個 bin 會讓 time-of-flight 讀不出來 —— 畫面上看得到形狀，
+    卻無法把峰值位置換算成距離，而那正是 ToF 這張圖的用途。
+    """
+    svg = line_chart_svg(
+        [("a", [3.0, 4.0, 5.0], [10.0, 40.0, 12.0])],
+        x_label="time (ns)", y_label="energy",
+    )
+    ticks = _tick_texts(svg)
+    # 兩軸各自的第一個刻度都必須是 0，即使資料從 3.0 才開始。
+    assert ticks.count("0") >= 2, ticks
+
+
+def test_the_line_chart_marks_the_peak():
+    """「峰值有沒有貼在時間窗右緣」是這張圖唯一的科學檢查（NOTE-013）。
+
+    沒有標記的話只能肉眼估，而肉眼估不出「差一點就被截斷」與「剛好沒被截斷」
+    的差別 —— 那兩種情況一個可用一個不可用。
+    """
+    svg = line_chart_svg([("a", [0.0, 1.0, 2.0, 3.0], [1.0, 2.0, 9.0, 3.0])])
+
+    assert "peak-line" in svg
+    assert any("峰值" in text for text in _tick_texts(svg))
+    # 標的是真正的峰（x=2.0），不是最後一點。
+    assert any("峰值 2" in text for text in _tick_texts(svg))
+
+
+def test_the_peak_label_is_never_clipped_off_the_top():
+    """最高的那條曲線頂點就在上緣，標籤不夾住就會被 viewBox 切掉。"""
+    svg = line_chart_svg([("a", [0.0, 1.0], [0.0, 100.0])])
+    label_ys = [
+        float(y)
+        for y in re.findall(r'<text[^>]*y="([\d.]+)"[^>]*class="tick"[^>]*>峰值', svg)
+    ]
+    assert label_ys and all(y >= 10.0 for y in label_ys), label_ys
+
+
+def test_the_bar_chart_y_axis_is_not_truncated():
+    """截斷 y 軸能讓 0.3% 的差看起來像三倍。那在論文裡是造假。
+
+    這條測試存在，是因為「四根柱子看起來一樣高」看起來像個 bug，
+    而最直覺的『修法』正好是把 y 軸起點抬高 —— 必須擋住。
+    """
+    svg = bar_chart_svg(["a", "b"], [1000.0, 1003.0])
+    assert "0" in _tick_texts(svg)
+
+    # 值差 0.3%，柱高就必須也只差 0.3%。
+    heights = [float(h) for h in re.findall(r'<rect[^>]*height="([\d.]+)"', svg)]
+    assert len(heights) == 2
+    assert heights[0] / heights[1] == pytest.approx(1000.0 / 1003.0, rel=1e-3)
+
+
+def test_near_identical_bars_still_report_their_difference():
+    """y 軸不截斷，柱子就必然等高 —— 差異改由數字承擔，不是消失。"""
+    svg = bar_chart_svg(["empty", "water", "milk", "oil"], [3908.9, 3921.4, 3895.2, 3912.7])
+    ticks = _tick_texts(svg)
+
+    assert any(t.startswith("+") and t.endswith("%") for t in ticks), ticks
+    assert any(t.startswith("-") and t.endswith("%") for t in ticks), ticks
+    assert any("平均" in t for t in ticks), ticks
+    assert "mean-line" in svg
+
+
+def test_a_single_bar_does_not_take_over_the_canvas():
+    """只跑一類時，沒有上限的柱子會佔掉六成畫布，看起來像出了什麼事。"""
+    svg = bar_chart_svg(["only"], [42.0])
+    widths = [float(w) for w in re.findall(r'<rect[^>]*width="([\d.]+)"', svg)]
+    assert widths and widths[0] <= 96.0, widths
+    # 單一項目沒有「相對平均」可言，不該憑空生出一條 0% 的註記。
+    assert not any("%" in t for t in _tick_texts(svg))
+
+
+def test_charts_declare_only_css_classes_the_stylesheet_defines():
+    """格線與峰值線用未定義的 class 時，SVG 預設 stroke 是黑色實線 ——
+    格線會蓋過資料，而沒有任何測試會失敗。"""
+    svg = line_chart_svg([("a", [0, 1], [0, 1])]) + bar_chart_svg(["a", "b"], [1.0, 2.0])
+    used = set(re.findall(r'class="(grid-line|peak-line|mean-line|axis|series)"', svg))
+    css = ADMIN_CSS.read_text(encoding="utf-8")
+    for name in used:
+        assert f".chart .{name}" in css, f"admin.css defines no .chart .{name}"
+
+
+# ---------------------------------------------------------------------------
 # 缺檔
 # ---------------------------------------------------------------------------
 

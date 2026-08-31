@@ -2546,7 +2546,11 @@ def _admin_service(args: argparse.Namespace):
 
     return AdminService(
         registry=LLMRegistry(args.registry_db),
-        vault=SecretVault(args.vault),
+        # local_master_key=True 必須與 admin/app.py 一致。UI 用本機金鑰加密
+        # 存下的憑證，`pcmef llm snapshot` 要解得開才產得出 lock；只有一邊
+        # 開啟的話，失敗會發生在 fingerprint 階段，而那個錯誤訊息完全指不到
+        # 「兩邊的 master key 來源不同」這個真正的原因。
+        vault=SecretVault(args.vault, local_master_key=True),
         config=_load(args),
         freeze_dir=args.freeze_dir,
         artifact_root=args.artifact_root,

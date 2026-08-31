@@ -22,10 +22,11 @@ docker compose run --rm --entrypoint python pcmef -m pytest -q
 docker compose up -d console                   # http://localhost:8790
 ```
 
-**不需要 `.env`**（2026-08-31 起）。console 的入口已由 compose 的 ports
+**完全不需要 `.env`**（2026-08-31 起）。console 的入口已由 compose 的 ports
 限縮成 127.0.0.1 並以 `PCMEF_ADMIN_CONFINED_FORWARD` 明確宣告，因此不再
-要求 admin token。想在 UI 直接貼 API key 才需要 `PCMEF_SECRET_MASTER_KEY`；
-用 `env:<NAME>` 參考的話連它都不用。
+要求 admin token；`PCMEF_SECRET_MASTER_KEY` 也不用了 —— 沒設時系統會自動在
+`secrets/master.key` 保管一把，於是開了頁面就能直接貼 API key
+（見下方「設定流程與版型對齊 LAVA setup」的 2026-08-31 修訂）。
 
 已實測：容器內 **1101 passed**、`sim smoke` 算得出 transient，
 Empty 場景總能量 **3908.9**，與本機 Batch 5 記錄的 3909 一致 —— 容器重現本機數字。
@@ -477,8 +478,74 @@ draft ──Fetch──► fetched ──Test──► connected ──Connect�
 | Test 內容 | 送一句話看回不回 OK | 跑 chat + structured_json + vision 三項 probe | §44 要求的能力只有實際 probe 才知道；回一句 OK 什麼都證明不了 |
 | 憑證遮蔽 | key 後四碼 | HMAC 指紋 `****abcd` | §46 不准顯示 key prefix（NOTE-016） |
 | 前端 | JS 驅動逐列更新 | server-rendered 表單，零 script | §42 明訂 minimal JS；狀態機與資訊架構完全相同，只是每個按鈕改為 POST + redirect |
+| 缺加密金鑰時 | 退回明文存進 SQLite | 一律 fail-closed，不設退路 | §46 的整套遮蔽與指紋設計，前提就是落盤的一定是密文 |
 
 CLI 有完整對等指令：`llm connection select-model / test / lock`、`llm binding lock`。
+
+#### 2026-08-31 修訂：主控台可觸發凍結（§52 結語的界線劃細，非放寬）
+
+原本的理解是「UI 不得碰任何與 formal 有關的事」，於是連凍結設定都只能在
+終端機做。現在區分成兩件事：
+
+| | 允許？ | 為什麼 |
+|---|---|---|
+| 從 UI 跑 formal experiment | **不行**，`_assert_not_formal()` 硬性擋下 | 結果必須來自可重現、無人值守的路徑 |
+| 從 UI 觸發凍結設定 | 可以（run kind `llm_snapshot`） | 准駁權不在 UI |
+
+差別在於**誰做判斷**。console 只是啟動真正的
+`pcmef llm snapshot [--freeze]` 子行程；前提未齊時是 CLI 自己印出缺什麼
+並回 exit 2。UI 沒有任何一行程式碼能決定「這份 lock 該不該寫」。
+§52 結語要擋的是「UI 成為繞過 freeze 的第二條設定通道」—— 而按鈕觸發的
+CLI 走的是同一條通道、同一組檢查，並且把完整指令、時間與輸出留成一筆
+run record，那比 shell history 更完整，不是更少。
+
+`POST /api/admin/llm/runtime-snapshot` **仍然是 403**：admin 頁面自己永遠不
+寫 lock。兩條同時成立才是原本的意思。
+
+**實測**（2026-08-31，本機 registry 空）：從 UI 按「凍結」→ 指令
+`... llm snapshot --out <run>/artifacts --freeze` → CLI 列出 8 條未達前提
+（四個 agent 未綁定、四個 prompt 檔不存在）→ **exit 2、freeze/ 未新增
+`llm_runtime.lock.json`**。UI 按得下去，但寫不成。
+
+**服務綁定的操作欄有 Test / Lock / Unlock 三顆**，依 SAI Appendix J3
+（圖 8 的資訊架構為 UI reference）。三顆常駐、不可用時呈灰並以 title 說明原因 ——
+只顯示「當下可做的那一顆」看起來乾淨，但操作者無從得知另外兩個動作存不存在，
+而 Unlock 正是他改不了已鎖定綁定時要找的東西。
+
+binding 的 Test **只跑該 task 依 §45 需要的能力**，不重跑三項全部：
+physics_agent 與 arbitration_agent 不需要 vision，對它們跑 vision probe 只會
+生出一個與這個綁定無關的 FAIL，然後讓操作者去修一件不必修的事。實測：
+`observation_agent` probe chat/structured_json/vision，`physics_agent` 只 probe
+chat/structured_json。已鎖定的 binding 仍可測 —— 那正是這顆按鈕的主要用途
+（「當初鎖的時候是好的，它現在還好嗎」）。
+
+它不是新的 provider 能力，而是 §50 `POST /models/{id}/verify` 綁到 task 之後的
+形態，走同一個 `CapabilityVerifier`，證據一樣落盤。
+
+#### 2026-08-31 修訂：貼上 API key 這條路預設可用（§46 的本機例外）
+
+原本 `PCMEF_SECRET_MASTER_KEY` 沒設時 `vault.can_persist` 為 False，UI 的
+API Key 欄位就是 disabled，操作者只剩 `env:<NAME>` 一條路 —— 但那個環境變數
+在容器裡同樣沒設。實際觀察到的連鎖反應：
+
+```
+沒設 master key → API Key 欄位灰掉 → 只能填 env:<NAME> → 該變數也沒值
+   → fingerprint 解不開，顯示 (unresolvable) → Fetch 失敗
+   → 沒有線路鎖得起來 → 四個 agent 全部 unbound → 綁定欄位全是「—」
+```
+
+一顆沒人提示要設的環境變數，把整條 LLM 設定流程從頭鎖到尾，而畫面上四個
+症狀沒有一個指得回真正的原因。
+
+現在主控台與 CLI 都傳 `SecretVault(..., local_master_key=True)`：沒有環境變數
+時自動在 `secrets/master.key` 保管一把（目錄已 gitignore；Docker 下在具名
+volume 內，重啟不掉）。**函式庫預設值仍是 False**，維持 §46 原文；例外只在
+兩個組裝點明列，而且兩邊必須一致 —— 只開一邊的話 UI 存的密文 CLI 解不開，
+失敗會發生在 fingerprint 階段，錯誤訊息完全指不到真正的原因。
+
+環境變數一旦設了就優先，本機檔案完全不參與，因此之後要接 KMS 或 OS keychain
+不必先移除這條路徑。守著這些的測試在 `tests/llm_admin/test_secret_vault.py`
+的「本機自動保管的 master key」一節。
 
 **實機驗證**：locked 那一列的 Fetch/Set/Test 皆 disabled 且只剩 Unlock/Delete；
 draft 那一列 Fetch/Set 可用而 Test/Connect disabled；已鎖定的 arbitration_agent

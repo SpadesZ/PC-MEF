@@ -227,3 +227,91 @@ def test_runs_are_listed_newest_first(echo):
 def test_getting_an_unknown_run_fails_loudly(runner):
     with pytest.raises(RunnerError, match="not found"):
         runner.get("no-such-run")
+
+
+# ---------------------------------------------------------------------------
+# llm snapshot：console 觸發，但准駁權在 CLI
+# ---------------------------------------------------------------------------
+
+
+def test_the_snapshot_command_calls_the_real_cli(runner):
+    """UI 不自己算 lock，它啟動的是與終端機上同一支指令。"""
+    command = runner._command("r1", RunSpec(kind="llm_snapshot", params={}))
+    assert command[:4] == [runner._python, "-u", "-m", "pcmef.cli"]
+    assert command[4:6] == ["llm", "snapshot"]
+
+
+def test_a_plain_snapshot_never_carries_freeze(runner):
+    """沒有 --freeze 就不會寫 lock —— 這是「先檢查」那顆按鈕的全部意義。"""
+    command = runner._command("r1", RunSpec(kind="llm_snapshot", params={}))
+    assert "--freeze" not in command
+
+
+def test_the_snapshot_out_path_is_a_directory_not_a_file(runner):
+    """`snapshot.write()` 自己決定檔名（runtime_snapshot_<hash>.json），
+    所以 --out 收的是目錄。給它一個 .json 結尾的路徑，會建出一個叫那個
+    名字的**資料夾**，而畫面上只會看到一條長得像檔案的路徑。"""
+    command = runner._command("r1", RunSpec(kind="llm_snapshot", params={}))
+    out = command[command.index("--out") + 1]
+    assert not out.endswith(".json")
+    assert out.endswith("artifacts")
+
+
+def test_freeze_is_passed_through_only_when_asked(runner):
+    command = runner._command(
+        "r1", RunSpec(kind="llm_snapshot", params={"freeze": True})
+    )
+    assert "--freeze" in command
+
+
+def test_the_console_still_refuses_to_run_a_formal_experiment(runner):
+    """界線劃細了，但沒有被放寬：觸發 freeze 可以，跑 formal experiment 不行。"""
+    with pytest.raises(FormalRunRefused):
+        runner.start(RunSpec(kind="llm_snapshot", params={"formal": True}))
+
+
+# ---------------------------------------------------------------------------
+# 搜尋與刪除
+# ---------------------------------------------------------------------------
+
+
+def test_search_matches_the_run_parameters_too(echo):
+    """實務上要找的往往是「那次 spp 開到 64 的」，而那個數字只在 params 裡。"""
+    wanted = echo.start(RunSpec(kind="sim_smoke", params={"lines": 1, "spp": 64}))
+    other = echo.start(RunSpec(kind="sim_smoke", params={"lines": 1, "spp": 8}))
+    for record in (wanted, other):
+        echo.wait(record.run_id, timeout=30)
+
+    found = [r.run_id for r in echo.list_runs(query="spp=64")]
+    assert found == [wanted.run_id]
+
+
+def test_search_is_case_insensitive_and_ignores_padding(echo):
+    record = echo.start(RunSpec(kind="sim_smoke", params={"lines": 1}))
+    echo.wait(record.run_id, timeout=30)
+    assert echo.list_runs(query="  SIM_SMOKE  ")
+
+
+def test_an_empty_query_returns_everything(echo):
+    record = echo.start(RunSpec(kind="sim_smoke", params={"lines": 1}))
+    echo.wait(record.run_id, timeout=30)
+    assert len(echo.list_runs(query="")) == len(echo.list_runs())
+
+
+def test_deleting_a_run_removes_its_whole_directory(echo):
+    record = echo.start(RunSpec(kind="sim_smoke", params={"lines": 1}))
+    echo.wait(record.run_id, timeout=30)
+    assert echo.run_dir(record.run_id).exists()
+
+    echo.delete(record.run_id)
+
+    assert not echo.run_dir(record.run_id).exists()
+    with pytest.raises(RunnerError, match="not found"):
+        echo.get(record.run_id)
+
+
+def test_a_running_run_is_not_deletable(echo):
+    record = echo.start(RunSpec(kind="sim_smoke", params={"lines": 200, "delay": 0.02}))
+    with pytest.raises(RunnerError, match="still running"):
+        echo.delete(record.run_id)
+    echo.wait(record.run_id, timeout=30)

@@ -90,7 +90,13 @@ def create_app(
     app.secret_key = _session_secret()
     app.config["PCMEF_ADMIN_SERVICE"] = service or AdminService(
         registry=LLMRegistry(registry_path),
-        vault=SecretVault(vault_path),
+        # local_master_key=True：沒設 PCMEF_SECRET_MASTER_KEY 時自動在
+        # secrets/master.key 保管一把，讓「在網頁貼上 API key」預設就能用。
+        # 不開的話 can_persist 為 False，頁面上的 API Key 欄位是灰的，
+        # 操作者只剩 env:<NAME>，而那個環境變數在容器裡同樣沒設 ——
+        # 一顆沒人提示要設的變數把整條 LAVA 流程鎖死（見 vault.py 的說明）。
+        # cli.py 的 admin service 必須傳同一個值，否則兩邊解不開對方的密文。
+        vault=SecretVault(vault_path, local_master_key=True),
     )
     app.config["PCMEF_ADMIN_HOST"] = host
     app.config["PCMEF_ADMIN_BIND_ENABLED"] = bool(bind_enabled)

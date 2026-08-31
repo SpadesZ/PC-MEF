@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -70,6 +71,7 @@ __all__ = [
     "ModelView",
     "BindingOption",
     "BindingView",
+    "ChecklistItem",
     "SnapshotView",
     "AdminService",
 ]
@@ -119,6 +121,12 @@ class ConnectionView:
     can_test: bool = False
     can_lock: bool = False
     can_unlock: bool = False
+    #: 這一列現在該做什麼。空字串代表這條線路已經走完，可以綁定。
+    #:
+    #: 存在的理由是 LAVA 的四個階段各自解鎖不同的按鈕，於是畫面上同時有
+    #: 五顆按鈕、其中四顆是灰的，而「為什麼是灰的」只寫在 registry 的
+    #: lifecycle 規則裡。少了這一行，操作者能看到自己被卡住，但看不到卡在哪。
+    next_step: str = ""
 
     @property
     def healthy(self) -> bool:
@@ -156,6 +164,20 @@ class BindingView:
 
 
 @dataclass(frozen=True)
+class ChecklistItem:
+    """一條「還差什麼」。what 說缺什麼，how 說去哪裡補。
+
+    存在的理由是 blocking reason 的原文是寫給程式看的 —— 像
+    `prompt file configs/agents/prompts/physics_agent.md does not exist`
+    技術上完全正確，但它沒告訴操作者「所以我現在該按哪裡」，
+    於是整張卡片在畫面上等同於雜訊。
+    """
+
+    what: str
+    how: str
+
+
+@dataclass(frozen=True)
 class SnapshotView:
     """§42 區塊 D 的四個欄位，加上 draft 側的判定結果。"""
 
@@ -167,6 +189,15 @@ class SnapshotView:
     blocking: tuple[str, ...]
     draft_candidate_hash: str
     draft_freezable: bool
+    #: blocking 的白話版。blocking 保留原文供 API 與稽核使用，兩者不互相取代。
+    checklist: tuple[ChecklistItem, ...] = ()
+
+    @property
+    def headline(self) -> str:
+        if self.draft_freezable:
+            return "前置條件都齊了，可以凍結"
+        n = len(self.checklist)
+        return f"還差 {n} 項才能凍結" if n else "尚不可凍結"
 
     def to_api(self) -> dict:
         """§50：active formal snapshot 必須與 draft 清楚分開，故欄位分列。"""
@@ -178,6 +209,111 @@ class SnapshotView:
             "draft_freezable": self.draft_freezable,
             "blocking_reasons": list(self.blocking),
         }
+
+
+# --- blocking reason 的白話化 -----------------------------------------------
+#
+# 這些樣式**刻意寫成寬鬆比對**：對不上時退回顯示原文，而不是丟例外或吞掉。
+# snapshot.py 之後新增一種 blocking reason 時，最糟的情況是那一條在畫面上
+# 維持英文原樣 —— 難看，但操作者仍然看得到「有這一條」。反過來寫成嚴格比對
+# 的話，一個沒跟上的樣式會讓那條前提從畫面上整個消失，而那正是最危險的
+# 失敗方式：畫面顯示「都齊了」，CLI 卻凍不起來。
+
+_RE_NO_BINDING = re.compile(r"^task (\S+) has no draft binding$")
+_RE_MISSING_FILE = re.compile(r"^(prompt|schema) file (\S+) does not exist$")
+_RE_LACKS_CAP = re.compile(
+    r"^task (\S+) model '(.+)' lacks probe-verified capability \[(.*)\]$"
+)
+_RE_BAD_PROVIDER = re.compile(r"^task (\S+) is bound to provider '(.+)', which is not")
+_RE_UNHEALTHY = re.compile(r"^task (\S+) is bound through connection '(.+)' whose")
+_RE_NO_REVISION = re.compile(r"^task (\S+) model '(.+)' has no provider_revision")
+_RE_BAD_REF = re.compile(r"^connection '(.+)' uses a (\S+): secret ref")
+_RE_AWAITS = re.compile(r"^(agents\.[\w.]+) awaits advisor approval")
+
+
+def _task_label(task_code: str) -> str:
+    spec = TASK_REGISTRY.get(task_code)
+    return spec.ui_name if spec else task_code
+
+
+def _checklist(reasons: Iterable[str]) -> tuple[ChecklistItem, ...]:
+    """把 blocking reason 原文譯成操作者看得懂的待辦清單。
+
+    prompt 與 schema 檔刻意**合併成一條**。缺四個 agent 的 prompt 會產生四條
+    長得幾乎一樣的訊息，那是雜訊不是資訊 —— 要做的其實只有一件事。
+    """
+    items: list[ChecklistItem] = []
+    missing_files: dict[str, list[str]] = {"prompt": [], "schema": []}
+
+    for reason in reasons:
+        if match := _RE_MISSING_FILE.match(reason):
+            missing_files[match.group(1)].append(match.group(2))
+        elif match := _RE_NO_BINDING.match(reason):
+            items.append(
+                ChecklistItem(
+                    what=f"{_task_label(match.group(1))} 還沒指定要用哪個模型",
+                    how="到上面「3. 綁定 agent」那張表，替它選一條已 Locked 的線路",
+                )
+            )
+        elif match := _RE_LACKS_CAP.match(reason):
+            caps = match.group(3).replace("'", "")
+            items.append(
+                ChecklistItem(
+                    what=f"{_task_label(match.group(1))} 綁的 {match.group(2)} 缺能力：{caps}",
+                    how="回到「2. 設定線路」那一列按 Test 重跑能力驗證；仍然缺就換一個模型",
+                )
+            )
+        elif match := _RE_BAD_PROVIDER.match(reason):
+            items.append(
+                ChecklistItem(
+                    what=f"{_task_label(match.group(1))} 綁在 {match.group(2)}，這個 provider 不能進 formal",
+                    how="stub_offline 只能走流程、不能凍結。改綁真實 provider 的線路",
+                )
+            )
+        elif match := _RE_UNHEALTHY.match(reason):
+            items.append(
+                ChecklistItem(
+                    what=f"{_task_label(match.group(1))} 綁的線路「{match.group(2)}」目前不健康",
+                    how="到「2. 設定線路」那一列看錯誤訊息，重跑 Fetch / Test",
+                )
+            )
+        elif match := _RE_NO_REVISION.match(reason):
+            items.append(
+                ChecklistItem(
+                    what=f"{_task_label(match.group(1))} 綁的 {match.group(2)} 沒有可辨識的版本號",
+                    how="重跑一次 Fetch，讓 provider 回報 revision；手動輸入的 model id 沒有版本號",
+                )
+            )
+        elif match := _RE_BAD_REF.match(reason):
+            items.append(
+                ChecklistItem(
+                    what=f"線路「{match.group(1)}」的憑證是 {match.group(2)}: 形式，formal run 解不開",
+                    how="session: 憑證只活在記憶體裡。重新輸入一次 API key，或改用 env:<NAME>",
+                )
+            )
+        elif match := _RE_AWAITS.match(reason):
+            items.append(
+                ChecklistItem(
+                    what=f"設定值 {match.group(1)} 尚未核定",
+                    how="在 configs 疊一層 overlay 填入核定值後重新載入",
+                )
+            )
+        else:
+            # 對不上的樣式原樣呈現。看得到總比消失好。
+            items.append(ChecklistItem(what=reason, how=""))
+
+    for kind, paths in missing_files.items():
+        if not paths:
+            continue
+        label = "prompt" if kind == "prompt" else "JSON schema"
+        items.insert(
+            0,
+            ChecklistItem(
+                what=f"還有 {len(paths)} 個 {label} 檔沒建立",
+                how="建立這些檔案：" + "、".join(paths),
+            ),
+        )
+    return tuple(items)
 
 
 class AdminService:
@@ -234,6 +370,7 @@ class AdminService:
                 blocking=snapshot.blocking_reasons,
                 draft_candidate_hash=snapshot.candidate_hash(),
                 draft_freezable=snapshot.freezable,
+                checklist=_checklist(snapshot.blocking_reasons),
             )
 
         active_hash = store.load_hash("llm_runtime")
@@ -255,6 +392,7 @@ class AdminService:
             blocking=snapshot.blocking_reasons,
             draft_candidate_hash=snapshot.candidate_hash(),
             draft_freezable=snapshot.freezable,
+            checklist=_checklist(snapshot.blocking_reasons),
         )
 
     # -- Connections -------------------------------------------------------
@@ -283,10 +421,13 @@ class AdminService:
             )
         if api_key:
             if not self.vault.can_persist:
+                # 本機主控台會自動保管一把 master key（vault.py 的
+                # ensure_local_master_key），因此走到這裡幾乎只剩一種原因：
+                # cryptography 套件沒裝，於是沒有東西能加密。
                 raise AdminServiceError(
-                    "cannot persist an API key on this machine (no master key or no "
-                    "crypto backend). Set PCMEF_SECRET_MASTER_KEY, or put the key in "
-                    "an environment variable and use secret_ref=env:<NAME>."
+                    "cannot persist an API key on this machine: no encryption backend. "
+                    'Install it with pip install -e ".[admin]", or put the key in an '
+                    "environment variable and use secret_ref=env:<NAME>."
                 )
             reference = str(self.vault.store(api_key))
         else:
@@ -467,6 +608,30 @@ class AdminService:
         """鎖定／解鎖一個 task 的 draft binding（LAVA 的 binding lock）。"""
         return self.registry.set_binding_locked(task_code, locked)
 
+    def test_binding(self, task_code: str):
+        """LAVA 的 binding Test：對這個 task 綁到的模型，只跑它需要的能力。
+
+        **刻意不重跑三項全部。** §45 逐 role 列出必要能力，physics_agent 與
+        arbitration_agent 本來就不需要 vision；對它們跑 vision probe 只會生出
+        一個與這個綁定無關的 FAIL，然後讓操作者去修一件不必修的事。
+
+        這不是新的 provider 能力，而是 §50 的 `POST /models/{id}/verify`
+        綁到 task 之後的形態 —— 走同一個 CapabilityVerifier，證據一樣落盤。
+
+        已鎖定的 binding 也允許測：那正是這顆按鈕最主要的用途 ——
+        「我當初鎖的時候是好的，它現在還好嗎」。probe 失敗會如實把該能力
+        從 verified 拿掉，而那是要它揭露的事實，不是要它隱瞞的。
+        """
+        binding = self.registry.get_binding(task_code)
+        if binding is None:
+            raise AdminServiceError(
+                f"task {task_code!r} is not bound to any model, so there is "
+                "nothing to test; bind one first"
+            )
+        return self.verify_model(
+            binding.model_profile_id, required_capabilities(task_code)
+        )
+
     def add_manual_model(self, connection_id: str, model_id: str) -> ModelView:
         """§42 區塊 A：不支援 list API 時允許 Manual Model ID。
 
@@ -634,7 +799,32 @@ class AdminService:
             servable_roles=servable,
             can_edit=row.can_edit, can_fetch=row.can_fetch, can_test=row.can_test,
             can_lock=row.can_lock, can_unlock=row.can_unlock,
+            next_step=_next_step(row, masked, bool(models)),
         )
+
+
+def _next_step(row: ConnectionRow, fingerprint_text: str, has_models: bool) -> str:
+    """這條線路的下一個動作。順序與 registry 的 lifecycle 規則一致。
+
+    憑證排在最前面：憑證解不開時 Fetch 一定失敗，而失敗訊息講的是 provider
+    呼叫出錯，指不回真正的原因。
+    """
+    if fingerprint_text == UNRESOLVABLE_FINGERPRINT:
+        return (
+            "憑證解不開。若用的是 env:<NAME>，那個環境變數在這個行程裡沒有值；"
+            "最省事的作法是刪掉這條線路、重建一條並直接貼上 API key"
+        )
+    if not row.enabled:
+        return "這條線路是 disabled 狀態"
+    if row.lifecycle == Lifecycle.LOCKED:
+        return ""
+    if not has_models:
+        return "按 Fetch 取得這個 provider 的模型清單"
+    if not row.selected_model_profile_id:
+        return "在下拉選單挑一個模型，按 Set"
+    if row.lifecycle == Lifecycle.CONNECTED:
+        return "按 Connect 鎖定，鎖定後才能綁到 agent"
+    return "按 Test 實際驗證 chat / vision / structured_json 三項能力"
 
 
 def _model_view(model: ModelProfileRow) -> ModelView:

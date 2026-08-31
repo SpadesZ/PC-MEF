@@ -82,8 +82,25 @@ header.masthead p { margin: 0; color: var(--muted); font-size: 13px; }
   background: var(--panel);
   border-radius: 8px 8px 0 0;
 }
-.card > h2 .hint { float: right; font-weight: 400; color: var(--muted); font-size: 12px; }
+/* 標題與右側提示。用 flex 而不是 float：提示句一長，float 會讓它掉到
+   下一行並壓在卡片的分隔線上，而不是縮短。 */
+.card > h2 { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.card > h2 .hint { font-weight: 400; color: var(--muted); font-size: 12px; text-align: right; }
 .card .body { padding: 18px; }
+
+/* 每張卡片開頭那一句話。說明「這一步在做什麼」，而不是重複標題。 */
+.lede { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.lede .badge { font-size: 12px; }
+
+/* 步驟 1 的單列表單：provider / 名稱 / key / 按鈕擠在一列，
+   少用的欄位收進 <details class="advanced">。欄位一多，每一格都會變得
+   像是必填 —— 而實際上只有三格需要填。 */
+.add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1.6fr) auto;
+  gap: 12px; align-items: end;
+}
+.add-row .field label { white-space: nowrap; }
 
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
@@ -92,14 +109,22 @@ header.masthead p { margin: 0; color: var(--muted); font-size: 13px; }
   padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px;
   font: inherit; color: var(--ink); background: var(--bg);
 }
-.field .note { font-size: 11.5px; color: var(--muted); }
+/* .note 是全頁通用的次要說明。原本只定義在 .field 之下，於是表格與段落裡
+   同樣掛著 class="note" 的文字完全沒有樣式 —— 看起來與正文一樣重，
+   而它們的用途正好相反。 */
+.note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.field .note { font-size: 11.5px; }
 .field.wide { grid-column: 1 / -1; }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 tr:last-child td { border-bottom: none; }
+/* 操作欄的按鈕群。每顆按鈕各自是一個 <form>（零 script 的代價），
+   inline form 之間沒有間距，不補的話三顆會黏成一塊。 */
 td.actions { white-space: nowrap; }
+td.actions .inline + .inline { margin-left: 5px; }
+td.actions .btn { padding: 4px 10px; font-size: 12.5px; }
 
 .badge {
   display: inline-block; padding: 1px 7px; margin: 1px 3px 1px 0;
@@ -126,6 +151,19 @@ td.actions { white-space: nowrap; }
 .conn-detail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .conn-detail .err { color: var(--danger); }
 
+/* 「下一步：…」。LAVA 有四個階段、五顆按鈕，其中四顆隨時是灰的，
+   而「為什麼是灰的」只寫在 registry 的 lifecycle 規則裡。
+   少了這一行，操作者看得到自己卡住，但看不到卡在哪一步。 */
+.conn-detail .next-step {
+  color: var(--primary); font-weight: 600;
+  padding: 1px 8px; border-radius: 10px;
+  background: #f4f8fc; border: 1px solid #cfe0f0;
+}
+.conn-detail details.rotate { display: inline; }
+.conn-detail details.rotate > summary { cursor: pointer; color: var(--primary); display: inline; }
+.conn-detail details.rotate input { padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 12.5px; }
+.conn-detail details.rotate .btn { padding: 3px 9px; font-size: 12px; }
+
 .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
 .fingerprint { font-family: "Cascadia Mono", Consolas, monospace; letter-spacing: .5px; }
 
@@ -145,10 +183,22 @@ td.actions { white-space: nowrap; }
 .flash { padding: 10px 14px; border-radius: 6px; margin-top: 14px; font-size: 13px; }
 .flash.ok { background: #eef8f2; border: 1px solid #b7e0c6; color: var(--ok); }
 .flash.error { background: #fdefee; border: 1px solid #f0c0bc; color: var(--danger); }
+.flash.warn { background: #fdf7e6; border: 1px solid #e8d59a; color: var(--warn); }
 
-.snapshot dl { display: grid; grid-template-columns: 210px 1fr; gap: 6px 16px; margin: 0; }
+/* minmax(0, 1fr) 而不是 1fr：1fr 的 min-width 預設是 auto，於是一條
+   不換行的長指令會把整個網格撐得比卡片還寬，整頁跟著長出水平捲軸，
+   而右半截指令直接看不到 —— 那一欄的用途正是「日後能完整回答怎麼跑出來的」。 */
+.snapshot dl { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 6px 16px; margin: 0; }
 .snapshot dt { color: var(--muted); font-size: 12px; }
-.snapshot dd { margin: 0; }
+.snapshot dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+/* 「還差什麼」清單。刻意做成表格而不是條列：每一項都必須同時回答
+   「缺什麼」與「去哪裡補」，而條列很容易只寫得出前者 ——
+   那正是這張卡片改版前的樣子（一串技術正確但無從下手的英文句子）。 */
+table.checklist td:first-child { font-weight: 600; }
+table.checklist td { vertical-align: top; }
+
+td .note.mono { margin-left: 6px; }
 
 .footnote { margin-top: 26px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
 
@@ -166,6 +216,14 @@ td.actions { white-space: nowrap; }
 .preset-hint { color: var(--muted); font-size: 11.5px; }
 /* :has() 讓選取狀態不需要 JavaScript；不支援的瀏覽器只是少了高亮。 */
 .preset:has(input:checked) { border-color: var(--primary); background: #f4f8fc; }
+
+/* 執行紀錄的搜尋列。輸入框吃掉剩下的寬度，按鈕貼在右邊。 */
+.search-row { display: flex; gap: 8px; margin: 0 0 14px; align-items: center; }
+.search-row input {
+  flex: 1; min-width: 0; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: 5px; font: inherit;
+}
+.search-row .btn { text-decoration: none; line-height: 1.55; }
 
 .advanced { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
 .advanced > summary {
@@ -202,8 +260,16 @@ td.actions { white-space: nowrap; }
 
 /* ---------- Console：SVG 圖表 ---------- */
 .chart { width: 100%; height: auto; }
-.chart .axis { stroke: var(--line); stroke-width: 1; }
+.chart .axis { stroke: var(--muted); stroke-width: 1; }
 .chart .series { fill: none; stroke-width: 1.8; }
 .chart .tick { font: 10.5px ui-monospace, monospace; fill: var(--muted); }
 .chart .axis-label { font: 11px system-ui; fill: var(--muted); }
 .chart .legend { font: 11px ui-monospace, monospace; fill: var(--ink); }
+
+/* 格線。淡到不與曲線競爭，但存在 —— 沒有格線的圖只能看形狀不能讀數值，
+   而峰值時間正是這張圖要回答的問題。 */
+.chart .grid-line { stroke: var(--line); stroke-width: 1; }
+/* 峰值的垂直指示線。虛線是為了與資料本身區隔：它是標註不是量測。 */
+.chart .peak-line { stroke-width: 1; stroke-dasharray: 3 3; opacity: .55; }
+/* 長條圖的平均參考線。y 軸不截斷時，柱高差看不出來，靠它給出比較基準。 */
+.chart .mean-line { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 5 4; opacity: .5; }

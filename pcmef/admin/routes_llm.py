@@ -14,6 +14,7 @@
 #   2. create_connection() 對應 POST /api/admin/llm/connections
 #   3. fetch_models() / verify_model() 對應 §50 的兩個 provider 動作
 #   4. bind_task() 同時接受 PUT（API）與 POST（HTML form）
+#   4a. test_binding() 只驗該 task 依 §45 需要的能力，不重跑三項全部
 #   5. delete_connection() / delete_model() 在有相依 task 時回 409
 #   6. rotate_secret() 對應 credential-only rotation
 #   7. _respond() 依 Accept/Content-Type 在 JSON 與 redirect 之間切換
@@ -112,10 +113,23 @@ def _payload() -> dict:
     return {key: value for key, value in request.form.items()}
 
 
+def _redirect_with_flash(message: str, category: str = "ok"):
+    """把訊息放進 server-side session 後轉址。
+
+    **絕不把訊息放進 query string。** 訊息可能含使用者剛送出的 secret_ref，
+    而 query string 會留在瀏覽器歷史、Referer header 與伺服器 access log。
+    這是 auth.py 對 CSRF 權杖寫過的同一條理由。
+    """
+    if message:
+        session["flash"] = message
+        session["flash_category"] = category
+    return redirect(url_for("llm_admin.page"))
+
+
 def _respond(body: dict, status: int = 200, message: str = "", category: str = "ok"):
     if _wants_json():
         return jsonify(body), status
-    return redirect(url_for("llm_admin.page", flash=message, category=category))
+    return _redirect_with_flash(message, category)
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +143,7 @@ def _dependency(error: DependencyError):
     body = {"error": str(error), "dependent_tasks": list(error.tasks)}
     if _wants_json():
         return jsonify(body), 409
-    return redirect(
-        url_for("llm_admin.page", flash=str(error), category="error")
-    ), 409
+    return _redirect_with_flash(str(error), "error"), 409
 
 
 @blueprint.errorhandler(AdminSecurityError)
@@ -146,7 +158,7 @@ def _bad_request(error: Exception):
     body = {"error": str(error)}
     if _wants_json():
         return jsonify(body), 400
-    return redirect(url_for("llm_admin.page", flash=str(error), category="error")), 400
+    return _redirect_with_flash(str(error), "error"), 400
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +179,14 @@ def index():
 @blueprint.get("/admin/llm-setup")
 def page():
     service = _service()
-    flash = request.args.get("flash", "")
-    category = request.args.get("category", "ok")
+    # 訊息從 server-side session 取，**不從 query string 取**。
+    #
+    # 舊版是 ?flash=<錯誤全文>，而錯誤全文可能含使用者剛送出的 secret_ref。
+    # 實測外洩過一次：使用者把 API key 填進 secret_ref，resolve 失敗的訊息
+    # 就把整把 key 帶進網址列、瀏覽器歷史與 access log。
+    # auth.py 對 CSRF 權杖早就寫過同一條理由，只是沒有套用到錯誤訊息。
+    flash = session.pop("flash", "")
+    category = session.pop("flash_category", "ok")
     return render_template(
         "llm_setup.html",
         csrf_token=_csrf_token(),
@@ -329,6 +347,32 @@ def lock_binding(task_code: str):
         {"task_code": binding.task_code, "is_locked": binding.is_locked},
         200,
         f"{task_code} draft binding {'已鎖定' if binding.is_locked else '已解鎖'}",
+    )
+
+
+@blueprint.post("/api/admin/llm/bindings/<task_code>/test")
+def test_binding(task_code: str):
+    """§42 區塊 C 的 Test：只驗這個 task 需要的能力。
+
+    與 connections 的 Test 分開存在，因為問的是不同問題：那一顆問
+    「這條線路通不通」，這一顆問「這個角色現在還能用它綁的模型嗎」。
+    """
+    _guard()
+    outcome = _service().test_binding(task_code)
+    passed = not outcome.failed()
+    return _respond(
+        {
+            "task_code": task_code,
+            "ok": passed,
+            "model_id": outcome.model_id,
+            "verified": [c.value for c in outcome.verified],
+            "results": [r.to_artifact() for r in outcome.results],
+        },
+        200,
+        f"{task_code} · {outcome.model_id} "
+        + ("測試通過：" if passed else "測試未通過：")
+        + " / ".join(outcome.summary()),
+        "ok" if passed else "error",
     )
 
 

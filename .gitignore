@@ -1,8 +1,14 @@
 # secrets — NFR-08：API key 絕不進 repo
 .env
 .env.*
+# 但 .env.example 必須進版控 —— 它是範本，不含任何實際值，而它存在的
+# 唯一理由就是讓接手的人 clone 之後看得到要設哪些變數。
+# `.env.*` 原本把它一起吞掉：檔案只活在原作者的機器上，檔頭還寫著
+# 「.env.example 會進版控」，而那句話是假的（與下面 secrets/ 那條同一類錯誤）。
+!.env.example
 # 前置斜線只排除 repo 根目錄下的 vault 目錄。寫成 secrets/ 會連
 # pcmef/secrets/（secret_ref 抽象層的原始碼）一起吞掉，而那份程式碼必須進版控。
+# master.key 與 vault.json 都在這個目錄下，因此都排除得到。
 /secrets/
 *.secret.json
 **/opaque_map*.json
@@ -25,6 +31,11 @@ registry/*.db
 # 判準改過幾次、每次凍結時的前提證據是什麼，只有版控留得住（NOTE-028）。
 !freeze/amendments/
 !freeze/amendments/*.amendment.json
+
+# 本機開發工具設定。launch.json 寫死了直譯器名稱與埠號，是個別機器的東西；
+# 用 Docker 接手的人拿到它只會困惑。刻意只忽略這一個檔而不是整個 .claude/，
+# 將來若要共用 settings 或 agent 定義，那些仍然進得了版控。
+.claude/launch.json
 
 # Python
 __pycache__/

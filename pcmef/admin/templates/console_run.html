@@ -58,18 +58,22 @@
   {# ---------------- 結果 ---------------- #}
   {% if bundle.curves %}
   <section class="card" id="transient">
-    <h2>Optical transient<span class="hint">每個時間 bin 收到的能量</span></h2>
+    <h2>Optical transient<span class="hint">訊號從 0 長起來、何時到峰值、再衰減回去</span></h2>
     <div class="body">
       {{ curves_svg | safe }}
       <p class="note">
+        <strong>怎麼看這張圖：</strong>兩軸都自 0 起，所以曲線離開基線那一點就是
+        最早回波到達的時間；圓點標的是峰值，虛線落在時間軸上的位置就是峰值時間。
+        <br>
+        <strong>要檢查什麼：</strong>峰值應該遠離時間窗右緣。貼在右緣代表回波被
+        截斷，那次模擬的總能量會偏低而且不可用 —— 這是這張圖唯一的科學檢查。
         時間軸由場景幾何推導，不沿用 cornell_box 預設（NOTE-013）。
-        峰值應遠離窗邊；貼在窗邊代表回波被截斷。
       </p>
     </div>
   </section>
 
   <section class="card" id="energy">
-    <h2>各場景總能量<span class="hint">相同參數下可用來比較四類的差異</span></h2>
+    <h2>各場景總能量<span class="hint">同一次執行內比較四類；跨執行不可比</span></h2>
     <div class="body">
       {{ energy_svg | safe }}
       <table style="margin-top:14px">
@@ -85,6 +89,15 @@
         {% endfor %}
         </tbody>
       </table>
+      <p class="note" style="margin-top:12px">
+        <strong>y 軸刻意不截斷。</strong>四類的總能量本來就只差不到 1%，
+        零起點的柱子必然看起來等高 —— 那是事實不是缺陷。差多少請看柱子下方
+        相對平均的百分比，以及上表的數值。截掉 y 軸起點能讓 0.3% 的差看起來
+        像三倍，那在論文裡是造假。
+        <br>
+        <strong>不同執行之間不可比。</strong>總能量隨解析度與 spp 縮放，
+        換一個 preset 數字就整個平移；只有同一次執行內的四類才互相可比。
+      </p>
     </div>
   </section>
   {% endif %}
@@ -168,8 +181,19 @@
     var payload = JSON.parse(event.data);
     badge.textContent = payload.status;
     badge.className = 'badge ' + (payload.status === 'succeeded' ? 'ok' : 'bad');
-    hint.textContent = '已結束（exit ' + payload.exit_code + '）· 重新整理以載入圖表';
     source.close();
+
+    // 圖表由伺服器端算好後嵌在 HTML 裡，因此跑完必須重新載入才看得到。
+    // 原本是請使用者自己按 F5 —— 但畫面在那一刻看起來已經「跑完了」，
+    // 沒有任何東西提示還缺一步，於是圖等於不存在。
+    // 只在成功時自動重載：失敗時本來就沒有圖，而把 log 捲掉會讓人
+    // 看不到剛才那幾行錯誤訊息。
+    if (payload.status === 'succeeded') {
+      hint.textContent = '已結束（exit ' + payload.exit_code + '）· 正在載入圖表…';
+      window.setTimeout(function () { window.location.reload(); }, 800);
+    } else {
+      hint.textContent = '已結束（exit ' + payload.exit_code + '）· 錯誤請見上方輸出';
+    }
   });
 
   source.onerror = function () {

@@ -48,6 +48,10 @@ blueprint = Blueprint("console", __name__)
 _POLL_SECONDS = 0.4
 _MAX_STREAM_SECONDS = 3600
 
+#: 執行紀錄表格預設攤開幾筆，其餘收進 <details>。
+#: 跑久了會累積上百筆，全部攤開時整個頁面只剩那張表。
+RECENT_RUN_COUNT = 6
+
 
 def _runner():
     return current_app.config["PCMEF_CONSOLE_RUNNER"]
@@ -97,15 +101,21 @@ def page():
         session[CSRF_SESSION_KEY] = token
 
     runner = _runner()
-    runs = runner.list_runs()
+    query = request.args.get("q", "").strip()
+    runs = runner.list_runs(query=query)
+    # active 一律看全部，不受搜尋影響：「有東西正在跑」不該因為使用者
+    # 剛好搜了別的關鍵字就從畫面上消失。
+    active = next((r for r in runner.list_runs() if not r.finished), None)
     return render_template(
         "console.html",
         csrf_token=token,
         presets=PRESETS,
         runs=runs,
+        query=query,
+        recent_count=RECENT_RUN_COUNT,
         classes=current_app.config.get("PCMEF_CONSOLE_CLASSES", []),
         gate_summary=current_app.config["PCMEF_CONSOLE_GATE_SUMMARY"](),
-        active=next((r for r in runs if not r.finished), None),
+        active=active,
     )
 
 
@@ -173,6 +183,43 @@ def start_run():
         params["simulation_out"] = str(form.get("simulation_out", "")).strip()
 
     record = _runner().start(RunSpec(kind=kind, params=params))
+    if request.form:
+        return redirect(url_for("console.run_page", run_id=record.run_id))
+    return jsonify(record.to_json()), 201
+
+
+@blueprint.post("/api/console/runs/<run_id>/delete")
+def delete_run(run_id: str):
+    """刪掉一次執行紀錄。執行中的由 runner 拒絕。"""
+    _guard()
+    _runner().delete(run_id)
+    if request.form:
+        return redirect(url_for("console.page"))
+    return jsonify({"deleted": run_id}), 200
+
+
+@blueprint.post("/api/console/llm-snapshot")
+def llm_snapshot():
+    """從主控台觸發 `pcmef llm snapshot`，可選擇是否 --freeze。
+
+    **UI 不判斷該不該凍結。** 這個端點只啟動真正的 CLI 子行程；前提未齊時
+    是 CLI 自己印出缺什麼並回 exit 2。§52 結語要擋的是「UI 成為繞過 freeze
+    的第二條設定通道」—— 而這裡走的是同一條通道、同一組檢查，
+    並且把完整指令與輸出留成一筆可追溯的 run record。
+
+    直接寫 lock 的那條路（`POST /api/admin/llm/runtime-snapshot`）仍然是 403：
+    admin 頁面自己永遠不寫 lock，要寫就得經過這個真正的子行程。
+    """
+    _guard()
+    form = request.form if request.form else (request.get_json(silent=True) or {})
+    freeze = str(form.get("freeze", "")) in ("1", "true", "True", "on")
+    record = _runner().start(
+        RunSpec(
+            kind="llm_snapshot",
+            params={"freeze": freeze},
+            label="凍結 llm_runtime.lock" if freeze else "檢查（不寫入）",
+        )
+    )
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201

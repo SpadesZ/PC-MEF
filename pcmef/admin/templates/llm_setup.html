@@ -4,23 +4,29 @@
  #         載入 pcmef/admin/static/admin.css。不發出任何對外請求。
  # 檔案路徑: pcmef/admin/templates/llm_setup.html
  # 產生時間: 2026-08-27 00:40 +08:00
- # 版本: v0.1.0
- # 功能說明: 管理頁面本體。依 §42 圖 8 由上而下排四張卡片：新增連線、連線清單、
- #           角色綁定、正式快照；憑證只以 ****abcd 呈現。
- # 模組定位: §42 UI Layout Specification 的實作。它「不是」邏輯所在 ——
- #           任何判斷都必須在 services 層做完再傳進來。
+ # 版本: v0.2.0
+ # 功能說明: 管理頁面本體。四張卡片由上而下＝一條線路從無到可用的四個步驟：
+ #           新增線路、設定線路、綁到 agent、凍結前檢查。憑證只以 ****abcd 呈現。
+ # 模組定位: §42 UI Layout Specification 的實作，版型對齊 roothinks LAVA setup。
+ #           它「不是」邏輯所在 —— 任何判斷都必須在 services 層做完再傳進來。
  # 主要責任:
- #   1. Card A 呈現 Add Connection 的九個欄位與 Save
- #   2. Card B 呈現 Connections 表與 Verify / Fetch Models / Disable / Delete
- #   3. Card C 呈現 Task Bindings 與只含相容選項的 dropdown
- #   4. Card D 呈現 Formal Snapshot 的 hash、時間與狀態
+ #   1. Card A 以單列表單新增線路，少用的欄位收進「進階設定」
+ #   2. Card B 一行一線路，依序呈現 Fetch → 選模型 → Test → Connect
+ #   3. Card C 呈現四個 agent 的綁定，dropdown 只含相容且已 Locked 的線路
+ #   4. Card D 以「還差什麼」清單呈現凍結前提，hash 等內部欄位收進技術細節
  #   5. 以 csrf_token 隱藏欄位讓每個寫入表單都帶 CSRF 權杖
  # 維護提醒:
  #   - 不得在此加入 React/Vue/jQuery 或任何 CDN script；§42 明訂第一版採
- #     server-rendered HTML + minimal JavaScript。
- #   - 不得顯示完整 API key 或其前綴；只能顯示 connection.secret_fingerprint。
+ #     server-rendered HTML + minimal JavaScript。摺疊一律用原生 <details>。
+ #   - 不得顯示完整 API key 或其前綴，也不得把 masked 值回填進 input ——
+ #     回填的字串長度就是真實長度。只能顯示 connection.secret_fingerprint。
  #   - 不得在樣板內判斷能力相容性；dropdown 的內容必須由 services 先過濾好，
  #     否則同一套規則會有兩份實作。
+ #   - 不得把 Card D 的「還差什麼」清單改成只顯示前幾條。清單顯示不完整時，
+ #     畫面會說「都齊了」而 CLI 凍不起來，那是最難查的一種不一致。
+ #   - v0.2.0 修訂：四張卡片改為「四個步驟」敘事，每張卡片加上一句話說明它
+ #     在做什麼；Card A 收摺進階欄位；Card B 每列補上 next_step；
+ #     Card D 由 blocking reason 原文改為白話待辦清單。決策見 NOTE-024。
  #   - v0.1.0 新增：首版四卡版型。
  # 驗證方式:
  #   - py -3.10 -m pytest tests/llm_admin/test_admin_page.py -v
@@ -37,12 +43,13 @@
 <div class="page">
 
   <header class="masthead">
-    <h1>PC-MEF · LLM Setup / Model Registry</h1>
+    <h1>PC-MEF · LLM 設定</h1>
     <p>
-      本頁只寫 <strong>draft</strong> LLM registry。provider / model / prompt /
-      schema / runtime identity 一旦進入 Formal，即由 immutable
-      <span class="mono">llm_runtime.lock</span> 接管；所有 formal run 一律無 UI、走 CLI。
-      綁定 <span class="mono">{{ bind_host }}</span>。
+      照下面四個步驟做一次，四個 agent 就能開始用真實 LLM。
+      本頁只寫 <strong>draft</strong> 設定；正式實驗用的
+      <span class="mono">llm_runtime.lock</span> 只能由 CLI 產生。
+      服務位置 <span class="mono">{{ bind_host }}</span>。
+      <a href="{{ url_for('console.page') }}">← 回模擬執行台</a>
     </p>
   </header>
 
@@ -50,79 +57,103 @@
     <div class="flash {{ category }}">{{ message }}</div>
   {% endfor %}
 
-  {# ---------------- Card A. Add Connection ---------------- #}
+  {# ---------------- Card A. 新增線路 ---------------- #}
   <section class="card" id="add-connection">
-    <h2>Add Connection<span class="hint">建立 draft connection profile，不產生 formal identity</span></h2>
+    <h2>1. 新增 LLM 通訊線路</h2>
     <div class="body">
+      <p class="lede">
+        選 provider、取個名字、貼上 API key，就這三格。
+        {% if can_persist %}
+          key 送出後立刻加密存進本機 vault，伺服器不會再把它吐回來 ——
+          之後畫面上只看得到 <span class="mono">****abcd</span> 這種指紋。
+        {% else %}
+          <strong>這台機器目前沒有加密後端</strong>，因此不能直接貼 key。
+          先安裝 <span class="mono">pip install -e ".[admin]"</span>，
+          或把 key 放進環境變數後在「進階設定」填 <span class="mono">env:名稱</span>。
+        {% endif %}
+      </p>
+
       <form method="post" action="{{ url_for('llm_admin.create_connection') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="grid">
+
+        <div class="add-row">
           <div class="field">
             <label for="provider">Provider</label>
             <select id="provider" name="provider">
               {% for name in providers %}
-                <option value="{{ name }}">{{ name }}{% if name not in formal_providers %} (非 formal){% endif %}</option>
+                <option value="{{ name }}">{{ name }}{% if name not in formal_providers %}（不可用於正式實驗）{% endif %}</option>
               {% endfor %}
             </select>
           </div>
           <div class="field">
-            <label for="name">Name</label>
-            <input id="name" name="name" required placeholder="Gemini Formal">
-            <span class="note">管理者可讀別名，不參與 scientific hash</span>
+            <label for="name">名稱</label>
+            <input id="name" name="name" required placeholder="例如 Gemini 正式線">
           </div>
           <div class="field">
             <label for="api_key">API Key</label>
+            {# 永遠不預填任何值。masked 值的長度就是真實長度（LLM-UI-01）。 #}
             <input id="api_key" name="api_key" type="password" autocomplete="off"
-                   placeholder="{% if can_persist %}寫入後不再回傳{% else %}本機無 master key，請改用 secret_ref{% endif %}"
+                   placeholder="{% if can_persist %}貼上後即加密保存{% else %}此機器無加密後端，請改用進階設定的 secret_ref{% endif %}"
                    {% if not can_persist %}disabled{% endif %}>
-            <span class="note">提交後立即轉為 secret_ref；伺服器不再回傳完整值</span>
           </div>
           <div class="field">
-            <label for="secret_ref">…或既有 secret_ref</label>
-            <input id="secret_ref" name="secret_ref" placeholder="env:GEMINI_API_KEY">
-            <span class="note">與 API Key 二擇一</span>
-          </div>
-          <div class="field">
-            <label for="base_url">Base URL</label>
-            <input id="base_url" name="base_url" placeholder="留空則用 provider 預設">
-            <span class="note">變更 endpoint 視為 runtime identity 變更</span>
-          </div>
-          <div class="field">
-            <label for="timeout_sec">Timeout (sec)</label>
-            <input id="timeout_sec" name="timeout_sec" type="number" min="1" value="30">
-          </div>
-          <div class="field">
-            <label for="enabled">Enabled</label>
-            <select id="enabled" name="enabled">
-              <option value="1" selected>enabled</option>
-              <option value="0">disabled</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="notes">Notes</label>
-            <input id="notes" name="notes">
+            <label>&nbsp;</label>
+            <button class="btn primary" type="submit">＋ 新增線路</button>
           </div>
         </div>
-        <p style="margin:16px 0 0">
-          <button class="btn primary" type="submit">Save</button>
-        </p>
+
+        <details class="advanced">
+          <summary>進階設定<span class="note">改用既有憑證、自訂 endpoint 或逾時，才需要展開</span></summary>
+          <div class="grid">
+            <div class="field">
+              <label for="secret_ref">改用既有 secret_ref</label>
+              <input id="secret_ref" name="secret_ref" placeholder="env:GEMINI_API_KEY">
+              <span class="note">與上面的 API Key 二擇一。填了這格就不要填 API Key</span>
+            </div>
+            <div class="field">
+              <label for="base_url">Base URL</label>
+              <input id="base_url" name="base_url" placeholder="留空則用 provider 預設">
+              <span class="note">換 endpoint 等同換一個 runtime identity，會影響凍結後的比對</span>
+            </div>
+            <div class="field">
+              <label for="timeout_sec">逾時（秒）</label>
+              <input id="timeout_sec" name="timeout_sec" type="number" min="1" value="30">
+            </div>
+            <div class="field">
+              <label for="enabled">啟用狀態</label>
+              <select id="enabled" name="enabled">
+                <option value="1" selected>啟用</option>
+                <option value="0">停用</option>
+              </select>
+            </div>
+            <div class="field wide">
+              <label for="notes">備註</label>
+              <input id="notes" name="notes" placeholder="給自己看的，不影響任何計算">
+            </div>
+          </div>
+        </details>
       </form>
     </div>
   </section>
 
-  {# ---------------- Card B. Connections（LAVA 一行一線路）---------------- #}
+  {# ---------------- Card B. 線路設定（一行一線路）---------------- #}
   <section class="card" id="connections">
-    <h2>LLM 通訊線路 (Connections)<span class="hint">Fetch → 選模型 → Test → Connect；只有 Locked 的線路能綁定</span></h2>
+    <h2>2. 設定線路<span class="hint">Fetch → 選模型 → Test → Connect</span></h2>
     <div class="body">
+      <p class="lede">
+        每條線路照左到右四個按鈕走一遍。走完會變成 <span class="badge ok">Locked</span>，
+        只有 Locked 的線路才能在步驟 3 綁給 agent。
+      </p>
+
       {% if not connections %}
-        <p class="empty">尚無任何線路。請先用上方的 Add Connection 建立一條。</p>
+        <p class="empty">還沒有任何線路。先用上面的步驟 1 建立一條。</p>
       {% else %}
       {% for connection in connections %}
       <div class="conn-row {{ 'locked' if connection.lifecycle == 'locked' else '' }}">
         <span class="badge conn-id">LLM-{{ loop.index }}</span>
         <span class="conn-name">{{ connection.name }}</span>
         <span class="badge">{{ connection.provider }}</span>
-        <span class="fingerprint" title="secret_ref: {{ connection.secret_ref }}">{{ connection.secret_fingerprint }}</span>
+        <span class="fingerprint" title="憑證來源：{{ connection.secret_ref }}">{{ connection.secret_fingerprint }}</span>
 
         {# Fetch #}
         <form class="inline" method="post" action="{{ url_for('llm_admin.fetch_models', connection_id=connection.connection_id) }}">
@@ -135,7 +166,7 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           {% if connection.models %}
             <select name="model_profile_id" {% if not connection.can_edit %}disabled{% endif %}>
-              <option value="">-- Select Model --</option>
+              <option value="">-- 選擇模型 --</option>
               {% for model in connection.models %}
                 <option value="{{ model.model_profile_id }}"
                   {% if model.model_profile_id == connection.selected_model_profile_id %}selected{% endif %}>
@@ -144,7 +175,7 @@
               {% endfor %}
             </select>
           {% else %}
-            <input name="model_id" placeholder="手動輸入 model id"
+            <input name="model_id" placeholder="或直接輸入 model id"
                    {% if not connection.can_edit %}disabled{% endif %}>
           {% endif %}
           <button class="btn" type="submit" {% if not connection.can_edit %}disabled{% endif %}>Set</button>
@@ -155,7 +186,7 @@
         {% if connection.status not in ('pending', 'active') %}
           <span class="badge bad" title="連線健康度，與設定進度分開">{{ connection.status }}</span>
         {% endif %}
-        {% if not connection.enabled %}<span class="badge bad">disabled</span>{% endif %}
+        {% if not connection.enabled %}<span class="badge bad">已停用</span>{% endif %}
 
         {# Test #}
         <form class="inline" method="post" action="{{ url_for('llm_admin.test_connection', connection_id=connection.connection_id) }}">
@@ -176,68 +207,86 @@
         </form>
         {% endif %}
 
-        {# Delete #}
+        {# 刪除 #}
         <form class="inline" method="post" action="{{ url_for('llm_admin.delete_connection', connection_id=connection.connection_id) }}"
               onsubmit="return confirm('刪除線路 {{ connection.name }}？');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="btn danger" type="submit">Delete</button>
+          <button class="btn danger" type="submit">刪除</button>
         </form>
       </div>
 
       <div class="conn-detail">
+        {% if connection.next_step %}
+          <span class="next-step">下一步：{{ connection.next_step }}</span>
+        {% else %}
+          <span class="badge ok">這條線路已就緒，可在步驟 3 綁定</span>
+        {% endif %}
+
         {% if connection.selected_model_id %}
-          <span>已選定 <span class="mono">{{ connection.selected_model_id }}</span></span>
+          <span>已選 <span class="mono">{{ connection.selected_model_id }}</span></span>
           {% for model in connection.models if model.model_profile_id == connection.selected_model_profile_id %}
             {% for capability in model.verified %}<span class="badge ok">{{ capability }}</span>{% endfor %}
             {% for capability in model.declared if capability not in model.verified %}
-              <span class="badge declared" title="provider 宣稱，尚未 probe 驗證">{{ capability }}?</span>
+              <span class="badge declared" title="provider 宣稱有，但還沒實際測過">{{ capability }}?</span>
             {% endfor %}
           {% endfor %}
           {% if connection.servable_roles %}
-            <span>· 可綁 {{ connection.servable_roles|length }}/4 角色：</span>
-            {% for role in connection.servable_roles %}<span class="badge ok">{{ role }}</span>{% endfor %}
+            <span>· 可服務 {{ connection.servable_roles|length }}/4 個 agent</span>
           {% endif %}
-        {% else %}
-          <span class="empty">尚未選定模型{% if connection.models %}（已取得 {{ connection.models|length }} 個{% endif %}{% if connection.models %}）{% endif %}</span>
         {% endif %}
-        {% if connection.last_verified_at %}<span>· 最近驗證 {{ connection.last_verified_at }}</span>{% endif %}
         {% if connection.last_error %}<span class="err">· {{ connection.last_error }}</span>{% endif %}
+
+        {% if connection.secret_ref.startswith('vault:') and connection.can_edit %}
+        <details class="rotate">
+          <summary>換一把 key</summary>
+          <form class="inline" method="post" action="{{ url_for('llm_admin.rotate_secret', connection_id=connection.connection_id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input name="api_key" type="password" autocomplete="off" placeholder="貼上新的 API key">
+            <button class="btn" type="submit">更新</button>
+            <span class="note">只換憑證，provider / model / endpoint 都不動，因此不影響已凍結的實驗</span>
+          </form>
+        </details>
+        {% endif %}
       </div>
       {% endfor %}
       {% endif %}
     </div>
   </section>
 
-  {# ---------------- Card C. Task Bindings ---------------- #}
+  {# ---------------- Card C. 服務綁定 ---------------- #}
   <section class="card" id="task-bindings">
-    <h2>服務綁定 (Service Binding)<span class="hint">LLM Selection 僅顯示已 Locked 的線路</span></h2>
+    <h2>3. 綁定 agent<span class="hint">下拉選單只列得出已 Locked 的線路</span></h2>
     <div class="body">
+      <p class="lede">
+        指定每個 agent 要用哪個模型。四個角色可以綁同一條線路 ——
+        前提是那個模型三項能力（chat / vision / structured_json）都實際通過 Test。
+      </p>
       <table>
         <thead>
           <tr>
-            <th style="width:30%">任務名稱 (Task ID)</th>
-            <th>Required Capability</th>
-            <th style="width:30%">LLM Selection（僅顯示 Locked）</th>
-            <th>操作</th><th>狀態</th>
+            <th style="width:34%">任務名稱 (Task ID)</th>
+            <th style="width:34%">LLM Selection（僅顯示 Locked）</th>
+            <th>操作</th>
+            <th>狀態</th>
           </tr>
         </thead>
         <tbody>
         {% for binding in bindings %}
           <tr>
             <td>
-              <strong>{{ binding.ui_name }}</strong><br>
-              <span class="note mono">{{ binding.task_code }}</span><br>
-              <span class="note">{{ binding.description }}</span>
-            </td>
-            <td>
-              {% for capability in binding.required %}
-                <span class="badge">{{ capability }}</span>
-              {% endfor %}
+              <strong>{{ binding.ui_name }}</strong>
+              <span class="note mono">{{ binding.task_code }}</span>
+              <div class="note">{{ binding.description }}</div>
+              <div>
+                {% for capability in binding.required %}
+                  <span class="badge">{{ capability }}</span>
+                {% endfor %}
+              </div>
             </td>
             <td>
               {% if binding.is_locked %}
                 <span class="mono">{{ binding.current_label }}</span>
-                <br><span class="note">已鎖定，解鎖後才能更換</span>
+                <div class="note">已鎖定；要換模型請先按右邊的 Unlock</div>
               {% elif binding.options %}
               <form class="inline" method="post" action="{{ url_for('llm_admin.bind_task', task_code=binding.task_code) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -249,74 +298,117 @@
                     </option>
                   {% endfor %}
                 </select>
-                <button class="btn primary" type="submit" {% if not bind_enabled %}disabled{% endif %}>Bind</button>
+                <button class="btn primary" type="submit" {% if not bind_enabled %}disabled{% endif %}>綁定</button>
               </form>
               {% else %}
-                <span class="empty">沒有已 Locked 且能力相容的線路</span>
+                <span class="empty">沒有可選的線路</span>
+                <div class="note">
+                  需要一條已 Locked、且 {{ binding.required|join(' / ') }} 都通過 Test 的線路
+                </div>
               {% endif %}
             </td>
+            {# Test / Lock / Unlock 三顆都常駐，不能用的呈灰色。
+               只顯示「當下可做的那一顆」看起來乾淨，但操作者無從得知
+               另外兩個動作存不存在 —— 而 Unlock 正是他改不了已鎖定綁定時
+               要找的東西。版型依 Appendix J3 的 UI reference。 #}
             <td class="actions">
-              {% if binding.bound %}
-                {% if binding.is_locked %}
-                <form class="inline" method="post" action="{{ url_for('llm_admin.lock_binding', task_code=binding.task_code) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="locked" value="0">
-                  <button class="btn" type="submit">Unlock</button>
-                </form>
-                {% else %}
-                <form class="inline" method="post" action="{{ url_for('llm_admin.lock_binding', task_code=binding.task_code) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="locked" value="1">
-                  <button class="btn accent" type="submit" {% if not bind_enabled %}disabled{% endif %}>Lock</button>
-                </form>
-                {% endif %}
-              {% else %}
-                <span class="empty">—</span>
-              {% endif %}
+              <form class="inline" method="post" action="{{ url_for('llm_admin.test_binding', task_code=binding.task_code) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn accent" type="submit"
+                        {% if not binding.bound %}disabled{% endif %}
+                        title="{% if binding.bound %}對綁定的模型重跑 {{ binding.required|join(' / ') }} 驗證{% else %}先綁一個模型才能測試{% endif %}">Test</button>
+              </form>
+              <form class="inline" method="post" action="{{ url_for('llm_admin.lock_binding', task_code=binding.task_code) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="locked" value="1">
+                <button class="btn" type="submit"
+                        {% if binding.is_locked or not binding.bound or not bind_enabled %}disabled{% endif %}
+                        title="{% if binding.is_locked %}已經鎖定了{% elif not binding.bound %}先綁一個模型才能鎖定{% else %}記下「這個綁定我檢查過了」{% endif %}">Lock</button>
+              </form>
+              <form class="inline" method="post" action="{{ url_for('llm_admin.lock_binding', task_code=binding.task_code) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="locked" value="0">
+                <button class="btn" type="submit"
+                        {% if not binding.is_locked %}disabled{% endif %}
+                        title="{% if binding.is_locked %}解鎖後才能更換模型{% else %}目前沒有鎖定{% endif %}">Unlock</button>
+              </form>
             </td>
             <td>
-              <span class="badge {{ 'ok' if binding.is_locked else ('warn' if binding.bound else 'bad') }}">{{ binding.status }}</span>
-              {% if binding.bound %}<br><span class="note">v{{ binding.binding_version }}</span>{% endif %}
+              <span class="badge {{ 'ok' if binding.is_locked else ('warn' if binding.bound else 'bad') }}">
+                {% if binding.is_locked %}已鎖定{% elif binding.bound %}已配對{% else %}未配對{% endif %}
+              </span>
+              {% if binding.bound %}<div class="note">v{{ binding.binding_version }}</div>{% endif %}
             </td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
       <p class="note" style="margin-top:12px">
-        這裡的 Lock 是 <strong>draft 層的確認</strong>，只表示「這個綁定我檢查過了」；
-        它<strong>不是</strong> formal identity。科學上有效的凍結只有
-        <span class="mono">llm_runtime.lock</span>，且只能由 CLI 產生。
+        這裡的 Lock 只是<strong>你自己確認過了</strong>的記號，不是正式凍結。
+        真正對實驗有效的凍結只有 <span class="mono">llm_runtime.lock</span>，且只能由 CLI 產生。
         {% if not bind_enabled %}
-        <br>Bind 尚未由 UI 開放：依 §52 步驟 5，先讓 CLI 走完整個 snapshot 流程，才接上 UI 的 Bind。
-        目前請用 <span class="mono">pcmef llm binding set …</span>。
+        <br><strong>這個執行個體沒有開放從網頁綁定</strong>，請改用
+        <span class="mono">pcmef llm binding set …</span>；
+        或用 <span class="mono">docker compose up console</span> 啟動（它預設開放）。
         {% endif %}
       </p>
     </div>
   </section>
 
-  {# ---------------- Card D. Formal Snapshot ---------------- #}
+  {# ---------------- Card D. 凍結前檢查 ---------------- #}
   <section class="card snapshot" id="formal-snapshot">
-    <h2>Formal Snapshot<span class="hint">Formal runner 只接受 snapshot hash；live DB 變更無法穿透既有 run</span></h2>
+    <h2>4. 凍結前檢查<span class="hint">全部打勾之後，才輪到 CLI 產生正式快照</span></h2>
     <div class="body">
-      <dl>
-        <dt>Resolved Binding Hash</dt>
-        <dd class="mono">{{ snapshot.resolved_hash or '—' }}</dd>
-        <dt>Snapshot Time</dt>
-        <dd>{{ snapshot.created_at or '—' }}</dd>
-        <dt>State</dt>
-        <dd><span class="badge {{ snapshot.badge }}">{{ snapshot.state }}</span></dd>
-        <dt>Draft vs Active</dt>
-        <dd>{{ snapshot.comparison }}</dd>
-      </dl>
-      {% if snapshot.blocking %}
-      <ul class="note" style="margin-top:12px">
-        {% for reason in snapshot.blocking %}<li>{{ reason }}</li>{% endfor %}
-      </ul>
-      {% endif %}
-      <p class="note" style="margin-top:12px">
-        快照只能由 CLI 產生：<span class="mono">pcmef llm snapshot --out freeze/llm_runtime.lock.json</span>。
-        本頁不提供產生按鈕 —— UI 永遠不能成為繞過 freeze 的第二條設定通道。
+      <p class="lede">
+        <span class="badge {{ 'ok' if snapshot.draft_freezable else 'warn' }}">{{ snapshot.headline }}</span>
+        {% if snapshot.state == 'FROZEN (immutable)' %}
+          目前已有一份正式快照；{{ snapshot.comparison }}。
+          <strong>已經跑完的實驗不受這頁上的任何改動影響。</strong>
+        {% else %}
+          還沒有任何正式快照，所以現在改這一頁不會動到任何實驗。
+        {% endif %}
       </p>
+
+      {% if snapshot.checklist %}
+      <table class="checklist">
+        <thead>
+          <tr><th style="width:44%">還差什麼</th><th>怎麼補</th></tr>
+        </thead>
+        <tbody>
+        {% for item in snapshot.checklist %}
+          <tr>
+            <td>{{ item.what }}</td>
+            <td class="note">{{ item.how }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+        <p class="empty">沒有待補項目。</p>
+      {% endif %}
+
+      <p class="note" style="margin-top:14px">
+        補齊之後執行：
+        <span class="mono">pcmef llm snapshot --out freeze/llm_runtime.lock.json</span>。
+        本頁刻意不提供這顆按鈕 —— 設定只能有一條正式入口，
+        網頁不能成為繞過凍結的第二條路。
+      </p>
+
+      <details class="advanced">
+        <summary>技術細節<span class="note">寫論文或比對 hash 時才需要</span></summary>
+        <dl>
+          <dt>Active resolved hash</dt>
+          <dd class="mono">{{ snapshot.resolved_hash or '—' }}</dd>
+          <dt>快照產生時間</dt>
+          <dd>{{ snapshot.created_at or '—' }}</dd>
+          <dt>狀態</dt>
+          <dd><span class="badge {{ snapshot.badge }}">{{ snapshot.state }}</span></dd>
+          <dt>Draft candidate hash</dt>
+          <dd class="mono">{{ snapshot.draft_candidate_hash }}</dd>
+          <dt>Draft 與 active 的關係</dt>
+          <dd>{{ snapshot.comparison }}</dd>
+        </dl>
+      </details>
     </div>
   </section>
 

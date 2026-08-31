@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -120,6 +121,16 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 
+#: console 允許啟動的指令種類。
+#:
+#: llm_snapshot 是唯一會寫進 freeze/ 的一種，加入時的界線判斷見
+#: _assert_not_formal() 的說明：console 仍然不跑 formal experiment，
+#: 但可以觸發「把目前的 draft 設定凍結成 lock」這個動作。
+RUN_KINDS: tuple[str, ...] = (
+    "sim_smoke", "surrogate_smoke", "audit_gates", "llm_snapshot",
+)
+
+
 @dataclass(frozen=True)
 class RunSpec:
     """一次執行要做什麼、用什麼參數。"""
@@ -128,15 +139,13 @@ class RunSpec:
     params: Mapping[str, Any]
     label: str = ""
 
-    KINDS: tuple[str, ...] = field(
-        default=("sim_smoke", "surrogate_smoke", "audit_gates"), init=False, repr=False
-    )
+    KINDS: tuple[str, ...] = field(default=RUN_KINDS, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.kind not in ("sim_smoke", "surrogate_smoke", "audit_gates"):
+        if self.kind not in RUN_KINDS:
             raise RunnerError(
-                f"unknown run kind {self.kind!r}; the console only runs exploratory "
-                "commands (sim_smoke / surrogate_smoke / audit_gates)"
+                f"unknown run kind {self.kind!r}; the console runs "
+                + " / ".join(RUN_KINDS)
             )
 
 
@@ -158,6 +167,21 @@ class RunRecord:
     @property
     def finished(self) -> bool:
         return self.status in ("succeeded", "failed")
+
+    def matches(self, query: str) -> bool:
+        """搜尋比對。涵蓋編號、種類、標籤、狀態與參數值。
+
+        參數值也納入，是因為實務上要找的往往是「那次 spp 開到 64 的」，
+        而那個數字只存在於 params 裡，不在任何一個欄位標題上。
+        """
+        needle = query.strip().lower()
+        if not needle:
+            return True
+        haystack = " ".join(
+            [self.run_id, self.kind, self.label, self.status]
+            + [f"{k}={v}" for k, v in self.params.items()]
+        ).lower()
+        return needle in haystack
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -211,17 +235,33 @@ class ConsoleRunner:
 
     @staticmethod
     def _assert_not_formal(params: Mapping[str, Any]) -> None:
-        """擋下任何試圖從 UI 啟動 formal 的參數。
+        """擋下任何試圖從 UI 啟動 formal experiment 的參數。
 
-        §208：所有 formal run 一律無 UI、走 CLI。這裡不是提醒而是硬性檢查 ——
-        UI 一旦能跑 formal，freeze 的意義就被繞過了。
+        §208：所有 formal run 一律無 UI、走 CLI。這裡不是提醒而是硬性檢查。
+
+        **這條線在 2026-08-31 被明確劃細，而不是被放寬。** 原本的理解是
+        「UI 不得碰任何與 formal 有關的事」，於是連凍結設定都只能在終端機做。
+        現在區分成兩件事：
+
+          * **跑 formal experiment** —— 仍然完全禁止，就是這個函式擋的事。
+            那會產生研究結果，而結果必須來自一個可重現、無人值守的路徑。
+          * **凍結目前的 draft 設定成 lock** —— 允許由 console 觸發
+            （run kind `llm_snapshot`），但**准駁權不在 UI**：
+            console 只是啟動真正的 `pcmef llm snapshot --freeze` 子行程，
+            前提未齊時是 CLI 自己拒絕並回 exit 2。UI 沒有任何一行程式碼
+            能決定「這份 lock 該不該寫」。
+
+        差別在於「誰做判斷」。§52 結語要擋的是「UI 成為繞過 freeze 的第二條
+        設定通道」—— 而按鈕觸發的 CLI 走的是同一條通道、同一組檢查，
+        並且把完整指令、時間與輸出留成一筆 run record，
+        那比 shell history 更完整，不是更少。
         """
         for key, value in params.items():
             if "formal" in str(key).lower() and value:
                 raise FormalRunRefused(
-                    f"the console refuses {key}={value!r}. Formal runs are CLI-only "
-                    "(SRC-SAI §208); the console explores and views, it never "
-                    "produces formal identity."
+                    f"the console refuses {key}={value!r}. Formal experiment runs "
+                    "are CLI-only (SRC-SAI §208); the console explores, views, and "
+                    "may trigger a freeze, but it never runs a formal experiment."
                 )
 
     def build_config(self, run_id: str, params: Mapping[str, Any]) -> Path:
@@ -327,6 +367,18 @@ class ConsoleRunner:
                 "surrogate", "smoke", "--simulation-out", str(source),
                 "--out", str(out_dir),
             ]
+        if spec.kind == "llm_snapshot":
+            # --out 是**目錄**（snapshot.write 自己決定檔名為
+            # runtime_snapshot_<hash>.json），不是檔案路徑。給它一個 .json
+            # 結尾的路徑會建出一個叫那個名字的資料夾。
+            #
+            # 候選快照永遠會產生，隨這次 run 存著；--freeze 才會寫
+            # freeze/llm_runtime.lock.json，而且前提未齊時是 CLI 自己
+            # 拒絕（exit 2），不是這裡判斷的。
+            command = base + ["llm", "snapshot", "--out", str(out_dir)]
+            if spec.params.get("freeze"):
+                command.append("--freeze")
+            return command
         return base + ["audit", "e1-gates", "--out", str(out_dir)]
 
     # -- 執行 -------------------------------------------------------------
@@ -420,7 +472,13 @@ class ConsoleRunner:
             raise RunnerError(f"run {run_id!r} not found")
         return RunRecord.from_json(json.loads(path.read_text(encoding="utf-8")))
 
-    def list_runs(self, limit: int = 30) -> list[RunRecord]:
+    def list_runs(self, limit: int = 30, query: str = "") -> list[RunRecord]:
+        """最近的執行紀錄，新到舊。query 非空時只留匹配的。
+
+        篩選在讀完之後才做，而不是在 `len(records) >= limit` 那個迴圈裡：
+        先截斷再篩選的話，limit 之外的舊紀錄永遠搜不到 —— 而「東西太多所以
+        要搜尋」的情境，要找的通常正好就是那些舊的。
+        """
         records = []
         for folder in sorted(self.run_root.iterdir(), reverse=True):
             path = folder / "run.json"
@@ -428,9 +486,27 @@ class ConsoleRunner:
                 records.append(
                     RunRecord.from_json(json.loads(path.read_text(encoding="utf-8")))
                 )
-            if len(records) >= limit:
-                break
-        return records
+        if query:
+            records = [r for r in records if r.matches(query)]
+        return records[:limit]
+
+    def delete(self, run_id: str) -> None:
+        """刪掉一次執行的整個目錄（log、設定與產物）。
+
+        執行中的不給刪：子行程還握著 log 的檔案句柄，而且刪掉之後 SSE
+        會對著一個不存在的紀錄一直重試。要刪就先讓它跑完。
+
+        這些是**探索用**紀錄，outputs/ 本來就不進版控，因此刪除沒有科學風險；
+        真正有科學意義的東西在 freeze/ 與 artifacts/，不在這裡。
+        """
+        record = self.get(run_id)
+        if not record.finished:
+            raise RunnerError(
+                f"run {run_id!r} is still running; wait for it to finish before "
+                "deleting it"
+            )
+        shutil.rmtree(self.run_dir(run_id))
+        self._threads.pop(run_id, None)
 
     def is_running(self, run_id: str) -> bool:
         return not self.get(run_id).finished

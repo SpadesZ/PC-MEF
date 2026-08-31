@@ -333,6 +333,176 @@ def test_the_page_states_that_it_only_writes_the_draft_registry(client):
 
 
 # ---------------------------------------------------------------------------
+# 可操作性：畫面必須答得出「所以我現在該按哪裡」
+# ---------------------------------------------------------------------------
+
+
+def _tag(html: str, needle: str) -> str:
+    """取出含有 needle 的那一個 HTML 標籤。"""
+    start = html.rindex("<", 0, html.index(needle))
+    return html[start : html.index(">", start) + 1]
+
+
+def test_the_api_key_field_is_usable_when_the_vault_can_persist(client):
+    """能加密時 API Key 欄位必須是可輸入的。
+
+    這條擋的是一個實際發生過的死鎖：欄位被 disabled 之後，操作者只剩
+    `env:<NAME>` 一條路，而那個環境變數在容器裡同樣沒設，於是憑證顯示
+    (unresolvable)、Fetch 失敗、沒有線路鎖得起來、四個 agent 全部綁不上。
+    """
+    html = client.get("/admin/llm-setup").get_data(as_text=True)
+    assert "disabled" not in _tag(html, 'id="api_key"')
+
+
+def test_each_connection_row_says_what_to_do_next(client, seeded):
+    """LAVA 有四個階段、五顆按鈕，隨時有四顆是灰的。
+
+    「為什麼是灰的」只寫在 registry 的 lifecycle 規則裡，畫面上必須說出來，
+    否則操作者看得到自己卡住，但看不到卡在哪一步。
+    """
+    html = client.get("/admin/llm-setup").get_data(as_text=True)
+    assert "下一步：" in html
+
+
+def test_the_snapshot_card_says_what_is_missing_in_plain_language(client, seeded):
+    """凍結前提要用操作者的話講，而不是 blocking reason 的原文。"""
+    html = client.get("/admin/llm-setup").get_data(as_text=True)
+
+    # 四個 agent 都還沒綁 → 四條待辦，且以 ui_name 稱呼它們。
+    assert "Observation Agent 還沒指定要用哪個模型" in html
+    assert "還差 4 項才能凍結" in html
+    # 原文不該直接出現在畫面上。
+    assert "has no draft binding" not in html
+
+
+def test_an_unrecognised_blocking_reason_is_still_shown(client):
+    """對不上樣式時退回顯示原文，而不是讓那一條從畫面上消失。
+
+    反過來（嚴格比對、對不上就跳過）是最危險的失敗方式：
+    畫面顯示「都齊了」，CLI 卻凍不起來，而兩邊都沒有錯誤訊息。
+    """
+    from pcmef.admin.services import _checklist
+
+    items = _checklist(["something snapshot.py added after this page was written"])
+
+    assert len(items) == 1
+    assert items[0].what == "something snapshot.py added after this page was written"
+
+
+def test_missing_prompt_files_collapse_into_one_actionable_item():
+    """四個 agent 各缺一個 prompt 檔會產生四條幾乎一樣的訊息。
+
+    那是雜訊不是資訊 —— 要做的其實只有一件事，所以合併成一條，
+    但路徑必須全部列出來，否則補了一半的人會以為補完了。
+    """
+    from pcmef.admin.services import _checklist
+
+    paths = [
+        f"configs/agents/prompts/{name}.md"
+        for name in ("observation_agent", "physics_agent")
+    ]
+    items = _checklist([f"prompt file {path} does not exist" for path in paths])
+
+    assert len(items) == 1
+    assert "2 個 prompt 檔" in items[0].what
+    for path in paths:
+        assert path in items[0].how
+
+
+def _bindings_card(html: str) -> str:
+    return html[html.index('id="task-bindings"') : html.index('id="formal-snapshot"')]
+
+
+def test_the_binding_action_column_is_never_a_bare_dash(client, seeded):
+    """未綁定時操作欄要給停用的按鈕並說明原因，而不是一個「—」。
+
+    一個破折號無法區分「這裡沒有動作」與「動作被停用了」，
+    而畫面上那一整欄都是破折號時，看起來像功能壞掉。
+    """
+    bindings = _bindings_card(client.get("/admin/llm-setup").get_data(as_text=True))
+
+    assert "先綁一個模型才能鎖定" in bindings
+    assert "<span class=\"empty\">—</span>" not in bindings
+
+
+def test_every_binding_row_offers_test_lock_and_unlock(client, seeded):
+    """三顆都要常駐，不能用的呈灰色（Appendix J3 的 UI reference）。
+
+    只顯示「當下可做的那一顆」看起來乾淨，但操作者無從得知另外兩個動作
+    存不存在 —— 而 Unlock 正是他改不了已鎖定綁定時要找的東西。
+    """
+    bindings = _bindings_card(client.get("/admin/llm-setup").get_data(as_text=True))
+
+    # 四個 task 各一組 Test / Lock / Unlock。
+    for label in (">Test<", ">Lock<", ">Unlock<"):
+        assert bindings.count(label) == 4, label
+
+
+# ---------------------------------------------------------------------------
+# binding 層的 Test
+# ---------------------------------------------------------------------------
+
+
+def test_testing_a_binding_probes_only_that_task_s_required_capabilities(
+    client, csrf, seeded, admin_service
+):
+    """§45 逐 role 列出必要能力。physics_agent 不需要 vision ——
+    對它跑 vision probe 只會生出一個與這個綁定無關的 FAIL。"""
+    _verify(
+        seeded.registry, seeded.full_model_id,
+        (Capability.CHAT, Capability.VISION, Capability.STRUCTURED_JSON),
+    )
+    _lock_line(seeded.registry, seeded.connection_id, seeded.full_model_id)
+    seeded.registry.set_binding(
+        "physics_agent", seeded.full_model_id, required_capabilities("physics_agent")
+    )
+
+    response = client.post(
+        "/api/admin/llm/bindings/physics_agent/test",
+        json={}, headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    probed = {result["capability"] for result in body["results"]}
+    assert probed == {"chat", "structured_json"}, probed
+    assert "vision" not in probed
+
+
+def test_testing_an_unbound_task_says_so_instead_of_failing_obscurely(
+    client, csrf, seeded
+):
+    response = client.post(
+        "/api/admin/llm/bindings/arbitration_agent/test",
+        json={}, headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 400
+    assert "not bound" in response.get_json()["error"]
+
+
+def test_a_locked_binding_can_still_be_tested(client, csrf, seeded):
+    """這正是這顆按鈕最主要的用途：「當初鎖的時候是好的，它現在還好嗎」。"""
+    _verify(
+        seeded.registry, seeded.full_model_id,
+        (Capability.CHAT, Capability.STRUCTURED_JSON),
+    )
+    _lock_line(seeded.registry, seeded.connection_id, seeded.full_model_id)
+    seeded.registry.set_binding(
+        "physics_agent", seeded.full_model_id, required_capabilities("physics_agent")
+    )
+    seeded.registry.set_binding_locked("physics_agent", True)
+
+    response = client.post(
+        "/api/admin/llm/bindings/physics_agent/test",
+        json={}, headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 200
+    assert seeded.registry.get_binding("physics_agent").is_locked is True
+
+
+# ---------------------------------------------------------------------------
 # CSRF 與寫入邊界
 # ---------------------------------------------------------------------------
 
@@ -345,6 +515,7 @@ def test_the_page_states_that_it_only_writes_the_draft_registry(client):
         "/api/admin/llm/models/whatever/verify",
         "/api/admin/llm/models/whatever/delete",
         "/api/admin/llm/connections/whatever/delete",
+        "/api/admin/llm/bindings/physics_agent/test",
     ],
 )
 def test_csrf_is_required_on_every_write_endpoint(client, csrf, path):

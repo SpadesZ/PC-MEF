@@ -117,6 +117,17 @@ def test_console_page_states_that_formal_runs_go_through_the_cli(client):
     assert "lock" in html
 
 
+def test_the_page_does_not_claim_it_cannot_produce_a_lock(client):
+    """畫面上有一顆「凍結」按鈕，就不能同時宣稱本頁不產生 lock。
+
+    頁面自己打自己的臉比講得含糊更糟：讀的人會以為其中一邊壞了，
+    而他無從判斷是哪一邊。成立的說法是「寫不寫入由 CLI 判定」。
+    """
+    html = client.get("/console").get_data(as_text=True)
+    assert "凍結" in html
+    assert "不能產生" not in html
+
+
 def test_advanced_parameters_are_collapsed_by_default(client):
     """懶人包：進階區用原生 <details>，預設收起且不需要腳本。"""
     html = client.get("/console").get_data(as_text=True)
@@ -179,6 +190,132 @@ def test_an_unknown_kind_is_rejected(client, csrf):
         headers={"X-CSRF-Token": csrf},
     )
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 執行紀錄：搜尋、摺疊、刪除
+# ---------------------------------------------------------------------------
+
+
+def _finish(app, count: int, **params):
+    """跑完 count 次短執行，回傳紀錄。"""
+    runner = app.config["PCMEF_CONSOLE_RUNNER"]
+    records = []
+    for _ in range(count):
+        record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 1, **params}))
+        records.append(runner.wait(record.run_id, timeout=30))
+    return records
+
+
+def test_the_history_is_searchable(app, client):
+    _finish(app, 1, preset="preview")
+    _finish(app, 1, preset="quality")
+
+    html = client.get("/console?q=quality").get_data(as_text=True)
+    assert "preset=quality" not in html  # 參數本身不印在畫面上
+    assert "高品質" in html
+    assert "快速預覽" not in html.split('id="run-history"')[1]
+
+
+def test_search_reaches_runs_beyond_the_display_limit(app, client):
+    """先截斷再篩選的話，limit 之外的舊紀錄永遠搜不到 ——
+    而「東西太多所以要搜尋」時，要找的通常正好就是那些舊的。"""
+    from pcmef.console.routes import RECENT_RUN_COUNT
+
+    oldest = _finish(app, 1, preset="quality")[0]
+    _finish(app, RECENT_RUN_COUNT + 3, preset="preview")
+
+    plain = client.get("/console").get_data(as_text=True)
+    searched = client.get("/console?q=quality").get_data(as_text=True)
+
+    # 沒搜尋時它被推進摺疊區（"還有 N 筆" 之後）。
+    assert oldest.run_id in plain
+    assert plain.index("還有") < plain.index(oldest.run_id)
+
+    # 搜尋後它必須落在攤開的那張表裡，也就是根本不需要展開摺疊。
+    assert oldest.run_id in searched
+    assert "還有" not in searched
+
+
+def test_older_runs_are_collapsed_so_the_table_stays_short(app, client):
+    from pcmef.console.routes import RECENT_RUN_COUNT
+
+    _finish(app, RECENT_RUN_COUNT + 2)
+    html = client.get("/console").get_data(as_text=True)
+
+    assert "還有 2 筆較早的紀錄" in html
+
+
+def test_a_finished_run_can_be_deleted(app, client, csrf):
+    record = _finish(app, 1)[0]
+
+    response = client.post(
+        f"/api/console/runs/{record.run_id}/delete",
+        json={}, headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 200
+    assert not (app.config["PCMEF_CONSOLE_RUNNER"].run_dir(record.run_id)).exists()
+
+
+def test_a_running_run_cannot_be_deleted(app, client, csrf):
+    """子行程還握著 log 的檔案句柄，而且刪掉之後 SSE 會對著不存在的紀錄重試。"""
+    runner = app.config["PCMEF_CONSOLE_RUNNER"]
+    record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 400}))
+
+    response = client.post(
+        f"/api/console/runs/{record.run_id}/delete",
+        json={}, headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 400
+    assert "still running" in response.get_json()["error"]
+    runner.wait(record.run_id, timeout=30)
+
+
+def test_csrf_is_required_to_delete_a_run(app, client):
+    record = _finish(app, 1)[0]
+    response = client.post(
+        f"/api/console/runs/{record.run_id}/delete",
+        json={}, headers={"X-CSRF-Token": "wrong"},
+    )
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 從主控台觸發 llm snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_the_snapshot_button_starts_a_recorded_run(client, csrf):
+    response = client.post(
+        "/api/console/llm-snapshot", json={}, headers={"X-CSRF-Token": csrf}
+    )
+    assert response.status_code == 201
+    assert response.get_json()["kind"] == "llm_snapshot"
+
+
+def test_csrf_is_required_to_trigger_a_snapshot(client):
+    response = client.post(
+        "/api/console/llm-snapshot", json={}, headers={"X-CSRF-Token": "wrong"}
+    )
+    assert response.status_code == 403
+
+
+def test_the_admin_page_itself_still_refuses_to_write_a_lock(client, csrf):
+    """界線沒有被放寬，只是被劃細。
+
+    admin 頁面自己永遠不寫 lock —— 要寫就必須經過真正的 CLI 子行程，
+    而那條路上前提未齊時是 CLI 自己拒絕。這兩條同時成立才是原本的意思。
+    """
+    html = client.get("/admin/llm-setup").get_data(as_text=True)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
+
+    response = client.post(
+        "/api/admin/llm/runtime-snapshot", json={}, headers={"X-CSRF-Token": token}
+    )
+    assert response.status_code == 403
+    assert "CLI" in response.get_json()["error"]
 
 
 # ---------------------------------------------------------------------------

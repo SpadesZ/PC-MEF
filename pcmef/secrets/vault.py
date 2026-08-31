@@ -19,6 +19,7 @@
 #   4. SecretVault.store() / rotate() 寫入密文，rotate 保持 ref 不變只加版號
 #   5. SecretVault.resolve() 解出值並註冊到 log 遮蔽；找不到即 fail-fast
 #   6. SecretVault.fingerprint() 產生 ****abcd 供 UI 顯示
+#   7. ensure_local_master_key() 在本機主控台模式下自動保管一把 master key
 # 維護提醒:
 #   - 不得新增回傳完整 secret 的 API 給 UI 或 CLI 使用；§46 規定 server 在寫入後
 #     不再回傳完整 key，唯一出口是 resolve() 交給 provider adapter。
@@ -28,6 +29,12 @@
 #     不改 provider/model/base_url 時不必 invalidate scientific lock，
 #     而 lock 存的正是這個 uuid；換掉它就等於偽造成 identity 變更。
 #   - 不得把 vault 檔加入版控；它含密文與 salt，且屬於個別機器的操作狀態。
+#     secrets/master.key 同理，且它是加密金鑰本身 —— 進版控等於 vault 檔失效。
+#   - 不得把 local_master_key 的預設值改成 True。函式庫預設維持 §46 原文，
+#     例外只在本機主控台與 CLI 的組裝點明列；預設值一改，這個例外就從
+#     「一處可見的決定」變成「到處都在、沒人記得為什麼」。
+#   - 不得在缺 master key 時退回明文保存。roothinks 有那條退路，本系統沒有：
+#     §46 的整套遮蔽與指紋設計，前提就是落盤的一定是密文。
 #   - v0.1.0 新增：首版 secret_ref 抽象，決策見 NOTE-016。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/llm_admin/test_secret_vault.py -v
@@ -38,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets as stdlib_secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,6 +71,8 @@ __all__ = [
     "SessionSecretStore",
     "SecretVault",
     "DEFAULT_VAULT_PATH",
+    "LOCAL_MASTER_KEY_FILENAME",
+    "ensure_local_master_key",
     "SCHEME_ENV",
     "SCHEME_VAULT",
     "SCHEME_SESSION",
@@ -70,6 +80,9 @@ __all__ = [
 ]
 
 DEFAULT_VAULT_PATH = Path("secrets/vault.json")
+
+#: 本機自動保管的 master key 檔名，與 vault 檔同目錄。
+LOCAL_MASTER_KEY_FILENAME = "master.key"
 
 SCHEME_ENV = "env"
 SCHEME_VAULT = "vault"
@@ -114,6 +127,22 @@ class SecretRef:
             )
         if not self.identifier:
             raise SecretError(f"secret_ref {self.scheme}: has an empty identifier")
+        if self.scheme == SCHEME_ENV and _looks_like_plaintext_key(self.identifier):
+            # 必須排在 _ENV_NAME 之前。API key 幾乎都是純英數，因此
+            # 「AIzaSy...」這種字串**完全符合**合法環境變數名的語法 ——
+            # 只靠 _ENV_NAME 擋不住 `env:<真的 key>`，而那正是把 key 當成
+            # 變數名存進 registry 的路徑。實測外洩過一次：key 進了 registry，
+            # 之後 resolve 失敗的錯誤訊息把它一路帶進 flash 與網址列。
+            #
+            # 訊息刻意**不回吐 identifier** —— 它就是那把 key，而錯誤訊息
+            # 會被寫進 flash、log 與稽核記錄。
+            raise SecretError(
+                "the env: reference contains what looks like the API key itself, "
+                "not a variable name. Put the key in an environment variable and "
+                "reference it by NAME, e.g. env:GEMINI_API_KEY. "
+                "If this key was already submitted anywhere, treat it as "
+                "compromised and rotate it (SRC-SAI §43, NFR-08)."
+            )
         if self.scheme == SCHEME_ENV and not _ENV_NAME.match(self.identifier):
             raise SecretError(
                 f"env secret_ref must name an environment variable, got "
@@ -185,6 +214,43 @@ class SessionSecretStore:
         return len(self._values)
 
 
+def ensure_local_master_key(directory: str | Path) -> str:
+    """讀取本機 master key，不存在就產生一把並存進 `<directory>/master.key`。
+
+    §46 原文是「master key 由 environment / OS secret 供應，不由本系統產生」。
+    這個函式是那條規則在**本機單人主控台**上的明列例外，理由是：不設環境變數
+    時 `can_persist` 為 False，網頁上的 API Key 欄位就是灰的，於是操作者只剩
+    `env:<NAME>` 一條路；但那個環境變數在容器裡同樣沒設，結果是憑證顯示
+    `(unresolvable)`、Fetch 失敗、沒有線路鎖得起來、四個 agent 全部綁不上。
+    一顆沒人告訴你要設的環境變數，把整條 LAVA 流程從頭鎖到尾。
+
+    **這不是把 secret 變成明文。** 產生的是加密用的 master key，API key 本身
+    仍然只以 Fernet 密文存在 vault 檔裡，registry 與 lock 存的仍然只有
+    `vault:<uuid>`。與 roothinks 的差別正在這裡 —— 它在沒有 FERNET_KEY 時
+    退回明文存 DB，本系統不設那條退路。
+
+    環境變數一旦設了就優先，本檔完全不參與；因此要接手 KMS 或 OS keychain
+    時不必先移除這條路徑。
+    """
+    folder = Path(directory)
+    path = folder / LOCAL_MASTER_KEY_FILENAME
+    if path.exists():
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+
+    folder.mkdir(parents=True, exist_ok=True)
+    key = stdlib_secrets.token_urlsafe(48)
+    path.write_text(key + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Windows 上 chmod 幾乎是空操作，而這把 key 的保護本來就依賴
+        # 使用者家目錄的權限。失敗不該讓主控台起不來。
+        pass
+    return key
+
+
 class SecretVault:
     """secret 的解析入口，並在有 master key 時提供本機加密保存。"""
 
@@ -194,12 +260,30 @@ class SecretVault:
         master_key: str | None = None,
         environ: Mapping[str, str] | None = None,
         session_store: SessionSecretStore | None = None,
+        local_master_key: bool = False,
     ) -> None:
+        """local_master_key 預設 False —— 函式庫的預設值維持 §46 原文。
+
+        只有本機主控台與 CLI 明確傳 True（見 admin/app.py 與 cli.py）。
+        **兩邊必須一致**：UI 用本機金鑰加密存進去的憑證，CLI 產 snapshot 時
+        要解得開；只有一邊開啟的話，`pcmef llm snapshot` 會在 fingerprint
+        階段就失敗，而那個錯誤看起來完全不像「兩邊的金鑰來源不同」。
+        """
         self.path = Path(path)
         self._environ = environ if environ is not None else os.environ
-        self._master_key = (
+        supplied = (
             master_key if master_key is not None else self._environ.get(MASTER_KEY_ENV)
         )
+        if supplied:
+            self.master_key_source = "environment" if master_key is None else "explicit"
+        elif local_master_key and crypto_available():
+            # crypto_available() 先擋一次：沒有 cryptography 套件時就算產生了
+            # 金鑰也沒有東西能用它加密，徒然在磁碟上留一個誤導性的檔案。
+            supplied = ensure_local_master_key(self.path.parent)
+            self.master_key_source = "local-file"
+        else:
+            self.master_key_source = "none"
+        self._master_key = supplied
         self.session = session_store or SessionSecretStore()
 
     # -- vault 檔 ---------------------------------------------------------
