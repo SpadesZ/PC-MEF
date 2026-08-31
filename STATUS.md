@@ -182,7 +182,7 @@ sd/mean 0.17-0.67），而那會改變 `initial_simulation.lock`，屬 amendment
 | M2 Surrogate + E1 | **`E1 CLOSED — partial calibration success`** | 五階段跑完、E1 開啟一次並得 PASS。**只有 Ambient Rate 真的改善**，其餘三個 feature 維持 initial physics-constrained state。見「E1 已完成」專節 |
 | M3 Post-E1 Split | **`paired bridge smoke PASS / ready for perception`** | 成對 RGB-ToF 生成路徑已驗收（6/6 check PASS，identity `a00b3969…`）。synthetic split policy lock 本身仍未凍 |
 | M4 Perception | **corrective pass 完成** | ds_v2：Vision 1.000 / ToF 0.988 / Fusion 1.000（family-level split，80 families，無 leakage）。**但三者都在天花板，量不出 gate 價值**，見「M4 corrective pass 結果」 |
-| M5 Reliability/Gate | 未開始 | 依賴 M4 |
+| M5 Reliability/Gate | **D/U/Q 路由已評估；LLM 臂阻塞** | Formal E2 完成：PC-MEF 勝過 fusion/tof-only 但**未勝過 vision-only**。LLM 仲裁未設定亦未核定，見「Formal E2」專節 |
 | M6 Multi-Agent | 未開始 | 依賴 M3；**runtime 管理層（Part VI）已就緒**，缺的是 prompt 與 agent 本體 |
 | M7 Pilot/Freeze | 未開始 | 依賴 M5、M6 |
 | M8 Formal E2 | 未開始 | 依賴全部 |
@@ -1088,6 +1088,77 @@ Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
 > **initial physics-constrained state** —— 它們的參數更新被獨立證據否決，
 > 因此模擬器在這三個通道上就是 `initial_simulation.lock` 凍結的那個模型，
 > 既沒有被校準，也沒有退步。
+
+---
+
+## Formal E2 —— PC-MEF **未勝過最佳單模態**（2026-08-31）
+
+```
+outputs/perception/e2/formal_e2_report.json      一次性，門檻未回頭調整
+384 rows = 96 base samples x 4 conditions        families 28-35（與 ds_v2、gate-val 全不重疊）
+severity: vision 2.0 / tof 0.05                  兩者皆由 gate-validation 決定
+仲裁器：確定性信心加權。**PC-MEF 的 LLM 臂未被評估。**
+```
+
+| arm | accuracy | macro-F1 | errors |
+|---|---|---|---|
+| **vision_only** | **0.8177** | **0.8105** | 70 |
+| pcmef_gate | 0.7969 | 0.8008 | 78 |
+| fixed_fusion | 0.6406 | 0.6418 | 138 |
+| tof_only | 0.6302 | 0.6308 | 142 |
+
+| PC-MEF vs | Δaccuracy | 95% CI | Cohen's h | 顯著 |
+|---|---|---|---|---|
+| vision_only | **−0.0208** | [−0.0625, +0.0234] | −0.053 | **否** |
+| tof_only | +0.1667 | [+0.1354, +0.1979] | +0.372 | 是 |
+| fixed_fusion | +0.1562 | [+0.1276, +0.1823] | +0.351 | 是 |
+
+### 逐 condition：路由有效，仲裁無效
+
+| arm | clean | vision_degraded | tof_degraded | **conflict** |
+|---|---|---|---|---|
+| vision_only | 0.958 | 0.677 | 0.958 | **0.677** |
+| tof_only | 0.990 | 0.990 | 0.271 | 0.271 |
+| fixed_fusion | 1.000 | 0.979 | 0.281 | 0.302 |
+| pcmef_gate | 0.958 | 0.979 | **0.948** | **0.302** |
+
+**路由那一半成功了**：`tof_degraded` 上 PC-MEF 0.948，而固定融合只有 0.281 ——
+品質訊號確實在沒有標籤的情況下偵測到 ToF 壞掉並改用 Vision。
+`vision_degraded` 同理（0.979 vs vision-only 的 0.677）。
+
+**仲裁那一半失敗了**：`conflict` 上 PC-MEF 只有 0.302，而**單看 Vision 有 0.677**。
+兩邊都劣化時 gate 升級到仲裁器，而仲裁器把答案弄得比「乾脆只信 Vision」更差。
+
+原因具體且可診斷：溫度校準把 ToF 調得**非常銳利**（T = 0.0498）。
+那在 clean 上是對的（ToF clean 準確率 0.990），但 ToF 一旦劣化就變成
+**高信心地錯**。信心加權仲裁在那種情況下正好被拉向錯的那一邊。
+換句話說，「信心」對這個 ToF 模型不是可靠度的代理量。
+
+### 為什麼 vision_only 是最強的 baseline
+
+兩個模態的劣化行為不對稱：Vision 劣化後仍有 0.677（優雅退化），
+ToF 劣化後掉到 0.271（≈ 亂猜，四類）。因此在 conflict 上，
+「永遠只信 Vision」本身就是一個很強的策略，而任何會把 ToF 意見混進來的
+規則都會被拉低。這不是 gate 設計得差，是**這個 stress 分佈下的
+最佳固定策略剛好就是單模態**。
+
+### 誠實的結論
+
+> PC-MEF 的 D/U/Q 路由**顯著勝過兩個融合類 baseline**
+> （vs fixed fusion +0.156，CI [+0.128, +0.182]），
+> 但**沒有勝過最佳單模態 baseline**（vs vision-only −0.021，CI 跨 0，不顯著）。
+> 門檻未因此回頭調整，也未重跑。
+
+### 未評估的部分（阻塞）
+
+PC-MEF 的 **LLM/agent 仲裁臂完全沒有被評估**：
+無 LLM connection、無 `freeze/llm_runtime.lock.json`，且
+`agents.representation_mode` 與 `agents.retry.max_attempts` 仍待核定
+（NOTE-005 禁止補預設值）。報告中的 `llm_call_rate = 0.2656` 是
+**升級率**，也就是「若有 LLM，它會被呼叫的比例」；`llm_calls_actually_made = 0`。
+
+因此本次 E2 比較的是「D/U/Q 路由 + 確定性仲裁」對上三個 baseline，
+**不是**論文所主張的 PC-MEF 完整形態。
 
 ---
 
