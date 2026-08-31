@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from pcmef.core.hash import hash_file, hash_object
+from pcmef.core.numeric import ARBITRATION_SUPPORT_BRIDGE_VERSION
 
 __all__ = ["build_proposal", "FINAL_E2_FAMILIES"]
 
@@ -60,6 +61,13 @@ PARTITIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 RESERVED_PURPOSE = "RESERVED_UNOPENED_FINAL_E2"
+
+#: 被剔除的重複身分 family 在 mapping 裡的標記（NOTE-048）。
+EXCLUDED_PURPOSE = "EXCLUDED_DUPLICATE_IDENTITY"
+
+#: Final E2 的 family_domain（教授裁決 2026-09-01，NOTE-048）：
+#: max_reserved_family_index + 1 = 44。由保留區間直接推得，沒有選擇空間。
+FINAL_E2_DOMAIN = 44
 
 
 def _code_hash(function: Any) -> dict[str, str]:
@@ -183,7 +191,7 @@ def prove_final_e2_absent(out_root: str | Path = "outputs") -> dict[str, Any]:
     }
 
 
-def probe_family_domain_aliasing() -> dict[str, Any]:
+def probe_family_domain_aliasing(kwargs_domain: int = 36) -> dict[str, Any]:
     """檢查沿用既有 family_domain 會不會讓 36-43 與既有 family 撞在一起。
 
     這不是理論疑慮：family_variation 以 `% n_families` 取值，因此
@@ -192,7 +200,7 @@ def probe_family_domain_aliasing() -> dict[str, Any]:
     from pcmef.core.constants import CLASS_ORDER
     from pcmef.simulation.paired import family_variation
 
-    domain = 36  # gate_validation 與 pilot 兩批都用這個值
+    domain = kwargs_domain
     aliases: dict[str, Any] = {}
     for class_label in CLASS_ORDER:
         for index in FINAL_E2_FAMILIES:
@@ -218,6 +226,76 @@ def probe_family_domain_aliasing() -> dict[str, Any]:
     }
 
 
+def derive_final_e2_descriptors() -> dict[str, Any]:
+    """以 domain=44 計算 families 36-43 的 physical-family descriptor。
+
+    **不 render、不產生任何 observation。** scene_parameters 的六個物理欄位
+    全部來自 frozen SimulatorIdentity 與 deterministic 的 family_variation，
+    render 產物不在 identity 之內，因此 descriptor 算得出來而資料仍是 sealed。
+
+    同時證明離線推導與實際 manifest 等價：拿既有 partition 重算一次比對，
+    對不上就不能信任 36-43 那 32 個值。
+    """
+    from pcmef.core.constants import CLASS_ORDER
+    from pcmef.perception.dataset import physical_scene_family
+    from pcmef.simulation.paired import (
+        _scenario_config, family_variation, load_calibrated_simulator,
+    )
+
+    identity, _calibration = load_calibrated_simulator("freeze", ".")
+
+    def descriptor(class_label: str, family_index: int, domain: int) -> str:
+        variation = family_variation(class_label, family_index, domain)
+        config = _scenario_config(identity, class_label, seed=0, variation=variation)
+        return physical_scene_family({
+            **config.to_dict(),
+            "scene_constants_applied": dict(identity.scene_constants),
+        })
+
+    # 等價性證明：離線重算既有 partition，必須逐一對上 manifest。
+    equivalence = {"checked": 0, "mismatches": []}
+    for name, path, _purpose in PARTITIONS:
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        domain = manifest.get("family_domain") or 20
+        seen: dict[tuple[str, int], str] = {}
+        for row in manifest["samples"]:
+            seen.setdefault((row["class_label"], row["family_index"]),
+                            row["physical_scene_family"])
+        for (class_label, family_index), stored in seen.items():
+            equivalence["checked"] += 1
+            if descriptor(class_label, family_index, domain) != stored:
+                equivalence["mismatches"].append(f"{name}:{class_label}|{family_index}")
+    equivalence["proven"] = not equivalence["mismatches"]
+
+    existing = {
+        cls: {
+            **{f"ds_v2:{f}": descriptor(cls, f, 20) for f in range(20)},
+            **{f"d36:{f}": descriptor(cls, f, 36) for f in range(20, 36)},
+        }
+        for cls in CLASS_ORDER
+    }
+    descriptors, collisions = {}, {}
+    for cls in CLASS_ORDER:
+        for family_index in FINAL_E2_FAMILIES:
+            value = descriptor(cls, family_index, FINAL_E2_DOMAIN)
+            descriptors[f"{cls}|{family_index}"] = value
+            hits = [k for k, v in existing[cls].items() if v == value]
+            if hits:
+                collisions[f"{cls}|{family_index}"] = hits
+    return {
+        "family_domain": FINAL_E2_DOMAIN,
+        "domain_derivation": "max_reserved_family_index + 1 = 43 + 1 = 44",
+        "rendered": False,
+        "descriptors": dict(sorted(descriptors.items())),
+        "descriptors_hash": hash_object(dict(sorted(descriptors.items()))),
+        "collisions_with_existing_same_class": collisions,
+        "zero_collision": not collisions,
+        "offline_derivation_equivalence": equivalence,
+        "simulator_identity_hash": identity.identity_hash(),
+        "calibrated_simulation_lock_hash": identity.calibrated_lock_hash,
+    }
+
+
 def derive_agent_schema() -> dict[str, Any]:
     from pcmef.core.constants import CLASS_ORDER
 
@@ -228,6 +306,10 @@ def derive_agent_schema() -> dict[str, Any]:
         "hash_function": "pcmef.core.hash.hash_file (SHA-256 over file bytes)",
         "class_order": list(CLASS_ORDER),
         "class_order_source": "pcmef.core.constants.CLASS_ORDER",
+        "support_bridge_version": ARBITRATION_SUPPORT_BRIDGE_VERSION,
+        "support_bridge_version_source": (
+            "pcmef.core.numeric.ARBITRATION_SUPPORT_BRIDGE_VERSION"
+        ),
     }
 
 
@@ -295,7 +377,8 @@ def build_proposal(out_dir: str | Path = "outputs/lock_proposals") -> dict[str, 
     partitions = collect_family_hashes()
     exclusivity = check_exclusivity(partitions)
     absence = prove_final_e2_absent()
-    aliasing = probe_family_domain_aliasing()
+    aliasing = probe_family_domain_aliasing(36)   # 沿用舊 domain 的反例
+    final_e2 = derive_final_e2_descriptors()      # 核定的 domain=44
     agent_schema = derive_agent_schema()
     bridge = trace_support_bridge()
 
@@ -306,12 +389,30 @@ def build_proposal(out_dir: str | Path = "outputs/lock_proposals") -> dict[str, 
     for index in FINAL_E2_FAMILIES:
         for class_label in agent_schema["class_order"]:
             assignment[f"{class_label}|{index}"] = RESERVED_PURPOSE
+    # 被剔除的重複身分保留在 mapping 裡並改標記，不假裝它不存在（NOTE-048）。
+    gate_rule = json.loads(
+        Path("outputs/perception/gate/gate_rule.json").read_text(encoding="utf-8")
+    )
+    excluded = gate_rule.get("family_exclusion", {}).get("excluded_families", [])
+    for entry in excluded:
+        assignment[f"{entry['class_label']}|{entry['family_index']}"] = EXCLUDED_PURPOSE
     ordered_assignment = dict(sorted(assignment.items()))
 
+    # 互斥性判定要把「已剔除」的那一個排除在外：它已經不參與擬合，
+    # 但仍留在 mapping 裡當歷史紀錄。
+    excluded_keys = {f"{e['class_label']}|{e['family_index']}" for e in excluded}
+    live_collisions = {
+        h: owners for h, owners in
+        exclusivity["identity_collisions_across_partitions"].items()
+        if not any(
+            owner.split(":", 1)[1] in excluded_keys for owner in owners
+        )
+    }
     split_ready = (
-        exclusivity["mutually_exclusive"]
+        not live_collisions
         and not absence["generated"]
-        and aliasing["safe"]
+        and final_e2["zero_collision"]
+        and final_e2["offline_derivation_equivalence"]["proven"]
     )
     document = {
         "report_id": "lock_freeze_proposal",
@@ -323,31 +424,21 @@ def build_proposal(out_dir: str | Path = "outputs/lock_proposals") -> dict[str, 
             "parent_scene_family_rule": derive_family_rule(),
             "family_hashes": {
                 "partitions": partitions,
-                "final_e2_families": {
-                    "families": list(FINAL_E2_FAMILIES),
-                    "descriptors": None,
-                    "why_absent": (
-                        "family_variation() needs an agreed family_domain, and the "
-                        "domain used by both previous batches (36) provably aliases "
-                        "these indices onto earlier families. Deriving a descriptor "
-                        "under an undecided domain would freeze the wrong identity."
-                    ),
-                },
+                "final_e2_families": final_e2,
             },
             "split_assignment": ordered_assignment,
             "split_assignment_hash": hash_object(ordered_assignment),
             "exclusivity": exclusivity,
+            "excluded_families": excluded,
+            "live_identity_collisions_after_exclusion": live_collisions,
+            "final_e2_family_descriptors": final_e2,
             "final_e2_absence_proof": absence,
             "family_domain_aliasing_probe": aliasing,
         },
-        "agent_schema": {
-            **agent_schema,
-            "support_bridge_version": None,
-            "support_bridge_semantics": bridge,
-        },
+        "agent_schema": {**agent_schema, "support_bridge_semantics": bridge},
         "SAFE_TO_FREEZE_SYNTHETIC_SPLIT_POLICY": "YES" if split_ready else "NO",
         "SAFE_TO_FREEZE_AGENT_SCHEMA": (
-            "NO" if bridge["verdict"] == "SUPPORT_BRIDGE_UNDEFINED" else "YES"
+            "YES" if agent_schema["support_bridge_version"] else "NO"
         ),
         "FINAL_E2_36_43_GENERATED": "YES" if absence["generated"] else "NO",
         "FINAL_E2_36_43_READ": "NO",

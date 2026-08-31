@@ -472,6 +472,72 @@ def _accuracy_at_severity(
     }
 
 
+#: 被剔除的 family 在 split mapping 裡的標記。保留而不是刪除 ——
+#: 它歷史上存在過，而且 gate threshold 曾經在它身上擬合過。
+EXCLUDED_DUPLICATE_IDENTITY = "EXCLUDED_DUPLICATE_IDENTITY"
+
+
+def exclude_duplicate_identity_families(
+    manifest: dict[str, Any], ds_dir: str | Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """剔除 physical_scene_family 與 ds_v2 重複的 gate-validation family。
+
+    規則（NOTE-048，**在看到任何新分數之前**寫定）：以 hash 相等為準，
+    不以索引、不以類別、不以個案判斷。
+
+    為什麼非剔不可：ds_v2 的 12/4/4 family 分法讓重複的那一個落在
+    perception development/validation。gate-validation 再看到同一個物理場景
+    （只換 realization），我們宣稱的 development-stage family independence
+    就不成立 —— 那不是分數問題，是 gate threshold 在一個它不該看過的場景上
+    擬合這件事本身。
+
+    刻意**不**做的事：不因對稱而順手剔掉其他類別的同號 family、
+    不補新 family 湊數、不重訓任何模型。
+    """
+    ds_manifest = json.loads(
+        (Path(ds_dir) / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    ds_identities = {
+        s["physical_scene_family"]
+        for s in (ds_manifest.get("samples") or ds_manifest.get("rows") or [])
+        if "physical_scene_family" in s
+    }
+
+    kept, dropped = [], []
+    for sample in manifest["samples"]:
+        if sample.get("physical_scene_family") in ds_identities:
+            dropped.append(sample)
+        else:
+            kept.append(sample)
+
+    excluded_families = sorted(
+        {(s["class_label"], s["family_index"]) for s in dropped}
+    )
+    lines = [
+        f"corrective rule (NOTE-048): dropped {len(dropped)} sample(s) from "
+        f"{len(excluded_families)} family(ies) duplicating a ds_v2 physical scene"
+    ]
+    for class_label, family_index in excluded_families:
+        lines.append(f"  excluded {class_label} f{family_index:02d}")
+    if not dropped:
+        lines = ["corrective rule (NOTE-048): no duplicate identity found"]
+
+    return {**manifest, "samples": kept}, {
+        "rule": (
+            "exclude any gate-validation family whose physical_scene_family hash "
+            "also appears in ds_v2"
+        ),
+        "rule_recorded_in": "docs/NOTES.md NOTE-048",
+        "excluded_families": [
+            {"class_label": c, "family_index": f, "status": EXCLUDED_DUPLICATE_IDENTITY}
+            for c, f in excluded_families
+        ],
+        "excluded_sample_count": len(dropped),
+        "remaining_sample_count": len(kept),
+        "report_lines": lines,
+    }
+
+
 def run_gate_validation(
     ds_dir: str | Path,
     gate_val_dir: str | Path,
@@ -491,6 +557,9 @@ def run_gate_validation(
     base = json.loads(
         (Path(gate_val_dir) / "dataset_manifest.json").read_text(encoding="utf-8")
     )
+    base, exclusion = exclude_duplicate_identity_families(base, ds_dir)
+    for line in exclusion["report_lines"]:
+        say(line)
 
     # -- 1. 溫度校準（clean gate-validation） -------------------------------
     say("temperature scaling on clean gate-validation")
@@ -594,6 +663,9 @@ def run_gate_validation(
             "retrained": False,
             "note": "weights loaded from the ds_v2 run; no re-training, no re-tuning",
         },
+        # 剔除紀錄與擬合結果放在一起：任何讀這份 gate rule 的人，都必須
+        # 同時看得到它是在哪一個子集上擬合的。
+        "family_exclusion": exclusion,
         "calibration": calibration,
         "severity_selection": ladders,
         "stress": {

@@ -54,6 +54,8 @@ __all__ = [
     "normalized_entropy",
     "support_to_vector",
     "normalize_support",
+    "arbitration_support_bridge",
+    "ARBITRATION_SUPPORT_BRIDGE_VERSION",
     "reliability_weights",
     "check_reliability",
     "check_gate_coefficients",
@@ -220,6 +222,33 @@ def support_to_vector(agent_output: dict) -> np.ndarray:
             "be rescued into a uniform distribution"
         )
     return vector
+
+
+#: `agent_schema.lock` 的 support_bridge_version（教授裁決 2026-09-01）。
+#:
+#: 只版本化 **Arbitration JSON -> s_A** 這一段，不含下游的 PC-MEF fusion。
+#: 理由：這個欄位位於 agent_schema.lock，該 lock 定義的是「agent 輸出如何
+#: 轉成演算法內部的 evidence vector」；s_A 之後怎麼跟 p_rel 結合是另一個
+#: 決策層，而且目前尚未實作（見 STATUS 的 s_A -> F 缺口）。
+ARBITRATION_SUPPORT_BRIDGE_VERSION = "arbitration_support_bridge_v1"
+
+
+def arbitration_support_bridge(agent_output: dict, eps: float = EPS_S) -> np.ndarray:
+    """`arbitration_support_bridge_v1`：Arbitration JSON -> s_A 的唯一入口。
+
+    語意鎖死為兩步，兩步都**不是**「除以 100」：
+
+        a_A    = [support[c] for c in CLASS_ORDER]           # 依 CLASS_ORDER 顯式取鍵
+        s_A(c) = (a_A(c) + 1e-6) / Σ_j (a_A(j) + 1e-6)       # SRC-PLAN 式 (2)
+
+    這個版本號會進 agent_schema.lock，因此**改動本函式的語意等同改動 lock
+    identity**，不是可以順手做掉的重構。
+
+    為什麼要有一個獨立的具名函式，而不是讓呼叫端自己串 support_to_vector
+    與 normalize_support：版本號必須指得到一段唯一的語意，而「兩個函式
+    加上呼叫端自己決定的順序與 eps」指不到。
+    """
+    return normalize_support(support_to_vector(agent_output), eps=eps)
 
 
 def normalize_support(a_support, eps: float = EPS_S) -> np.ndarray:

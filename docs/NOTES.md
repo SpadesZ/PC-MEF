@@ -324,6 +324,93 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-048 Family-level leakage 的 corrective rule，與 Final E2 的 family_domain
+
+**決策日期**：2026-09-01（教授裁決）
+
+**適用範圍**：`pcmef/perception/gate.py` 的 gate-validation 擬合；
+`pcmef/perception/dataset.py` 的 family 產生；未來 families 36-43 的
+`family_domain`；`synthetic_split_policy.lock` 的內容。
+
+**本 NOTE 在執行剔除與重擬合之前寫下。** 順序是刻意的：先固定規則，
+再執行，這樣「剔掉哪一個」不是看到新分數之後才決定的。
+
+**決策**：
+
+1. **corrective rule**：排除任何 `physical_scene_family` hash 與 ds_v2 重複的
+   gate-validation family。實測恰好一個：`gate_validation Empty f27`。
+2. **Final E2 的 `family_domain = 44`**，由 `max_reserved_family_index + 1` 推得。
+
+**原因**：其一，ds_v2 的 12/4/4 分法讓重複的那個 family 落在 perception
+development/validation，gate-validation 再看到同一個物理場景會讓我們宣稱的
+development-stage family independence 不成立。其二，`family_variation()` 以
+`% n_families` 正規化，沿用 `domain=36` 會讓 families 36-43 精確別名到
+families 0-7（實測 32 個別名），Formal E2 會變成用訓練場景只換 seed。
+兩項細節見下。
+
+### 決策一：corrective rule（先寫，後執行）
+
+> **排除任何 `physical_scene_family` hash 與 ds_v2 重複的 gate-validation family。**
+
+規則以 hash 相等為準，不以索引、不以類別、不以個案判斷。實測套用結果**目前
+恰好只有一個**：`gate_validation Empty f27` 與 `ds_v2 Empty f15` 同 hash。
+
+明列不做的事：
+- **不**因為對稱而順手剔掉其他三類的 f27。它們沒有重複，剔掉就是為了好看而丟資料。
+- **不**補一個新的 family 進來湊數。補進來的那一個沒有經過同一次抽樣決定。
+- **不**重訓 Vision / ToF；**不**動 stress ladder、severity selection rule、
+  model weights、q-proxy。
+- f27/Empty 在 split mapping 裡**保留**並標為 `EXCLUDED_DUPLICATE_IDENTITY`，
+  不假裝它歷史上不存在。
+
+重算範圍限於「本來就只能由 gate-validation 擬合」的量：temperature、
+quality/reliability reference、severity selection 的**結果**、gate threshold
+及其 metrics。
+
+### 為什麼一定要剔而不是揭露
+
+ds_v2 的 12/4/4 family 分法讓 f15 落在 perception development/validation。
+gate-validation 若看到同一個物理場景（只換 realization），我們宣稱的
+**development-stage family independence 就不成立**。這不是分數問題 ——
+是「gate threshold 在一個它不該看過的場景上擬合」這件事本身。
+
+### 決策二：Final E2 的 `family_domain = 44`
+
+定義：`family_domain = max_reserved_family_index + 1 = 44`。
+
+`family_variation()` 以 `% n_families` 正規化，因此 index ≥ domain 會繞回去。
+沿用前兩批的 `domain=36` 會讓 families 36-43 **精確別名到 families 0-7**
+（實測 32 個別名，4 類 × 8 家族），Formal E2 會變成用 ds_v2 訓練家族的
+物理場景只換 seed —— 那不是 generalization test。
+
+`domain=44` **不擴大任何物理範圍**：`lateral_offset_mm` 與 `irradiance` 的
+區間不變，改變的只是既有區間內的 deterministic sampling lattice。
+
+**這個決定在 families 36-43 尚未生成、尚未讀取的情況下做出**，依據是 identity
+collision，不是任何結果。因此不構成 outcome-driven tuning。
+也不比較 45/46/47 挑一個好看的 —— 44 由保留區間直接推得，沒有選擇空間。
+
+凍結前必須以 `domain=44` **只算 descriptor、不 render**，並斷言 36-43 與 0-35
+同類別的 physical-family hash **0 collision**；不是 0 就 STOP。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli perception gate
+py -3.10 -m pytest tests/unit/test_numeric.py -k bridge -v
+```
+
+corrective refit 後 `outputs/perception/gate/gate_rule.json` 的
+`family_exclusion` 記下被剔除的 family 與規則出處；93/96 樣本參與擬合，
+routed accuracy 由 0.7891 降為 0.7796 —— 剔除洩漏家族**本來就不該讓分數變好**。
+
+提案 artifact `outputs/lock_proposals/freeze_proposal.json` 內含
+`final_e2_family_descriptors`（domain=44、`rendered: false`、
+`zero_collision: true`）與 `offline_derivation_equivalence`
+（離線推導對上實際 manifest 144/144）。
+
+---
+
 ## NOTE-047 Provider execution path：影像必須是 bytes，schema 必須真的送出
 
 **決策日期**：2026-08-31

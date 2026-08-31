@@ -218,6 +218,81 @@ def test_normalize_support_rejects_all_zero():
 
 
 # ---------------------------------------------------------------------------
+# arbitration_support_bridge_v1（進 agent_schema.lock 的版本化語意）
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_version_constant_is_the_one_that_goes_into_the_lock():
+    """版本字串是 lock 的一部分，改它就是改 lock identity。"""
+    from pcmef.core.numeric import ARBITRATION_SUPPORT_BRIDGE_VERSION
+
+    assert ARBITRATION_SUPPORT_BRIDGE_VERSION == "arbitration_support_bridge_v1"
+
+
+def test_bridge_formula_is_eps_shifted_normalisation_not_divide_by_100():
+    """s_A(c) = (a_A(c)+1e-6) / Σ(a_A+1e-6)，**不是** support/100。
+
+    兩者在總和恰為 100 時數值極接近，所以必須逐項比對才分得出來 ——
+    這正是這條測試存在的理由：若有人日後把它簡化成除以 100，
+    在「模型剛好守住 100」的 case 上不會有任何症狀。
+    """
+    from pcmef.core.numeric import EPS_S, arbitration_support_bridge
+
+    support = {"Empty": 70.0, "Water-filled": 15.0, "Bubbly": 10.0, "Misty": 5.0}
+    s_a = arbitration_support_bridge({"class_support": support})
+
+    raw = np.array([70.0, 15.0, 10.0, 5.0])
+    expected = (raw + EPS_S) / (raw + EPS_S).sum()
+    assert np.allclose(s_a, expected, rtol=0.0, atol=1e-15)
+    assert np.isclose(s_a.sum(), 1.0, rtol=0.0, atol=1e-12)
+    assert not np.array_equal(s_a, raw / 100.0)
+
+
+def test_bridge_reads_keys_by_class_order_not_dict_order():
+    """provider 回傳的鍵序不得決定向量語意。"""
+    from pcmef.core.numeric import arbitration_support_bridge
+
+    shuffled = {"Misty": 5.0, "Bubbly": 10.0, "Empty": 70.0, "Water-filled": 15.0}
+    canonical = {"Empty": 70.0, "Water-filled": 15.0, "Bubbly": 10.0, "Misty": 5.0}
+    assert np.array_equal(
+        arbitration_support_bridge({"class_support": shuffled}),
+        arbitration_support_bridge({"class_support": canonical}),
+    )
+    # 第一格必須是 Empty 的 support，而不是 dict 裡的第一個鍵。
+    assert arbitration_support_bridge({"class_support": shuffled}).argmax() == 0
+
+
+def test_bridge_keeps_relative_order_when_the_model_misses_100():
+    """模型沒守住總和 100 時，相對大小仍必須忠實反映原值。"""
+    from pcmef.core.numeric import arbitration_support_bridge
+
+    s_a = arbitration_support_bridge(
+        {"class_support": {"Empty": 60.0, "Water-filled": 20.0,
+                           "Bubbly": 10.0, "Misty": 7.0}}  # 總和 97
+    )
+    assert np.isclose(s_a.sum(), 1.0, rtol=0.0, atol=1e-12)
+    assert s_a[0] > s_a[1] > s_a[2] > s_a[3]
+
+
+@pytest.mark.parametrize("bad", [
+    {"class_support": {"Empty": 0.0, "Water-filled": 0.0, "Bubbly": 0.0, "Misty": 0.0}},
+    {"class_support": {"Empty": float("nan"), "Water-filled": 1.0,
+                       "Bubbly": 1.0, "Misty": 1.0}},
+    {"class_support": {"Empty": -1.0, "Water-filled": 1.0, "Bubbly": 1.0, "Misty": 1.0}},
+    {"class_support": {"Empty": 101.0, "Water-filled": 1.0, "Bubbly": 1.0, "Misty": 1.0}},
+    {"class_support": {"Empty": 1.0, "Water-filled": 1.0, "Bubbly": 1.0}},
+    {"class_support": "not an object"},
+    {},
+])
+def test_bridge_rejects_zero_and_invalid_input(bad):
+    """all-zero 是語意失敗，不得被 eps 救成 uniform 再往下走。"""
+    from pcmef.core.numeric import arbitration_support_bridge
+
+    with pytest.raises(InvalidAgentSupport):
+        arbitration_support_bridge(bad)
+
+
+# ---------------------------------------------------------------------------
 # Reliability 與 gate 係數
 # ---------------------------------------------------------------------------
 
