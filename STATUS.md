@@ -1228,6 +1228,71 @@ stub 只證明工程路徑走得通，**其輸出不是研究結果**，也未�
 **`READY_FOR_REAL_LLM_VALIDATION = YES`** —— 工程路徑已就緒且有測試背書；
 缺的只有憑證與上述連線步驟，沒有已知的程式缺口。
 
+### Real LLM validation 已完成（2026-08-31，15/15 PASS）
+
+真實 provider 已接上並實跑：**google / `gemini-3.6-flash` @ `3.6-flash-07-2026`**，
+四個角色綁同一個 model profile，三項 capability probe 全部實跑通過。
+
+`outputs/llm_validation/real_agent_validation.json` 記錄 **8 次真實呼叫**
+（2 case × 4 agent）與 15 條檢查，全數 PASS。關鍵幾條是從**實際送出的
+HTTP request body** 驗的，不是驗轉換函式：
+
+| 檢查 | 證據 |
+|---|---|
+| vision 角色真的送圖 | 4 個請求帶 `inlineData`，解碼後 magic `\x89PNG`、1755 bytes |
+| 純文字角色不送圖 | 4 個請求無 image part |
+| 每個請求都要求 schema | 8/8 帶 `responseSchema` |
+| temperature = 0 | 線路上全部為 `0.0` |
+| payload 無 ground truth | 逐一遞迴掃描欄位名，clean |
+| 角色隔離 | physics 少了 4 個 vision 欄位；visual 少了 5 個 ToF 欄位；observation 少了整個機率區塊 |
+| retry 可恢復 | `attempts=[False, True]` |
+| 耗盡即中止 | 2 次後拋 `RetryExhaustedError`，訊息含 `ABORT_FORMAL_RUN` |
+| class_support 合計 100 | 兩個 case 都是 100.0（raw 也是 100.0，模型自己就守住了） |
+
+**這份報告不量 accuracy**，`scientific_result: false`。它只驗執行與格式。
+
+**hashes**（準備進 runtime identity）：
+
+| 項目 | hash |
+|---|---|
+| candidate | `969c45695d70fffe…` |
+| runtime_config | `c942cb815e128142…` |
+| prompt / observation | `d7a3dfab38ea2e96…` |
+| prompt / physics | `7b41cce631091b98…` |
+| prompt / visual_semantic | `0bc069b3c62fd718…` |
+| prompt / arbitration | `2bab13ea4740dd4b…` |
+| schema / observation_brief_v1 | `b4041ff338087c78…` |
+| schema / specialist_proposal_v1 | `34a36a0f3f885295…` |
+| schema / arbitration_output_v1 | `8b8fd2353e8abd57…` |
+
+### ⚠ `llm_runtime.lock` **尚未凍結** —— 前置鏈未滿足
+
+`llm snapshot` 本身回報 `freezable: all prerequisites met`（4/4 綁定、
+probe 齊備），但 `--freeze` 被 §23 state machine 擋下：
+
+```
+error: cannot freeze 'llm_runtime' before ['agent_schema'];
+       the formal run state machine forbids skipping steps
+```
+
+`locks status` 顯示的鏈是：
+
+```
+e1_outcome(frozen) -> synthetic_split_policy(pending)
+                   -> agent_schema(BLOCKED) -> llm_runtime(BLOCKED)
+```
+
+兩個前置 lock 的內容**都不是我可以自己填的研究決定**：
+
+| lock | required_keys |
+|---|---|
+| `synthetic_split_policy` | `parent_scene_family_rule`、`family_hashes`、`split_assignment_hash` |
+| `agent_schema` | `arbitration_schema_sha256`、`class_order`、`support_bridge_version` |
+
+這些值多半可由已完成的工作推導（ds_v2 的 family-level split 已實作並記錄；
+class_order 已在 config；arbitration schema hash 已算出），但 lock 一旦寫下
+**不可覆寫**，內容錯了不能改。因此停在這裡等裁決，不自行填值。
+
 ### ⚠ 目錄命名陷阱：`outputs/perception/formal_e2/` 裡面是 families 28-35
 
 上一階段把報告 `formal_e2_report.json` 改名為
