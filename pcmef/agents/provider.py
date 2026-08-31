@@ -516,7 +516,7 @@ class GoogleAdapter(HTTPProviderAdapter):
         def run() -> str:
             text, _ = self._generate(
                 connection, model, [{"text": PROBE_STRUCTURED_PROMPT}],
-                response_schema=_to_provider_schema(schema),
+                response_schema=_to_google_schema(schema),
             )
             return _validate_structured_probe(text, schema)
 
@@ -539,7 +539,7 @@ class GoogleAdapter(HTTPProviderAdapter):
         schema = runtime_cfg.get("response_schema")
         text, latency = self._generate(
             connection, model, parts,
-            response_schema=_to_provider_schema(schema) if schema else None,
+            response_schema=_to_google_schema(schema) if schema else None,
         )
         return ProviderResponse(
             text=text, model_id=model.model_id, provider=self.provider,
@@ -636,7 +636,7 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
                     "type": "json_schema",
                     "json_schema": {
                         "name": str(schema.get("title", "probe")),
-                        "schema": _to_provider_schema(schema),
+                        "schema": _to_openai_schema(schema),
                         "strict": True,
                     },
                 },
@@ -670,7 +670,7 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
                 "type": "json_schema",
                 "json_schema": {
                     "name": str(task_code),
-                    "schema": _to_provider_schema(schema),
+                    "schema": _to_openai_schema(schema),
                     "strict": True,
                 },
             }
@@ -876,9 +876,64 @@ def _synthesise_from_schema(
     return str(schema.get("pattern", "stub"))
 
 
-def _to_provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """去掉 provider 通常不接受的 JSON Schema meta 欄位。"""
-    return {k: v for k, v in schema.items() if k not in {"$schema", "title"}}
+#: 兩家 provider 都不接受的 JSON Schema meta 欄位。
+_SCHEMA_META_KEYS: frozenset[str] = frozenset({"$schema", "$id", "title", "examples"})
+
+#: Google 的 responseSchema 只吃 OpenAPI 3.0 的一個子集，additionalProperties
+#: 不在其中 —— 送過去會得到：
+#:   400 Unknown name "additionalProperties" at 'generation_config.response_schema'
+#: 而 OpenAI 的 strict json_schema 反過來**要求**它必須是 false。
+#: 兩邊需求相反，因此不能共用同一份轉換結果。
+_GOOGLE_UNSUPPORTED_KEYS: frozenset[str] = frozenset({"additionalProperties"})
+
+
+def _json_type_of(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "string"
+
+
+def _normalise_schema(node: Any, drop: frozenset[str] = frozenset()) -> Any:
+    """遞迴清掉 provider 不認得的欄位，並把 const 改寫成單值 enum。
+
+    **必須遞迴**：三份 agent schema 的 additionalProperties 有的在頂層、
+    有的在巢狀 properties 裡。只剝頂層會留下巢狀那些，而 Google 的錯誤
+    只會指到 'generation_config.response_schema' 這種粗略位置，
+    看不出是哪一層 —— 修一次頂層會以為修好了，其實沒有。
+
+    const 兩家都不支援（Google 的子集沒有，OpenAI strict 也沒有），但它
+    語意上等於「只有一個合法值的 enum」，所以改寫而不是丟掉：丟掉會讓
+    schema_version 變成任意字串，那一欄的驗證就形同虛設。
+    """
+    if isinstance(node, list):
+        return [_normalise_schema(item, drop) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    result: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _SCHEMA_META_KEYS or key in drop:
+            continue
+        if key == "const":
+            result["enum"] = [value]
+            result.setdefault("type", _json_type_of(value))
+            continue
+        result[key] = _normalise_schema(value, drop)
+    return result
+
+
+def _to_google_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Google responseSchema：額外剝掉 additionalProperties。"""
+    return _normalise_schema(schema, _GOOGLE_UNSUPPORTED_KEYS)
+
+
+def _to_openai_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """OpenAI strict json_schema：保留 additionalProperties，strict 模式要求它。"""
+    return _normalise_schema(schema)
 
 
 def _validate_structured_probe(text: str, schema: dict[str, Any]) -> str:

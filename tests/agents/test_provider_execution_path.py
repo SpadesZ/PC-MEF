@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -43,6 +44,9 @@ from pcmef.agents.provider import (
     OpenAICompatibleAdapter,
     ProviderError,
 )
+
+SCHEMA_DIR = Path("schemas")
+
 
 class _FakeResponse:
     def __init__(self, payload: dict, status_code: int = 200) -> None:
@@ -214,6 +218,111 @@ def test_the_api_key_never_appears_in_the_url(captured, image, body):
     for record in captured:
         assert "TEST-KEY-NOT-REAL" not in record["url"]
         assert "key=" not in record["url"]
+
+
+# ---------------------------------------------------------------------------
+# schema 方言：兩家的要求相反
+# ---------------------------------------------------------------------------
+
+
+def _all_keys(node, found=None):
+    """收集 schema 樹裡出現過的所有欄位名（遞迴）。"""
+    found = found if found is not None else set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.add(key)
+            _all_keys(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _all_keys(item, found)
+    return found
+
+
+@pytest.mark.parametrize("schema_name", [
+    "observation_brief_v1", "specialist_proposal_v1", "arbitration_output_v1",
+])
+def test_google_schema_drops_additional_properties_at_every_depth(schema_name):
+    """實測踩到的 400：Unknown name "additionalProperties"。
+
+    三份 agent schema 的 additionalProperties 有的在頂層、有的在巢狀
+    properties 裡，所以只剝頂層會留下巢狀那些 —— 而 Google 的錯誤訊息
+    只指到 'generation_config.response_schema'，看不出是哪一層。
+    """
+    from pcmef.agents.provider import _to_google_schema
+
+    schema = json.loads(
+        (SCHEMA_DIR / f"{schema_name}.schema.json").read_text(encoding="utf-8")
+    )
+    assert "additionalProperties" in _all_keys(schema), "前提：原始 schema 有這個欄位"
+
+    converted = _to_google_schema(schema)
+    keys = _all_keys(converted)
+    for forbidden in ("additionalProperties", "$schema", "$id", "const"):
+        assert forbidden not in keys, f"{forbidden} 仍留在送給 Google 的 schema 裡"
+
+
+@pytest.mark.parametrize("schema_name", [
+    "observation_brief_v1", "specialist_proposal_v1", "arbitration_output_v1",
+])
+def test_openai_schema_keeps_additional_properties(schema_name):
+    """OpenAI 的 strict 模式**要求** additionalProperties: false。
+
+    兩家需求相反，因此不能共用同一份轉換結果 —— 這個測試和上面那個
+    互為對照，任何一邊被改成共用都會有一條變紅。
+    """
+    from pcmef.agents.provider import _to_openai_schema
+
+    schema = json.loads(
+        (SCHEMA_DIR / f"{schema_name}.schema.json").read_text(encoding="utf-8")
+    )
+    converted = _to_openai_schema(schema)
+    assert converted["additionalProperties"] is False
+    keys = _all_keys(converted)
+    assert "$schema" not in keys and "$id" not in keys and "const" not in keys
+
+
+def test_const_becomes_a_single_value_enum_not_dropped():
+    """const 兩家都不支援，但不能直接丟掉。
+
+    丟掉會讓 schema_version 變成任意字串，那一欄的驗證就形同虛設。
+    改寫成單值 enum 才保得住原本的語意。
+    """
+    from pcmef.agents.provider import _to_google_schema
+
+    schema = json.loads(
+        (SCHEMA_DIR / "observation_brief_v1.schema.json").read_text(encoding="utf-8")
+    )
+    original = schema["properties"]["schema_version"]
+    assert "const" in original, "前提：這一欄用 const 釘住版本"
+
+    converted = _to_google_schema(schema)["properties"]["schema_version"]
+    assert converted["enum"] == [original["const"]]
+    assert converted["type"] == "string"
+
+
+def test_the_probe_schema_survives_conversion_too():
+    """probe 用的 schema 也含 additionalProperties 與 const —— 它先炸的。"""
+    from pcmef.agents.provider import PROBE_SCHEMA, _to_google_schema
+
+    keys = _all_keys(_to_google_schema(PROBE_SCHEMA))
+    assert "additionalProperties" not in keys
+    assert "const" not in keys
+
+
+def test_converted_schema_still_validates_a_good_instance():
+    """轉換不得改變 schema 接受什麼 —— 只是換一種方言表達。"""
+    import jsonschema
+
+    from pcmef.agents.provider import (
+        STUB_ROLE_HINTS, _synthesise_from_schema, _to_openai_schema,
+    )
+
+    schema = json.loads(
+        (SCHEMA_DIR / "specialist_proposal_v1.schema.json").read_text(encoding="utf-8")
+    )
+    instance = _synthesise_from_schema(schema, STUB_ROLE_HINTS["physics_agent"])
+    jsonschema.validate(instance, schema)
+    jsonschema.validate(instance, _to_openai_schema(schema))
 
 
 def test_http_errors_are_sanitised_and_carry_no_url(monkeypatch, image, body):
