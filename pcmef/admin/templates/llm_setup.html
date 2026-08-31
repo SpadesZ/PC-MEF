@@ -226,7 +226,19 @@
              舊版只看 next_step 是否為空，於是它照樣宣稱「已就緒可綁定」，
              而步驟 3 的下拉根本不會列出它 —— 兩個畫面互相矛盾。 #}
           <span class="badge bad">這條線路目前一個 agent 都服務不了</span>
-          <span class="note">能力以最近一次 Test 為準；請重按 Test，或改用其他線路</span>
+          {# 指示必須跟得上狀態：鎖定時 Test 是 disabled（can_test 只在
+             FETCHED / CONNECTED 為真），叫使用者「重按 Test」等於叫他按一個
+             按不下去的按鈕。鎖定的線路要重測，得先解鎖；而被 agent 綁著的
+             線路要解鎖，得先在步驟 3 改綁別條。 #}
+          {% if connection.can_test %}
+            <span class="note">能力以最近一次 Test 為準；請重按 Test，或改用其他線路</span>
+          {% else %}
+            <span class="note">
+              能力以最近一次 Test 為準，而鎖定中無法重測。要重測請先
+              Unlock；若 Unlock 被拒，代表步驟 3 還有 agent 綁著它 ——
+              先把那個 agent 改綁其他線路。
+            </span>
+          {% endif %}
         {% endif %}
 
         {% if connection.selected_model_id %}
