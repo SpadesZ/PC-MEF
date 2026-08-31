@@ -61,6 +61,20 @@ from pcmef.agents.pcmef_agents import (
 SCHEMA_DIR = Path("schemas")
 
 
+def _sent_payload(stub: StubOfflineAdapter, task_code: str) -> dict:
+    """取出某個角色實際收到的 payload（文字部分）。"""
+    for record in stub.invocations:
+        if record["task_code"] == task_code:
+            return record["payload"]
+    raise AssertionError(f"{task_code} was never invoked")
+
+
+def evidence_classes() -> tuple[str, ...]:
+    from pcmef.agents.pcmef_agents import CLASS_ORDER
+
+    return CLASS_ORDER
+
+
 @pytest.fixture()
 def stub() -> StubOfflineAdapter:
     return StubOfflineAdapter(resolve_secret=lambda ref: "offline")
@@ -121,11 +135,47 @@ def test_agent_set_matches_formal_task_registry():
 
 
 def test_every_prompt_states_confidence_is_not_reliability():
-    """四個 prompt 都必須攜帶那句話，不是只有仲裁者。"""
+    """四個 prompt 都必須逐字帶著那句話，不是只有仲裁者。"""
+    from pcmef.agents.pcmef_agents import assert_prompts_state_the_rule
+
+    assert_prompts_state_the_rule()
     for spec in AGENTS.values():
-        assert RELIABILITY_CLAUSE in spec.system_prompt, spec.task_code
-        assert "max" in spec.system_prompt.lower()
-        assert "entropy" in spec.system_prompt.lower()
+        assert RELIABILITY_CLAUSE.lower() in spec.system_prompt.lower(), spec.task_code
+
+
+def test_the_roles_that_see_probabilities_name_the_forbidden_substitutes():
+    """會拿到 p(y|x) 的角色，必須明確禁止拿 max-softmax / entropy 當可靠度。
+
+    Observation Agent 不在此列 —— 它根本收不到機率（見 withheld_keys），
+    所以要求它的 prompt 討論 max-softmax 只是空話。
+    """
+    for task_code in ("physics_agent", "visual_semantic_agent", "arbitration_agent"):
+        text = AGENTS[task_code].system_prompt.lower()
+        assert "confidence" in text, task_code
+    arbitration = AGENTS["arbitration_agent"].system_prompt.lower()
+    assert "max softmax" in arbitration
+    assert "entropy" in arbitration
+
+
+def test_prompts_live_in_files_not_python_constants():
+    """prompt 的單一來源必須是 configs/agents/prompts/ 下的檔案。
+
+    snapshot.py 對那些檔案取雜湊寫進 llm_runtime.lock。prompt 若同時存在於
+    Python 常數，凍結記錄的會是檔案雜湊而實際送出的是常數內容 ——
+    不一致，而且沒有任何症狀。
+    """
+    from pcmef.agents.pcmef_agents import PROMPT_DIR
+    from pcmef.core.hash import hash_file
+    from pcmef.llm.snapshot import PROMPT_KEYS
+
+    for spec in AGENTS.values():
+        assert spec.prompt_path.exists(), spec.task_code
+        # cache key 用的雜湊必須等於 lock 會記下的那一個。
+        assert spec.prompt_hash() == hash_file(spec.prompt_path)
+
+    # snapshot 期待的檔名要與四個角色一一對上，否則 freeze 會缺項。
+    expected = {PROMPT_DIR / name for name in PROMPT_KEYS.values()}
+    assert {spec.prompt_path for spec in AGENTS.values()} == expected
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +464,180 @@ def test_fixed_summary_length_is_constant_across_cases():
 # ---------------------------------------------------------------------------
 # stub 不得被凍結成 formal
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 角色隔離：靠不送，不靠 prompt 拜託
+# ---------------------------------------------------------------------------
+
+
+def test_physics_never_receives_vision_evidence(runner, stub, evidence):
+    """physics 的 prompt 禁止用 RGB，那 payload 就不該含 RGB 側的東西。
+
+    一邊叫它別看、一邊把 p_vision 遞過去，等於在 specialist 這層重演
+    Observation Agent 刻意避開的 anchoring。
+    """
+    run_pcmef_case(runner, evidence)
+    sent = _sent_payload(stub, "physics_agent")
+    # withheld_from_this_role 是稽核用的欄位**名稱**清單，不含任何值，
+    # 因此檢查洩漏時要把它排除，否則會把稽核紀錄本身誤判為洩漏。
+    text = json.dumps(
+        {k: v for k, v in sent.items() if k != "withheld_from_this_role"},
+        ensure_ascii=False,
+    )
+
+    assert "q_vision" not in text
+    assert "Q_vision" not in text
+    assert sent["calibrated_class_probabilities"].get("vision") is None
+    # ToF 側必須完整保留，否則它沒東西可推理。
+    assert sent["tof_summary"]["peak_bin"] is not None
+    assert sent["modality_reliability"]["q_tof"] == 0.31
+
+
+def test_visual_never_receives_tof_evidence(runner, stub, evidence):
+    run_pcmef_case(runner, evidence)
+    sent = _sent_payload(stub, "visual_semantic_agent")
+    text = json.dumps(
+        {k: v for k, v in sent.items() if k != "withheld_from_this_role"},
+        ensure_ascii=False,
+    )
+
+    assert "tof_summary" not in sent
+    assert "q_tof" not in text
+    assert sent["calibrated_class_probabilities"].get("tof") is None
+    assert sent["modality_reliability"]["q_vision"] == 0.82
+
+
+def test_observation_never_receives_class_probabilities(runner, stub, evidence):
+    """它不做分類，所以不該看到分類器的輸出。"""
+    run_pcmef_case(runner, evidence)
+    sent = _sent_payload(stub, "observation_agent")
+
+    assert "calibrated_class_probabilities" not in sent
+    # 但可靠度與品質證據要留著 —— 那正是它要評估的東西。
+    assert sent["modality_reliability"]["q_vision"] == 0.82
+    assert sent["duq_signals"]["Q_tof"] == 15.3
+
+
+def test_arbitration_sees_both_sides(runner, stub, evidence):
+    """仲裁者是唯一該看到全部證據的角色。"""
+    run_pcmef_case(runner, evidence)
+    sent = _sent_payload(stub, "arbitration_agent")
+
+    assert sent["calibrated_class_probabilities"]["vision"]
+    assert sent["calibrated_class_probabilities"]["tof"]
+    assert sent["modality_reliability"]["q_vision"] == 0.82
+    assert sent["modality_reliability"]["q_tof"] == 0.31
+    assert len(sent["anonymous_proposals"]) == 2
+
+
+def test_withholding_is_recorded_so_it_is_auditable(runner, stub, evidence):
+    """拿掉了什麼要留下痕跡，否則沒有人查得出隔離有沒有真的發生。"""
+    run_pcmef_case(runner, evidence)
+    withheld = _sent_payload(stub, "physics_agent")["withheld_from_this_role"]
+    assert "calibrated_class_probabilities.vision" in withheld
+    assert "modality_reliability.q_vision" in withheld
+
+
+# ---------------------------------------------------------------------------
+# class_support 正規化
+# ---------------------------------------------------------------------------
+
+
+def test_support_is_normalised_instead_of_aborting_the_run():
+    """JSON Schema 驗不了「四個數字加起來 100」。
+
+    硬要求精確 100 的代價不對稱：retry 只有 2 次，耗盡即 ABORT_FORMAL_RUN，
+    而 families 36-43 只能跑一次 —— 整場實驗會因為某個 case 寫了 99 而中止。
+    """
+    from pcmef.agents.pcmef_agents import normalise_class_support
+
+    normalised = normalise_class_support(
+        {"Empty": 50.0, "Water-filled": 30.0, "Bubbly": 15.0, "Misty": 4.0}
+    )
+    assert sum(normalised.values()) == pytest.approx(100.0)
+    # 相對大小必須保持不變 —— 正規化只換刻度，不換結論。
+    assert normalised["Empty"] > normalised["Water-filled"] > normalised["Bubbly"]
+
+
+def test_an_all_zero_support_is_spread_evenly_not_left_at_zero():
+    from pcmef.agents.pcmef_agents import normalise_class_support
+
+    normalised = normalise_class_support(dict.fromkeys(evidence_classes(), 0.0))
+    assert sum(normalised.values()) == pytest.approx(100.0)
+    assert len(set(normalised.values())) == 1
+
+
+def test_the_raw_sum_is_preserved_for_audit(runner, evidence):
+    """正規化不得把「模型沒遵守指示」這件事抹平。"""
+    bundle = run_pcmef_case(runner, evidence)
+    validated = bundle.artifacts["arbitration_validated"]
+    raw = bundle.artifacts["arbitration_raw"]
+
+    assert "support_sum_before_normalisation" in validated
+    assert "support_sum_within_tolerance" in validated
+    assert sum(validated["class_support"].values()) == pytest.approx(100.0)
+    # raw 保留模型原話，沒有被覆寫。
+    assert "support_sum_before_normalisation" not in raw
+
+
+# ---------------------------------------------------------------------------
+# retry 分流與取樣溫度
+# ---------------------------------------------------------------------------
+
+
+def test_a_schema_failure_gets_a_correction_but_a_transport_failure_does_not(
+    connection, model, evidence
+):
+    """更正指示只在「上一次違反 schema」時附上。
+
+    transport 失敗時請求本身沒有問題，改動它反而引入新變因。
+    """
+    from pcmef.agents.pcmef_agents import SCHEMA_CORRECTION
+
+    class BadThenGood(StubOfflineAdapter):
+        mode = "schema"
+
+        def invoke(self, connection, model, task_code, payload, runtime_cfg):
+            self.seen = getattr(self, "seen", [])
+            self.seen.append(payload)
+            if len(self.seen) == 1:
+                if self.mode == "schema":
+                    response = super().invoke(
+                        connection, model, task_code, payload, runtime_cfg
+                    )
+                    return type(response)(**{**response.__dict__, "text": "{}"})
+                raise ProviderError("stub_offline: transport failure (TimeoutError)")
+            return super().invoke(connection, model, task_code, payload, runtime_cfg)
+
+    body = {k: v for k, v in evidence.items() if k != EVIDENCE_IMAGES_KEY}
+
+    schema_adapter = BadThenGood(resolve_secret=lambda r: "x")
+    AgentRunner(
+        adapter=schema_adapter, connection=connection, model=model,
+        schema_dir=SCHEMA_DIR,
+    ).run(AGENTS["observation_agent"], body, images=evidence[EVIDENCE_IMAGES_KEY])
+    assert schema_adapter.seen[1].get("format_correction") == SCHEMA_CORRECTION
+
+    transport_adapter = BadThenGood(resolve_secret=lambda r: "x")
+    transport_adapter.mode = "transport"
+    AgentRunner(
+        adapter=transport_adapter, connection=connection, model=model,
+        schema_dir=SCHEMA_DIR,
+    ).run(AGENTS["observation_agent"], body, images=evidence[EVIDENCE_IMAGES_KEY])
+    assert "format_correction" not in transport_adapter.seen[-1], (
+        "傳輸失敗時請求必須原封不動重送"
+    )
+
+
+def test_formal_temperature_is_zero_and_reaches_the_adapter(runner, stub, evidence):
+    """溫度 0 是可重現性的前提，不是品質偏好。"""
+    from pcmef.agents.pcmef_agents import FORMAL_TEMPERATURE
+
+    assert FORMAL_TEMPERATURE == 0.0
+    assert runner.temperature == 0.0
+    run_pcmef_case(runner, evidence)
+    assert all(r["temperature"] == 0.0 for r in stub.invocations)
 
 
 def test_stub_is_not_formal_eligible():

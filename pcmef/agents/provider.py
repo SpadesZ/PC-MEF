@@ -461,13 +461,19 @@ class GoogleAdapter(HTTPProviderAdapter):
         model: ModelDescriptor,
         parts: list[dict[str, Any]],
         response_schema: dict[str, Any] | None = None,
+        temperature: float | None = None,
     ) -> tuple[str, int]:
         payload: dict[str, Any] = {"contents": [{"parts": parts}]}
+        config: dict[str, Any] = {}
         if response_schema is not None:
-            payload["generationConfig"] = {
-                "responseMimeType": "application/json",
-                "responseSchema": response_schema,
-            }
+            config["responseMimeType"] = "application/json"
+            config["responseSchema"] = response_schema
+        if temperature is not None:
+            # Google 沒有 OpenAI 那種 strict 旗標；responseSchema 本身就是強制的。
+            # 溫度是這裡唯一能壓低取樣隨機性的旋鈕。
+            config["temperature"] = float(temperature)
+        if config:
+            payload["generationConfig"] = config
         body, latency = self._request(
             connection, "POST", f"/models/{model.model_id}:generateContent",
             self._headers(connection), payload,
@@ -540,6 +546,7 @@ class GoogleAdapter(HTTPProviderAdapter):
         text, latency = self._generate(
             connection, model, parts,
             response_schema=_to_google_schema(schema) if schema else None,
+            temperature=runtime_cfg.get("temperature"),
         )
         return ProviderResponse(
             text=text, model_id=model.model_id, provider=self.provider,
@@ -583,6 +590,7 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
         model: ModelDescriptor,
         content: Any,
         response_format: dict[str, Any] | None = None,
+        temperature: float | None = None,
     ) -> tuple[str, int]:
         payload: dict[str, Any] = {
             "model": model.model_id,
@@ -590,6 +598,8 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if temperature is not None:
+            payload["temperature"] = float(temperature)
         body, latency = self._request(
             connection, "POST", "/chat/completions", self._headers(connection), payload
         )
@@ -678,7 +688,8 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
             else None
         )
         text, latency = self._chat(
-            connection, model, _payload_to_openai_content(payload), response_format
+            connection, model, _payload_to_openai_content(payload), response_format,
+            temperature=runtime_cfg.get("temperature"),
         )
         return ProviderResponse(
             text=text, model_id=model.model_id, provider=self.provider,
@@ -779,6 +790,10 @@ class StubOfflineAdapter(HTTPProviderAdapter):
                 "image_bytes": sum(len(i.get("data_b64", "")) for i in images),
                 "schema_requested": bool(schema),
                 "schema_title": (schema or {}).get("title"),
+                "temperature": runtime_cfg.get("temperature"),
+                # 完整記下送進來的文字部分，讓測試能斷言角色隔離
+                # 真的發生在 payload 層，而不是只寫在 prompt 裡。
+                "payload": rest,
             }
         )
         text = (

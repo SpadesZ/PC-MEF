@@ -57,7 +57,7 @@ from pcmef.agents.provider import (
     ProviderError,
     ProviderResponse,
 )
-from pcmef.core.hash import hash_object
+from pcmef.core.hash import hash_file, hash_object
 
 __all__ = [
     "AgentError",
@@ -98,69 +98,31 @@ MAX_ATTEMPTS = 2
 CLASS_ORDER: tuple[str, ...] = ("Empty", "Water-filled", "Bubbly", "Misty")
 
 
-#: 每個 prompt 都必須攜帶的一段話。
+#: 每份 prompt 都必須逐字出現的一句話。
 #:
 #: 這不是禮貌性的提醒 —— pilot 的 negative result 正是「把預測信心當成
 #: 感測可靠度」造成的：溫度校準後 ToF 的 T = 0.0498，劣化的 ToF 因此
 #: 高信心地錯，信心加權仲裁被拉向錯的那一邊（conflict 0.302，
-#: 單看 Vision 反而 0.677）。模型若自行把 class probability 的高低
-#: 解讀成「這個感測器比較可信」，就會在 prompt 層重演同一個錯誤。
-RELIABILITY_CLAUSE = (
-    "CRITICAL — predictive confidence is NOT sensor reliability. "
-    "The class probabilities you are given are calibrated p(y|x) from a frozen "
-    "classifier. A sharply peaked distribution means the classifier committed, "
-    "NOT that the sensor was working. A degraded sensor can and does produce "
-    "confidently wrong predictions. "
-    "Judge modality reliability ONLY from the supplied reliability scores "
-    "q_vision / q_tof and the sensor-quality evidence behind them "
-    "(sharpness, signal-to-noise, degradation margin, cross-modal support). "
-    "Do NOT derive reliability from the maximum class probability, from the "
-    "temperature-scaled confidence, or from the entropy of the class "
-    "distribution."
+#: 單看 Vision 反而 0.677）。
+RELIABILITY_CLAUSE = "Predictive confidence is NOT sensor reliability"
+
+#: prompt 檔的所在。與 pcmef/llm/snapshot.py 的 PROMPT_KEYS 指同一個目錄 ——
+#: 那裡取雜湊寫進 llm_runtime.lock，這裡讀內容送給 provider。同一份檔案。
+PROMPT_DIR = Path("configs/agents/prompts")
+
+#: schema 違反時，第二次嘗試附上的更正指示。
+#:
+#: 刻意只談格式：evidence 的詮釋不得因為重試而改變，否則第二次拿到的
+#: 就不是同一個問題的答案，而重試的前提是「同一個問題再問一次」。
+SCHEMA_CORRECTION = (
+    "Your previous response violated the required output schema. "
+    "Correct the formatting without changing the evidence interpretation."
 )
 
-_ANONYMITY_CLAUSE = (
-    "The two specialist opinions are anonymous. Do not assume either modality "
-    "is inherently superior, and do not try to identify which is which beyond "
-    "the modality tag already given."
-)
-
-_SYSTEM_PROMPTS: dict[str, str] = {
-    "observation_agent": (
-        "You are the Observation Agent in a multi-modal pipe-content inspection "
-        "system. You receive an RGB image and a summary of a time-of-flight (ToF) "
-        "return waveform from the SAME physical scene. "
-        "Report only what is observable. Do NOT propose or hint at a class. "
-        "Assess the quality of each modality's evidence and list what is missing. "
-        + RELIABILITY_CLAUSE
-    ),
-    "physics_agent": (
-        "You are the Physics Agent. You reason from the time-of-flight return "
-        "waveform: its timing, spread, amplitude and signal-to-noise, and what "
-        "those imply about the medium filling the pipe. "
-        "You may consult the RGB-side evidence only to note contradictions. "
-        "Give per-class evidence strengths in [0, 1]; they need not sum to 1. "
-        + RELIABILITY_CLAUSE
-    ),
-    "visual_semantic_agent": (
-        "You are the Visual-Semantic Agent. You reason from the RGB image: "
-        "texture, transparency, specular highlights, colour and visible structure, "
-        "and what those imply about the medium filling the pipe. "
-        "You may consult the ToF-side evidence only to note contradictions. "
-        "Give per-class evidence strengths in [0, 1]; they need not sum to 1. "
-        + RELIABILITY_CLAUSE
-    ),
-    "arbitration_agent": (
-        "You are the Arbitration Agent. You receive a neutral observation brief "
-        "and two anonymous specialist proposals, together with the reliability "
-        "scores of each modality. Produce a class_support distribution and tag "
-        "the level of conflict. "
-        "When one modality is markedly more reliable, weight it accordingly. "
-        "When both are weak, say so through a higher conflict tag rather than "
-        "inventing certainty. "
-        + _ANONYMITY_CLAUSE + " " + RELIABILITY_CLAUSE
-    ),
-}
+#: 取樣溫度。0 讓同一份證據盡可能得到同一個答案 —— 這是 formal run 的
+#: 可重現性前提，不是品質偏好。它會進 runtime_config_hash，因此改動它
+#: 等同改動 runtime identity。
+FORMAL_TEMPERATURE = 0.0
 
 
 @dataclass(frozen=True)
@@ -174,13 +136,40 @@ class AgentSpec:
     needs_image: bool
     #: 這個角色的產物寫進 cache 的哪一份 artifact（raw, validated）。
     artifact_names: tuple[str, str]
+    #: payload 中**不得**送進這個角色的鍵。角色隔離靠不送，不靠 prompt 拜託。
+    withheld_keys: tuple[str, ...] = ()
+
+    @property
+    def prompt_path(self) -> Path:
+        return PROMPT_DIR / f"{self.task_code}.md"
 
     @property
     def system_prompt(self) -> str:
-        return _SYSTEM_PROMPTS[self.task_code]
+        """從檔案讀，**不從 Python 常數讀**。
+
+        freeze/llm_runtime.lock 的 prompt_hashes 是由 snapshot.py 對
+        configs/agents/prompts/ 下的檔案取雜湊。prompt 若同時存在於
+        Python 常數與檔案，凍結記錄的就會是「檔案的雜湊」而執行送出的是
+        「常數的內容」—— 兩者不一致，而且不會有任何症狀。
+        單一來源就是這些檔案。
+        """
+        path = self.prompt_path
+        if not path.exists():
+            raise AgentError(
+                f"prompt file for {self.task_code} not found at {path}. "
+                "Prompts are frozen artifacts hashed into llm_runtime.lock; "
+                "they must not be reintroduced as Python constants."
+            )
+        return path.read_text(encoding="utf-8").strip()
 
     def prompt_hash(self) -> str:
-        return hash_object({"system": self.system_prompt, "task": self.task_code})
+        """與 snapshot.py 的 _hash_files 對齊：同一個檔案、同一個雜湊函式。
+
+        兩邊都用 hash_file，因此 cache key 裡的 prompt 雜湊與
+        llm_runtime.lock 裡的 prompt_hashes 對得起來 —— 這是可稽核性的前提，
+        不是巧合。
+        """
+        return hash_file(self.prompt_path)
 
 
 AGENTS: dict[str, AgentSpec] = {
@@ -191,18 +180,27 @@ AGENTS: dict[str, AgentSpec] = {
             schema_name="observation_brief_v1",
             needs_image=True,
             artifact_names=("observation_raw", "observation_validated"),
+            withheld_keys=("class_probabilities",),
         ),
+        # 兩位專家的角色隔離**靠不送，不靠 prompt 拜託**。
+        #
+        # prompt 寫著「You are NOT allowed to infer from the RGB image」，
+        # 卻把 p_vision 與 q_vision 一起遞過去，等於一邊叫它別看一邊把東西
+        # 放在它面前 —— 那正是 Observation Agent 不做分類所要避開的
+        # anchoring，只是換了位置。沒收到就是事實，收到了才需要承諾。
         AgentSpec(
             task_code="physics_agent",
             schema_name="specialist_proposal_v1",
             needs_image=False,
             artifact_names=("physics_proposal", "physics_proposal"),
+            withheld_keys=("vision",),
         ),
         AgentSpec(
             task_code="visual_semantic_agent",
             schema_name="specialist_proposal_v1",
             needs_image=True,
             artifact_names=("visual_proposal", "visual_proposal"),
+            withheld_keys=("tof",),
         ),
         AgentSpec(
             task_code="arbitration_agent",
@@ -212,6 +210,48 @@ AGENTS: dict[str, AgentSpec] = {
         ),
     )
 }
+
+
+#: class_support 總和的容許區間。
+#:
+#: JSON Schema **沒有跨欄位算術約束**，所以「四個數字加起來等於 100」
+#: 驗證不了。硬在程式裡要求精確 100 的代價不對稱得離譜：retry 只有 2 次，
+#: 耗盡即 ABORT_FORMAL_RUN，而 families 36-43 只能跑一次 ——
+#: 整場實驗會因為某個 case 寫了 99 而中止。
+#: 因此接受容差後正規化：那是確定性的、可記錄的轉換。
+SUPPORT_SUM_TOLERANCE = 5.0
+
+
+def normalise_class_support(support: Mapping[str, float]) -> dict[str, float]:
+    """把 class_support 正規化成總和 100。
+
+    回傳新的 dict，不改動輸入。總和落在 100 ± SUPPORT_SUM_TOLERANCE 之外時
+    仍然正規化，但呼叫端會把原始總和記進 artifact —— 偏離太多是模型沒有
+    遵守指示的證據，不該被正規化悄悄抹平。
+    """
+    values = {name: float(support.get(name, 0.0)) for name in CLASS_ORDER}
+    total = sum(values.values())
+    if total <= 0:
+        # 全零沒有辦法正規化。這是「模型什麼都沒說」，均分才誠實。
+        return {name: 100.0 / len(CLASS_ORDER) for name in CLASS_ORDER}
+    return {name: round(value * 100.0 / total, 6) for name, value in values.items()}
+
+
+def assert_prompts_state_the_rule() -> None:
+    """四份 prompt 都必須逐字帶著那句話，且必須真的存在。
+
+    這句話是 pilot 那個 negative result 的直接對策。它若在某次編輯中掉了，
+    不會有任何症狀 —— 模型照樣回得出 schema-valid 的東西，只是可能又把
+    信心當成可靠度。所以用測試盯著，不靠人記得。
+    """
+    for task_code, spec in AGENTS.items():
+        text = spec.system_prompt
+        if RELIABILITY_CLAUSE.lower() not in text.lower():
+            raise AgentError(
+                f"{task_code} prompt no longer states {RELIABILITY_CLAUSE!r}; "
+                "that sentence is the direct countermeasure to the pilot's "
+                "negative result and must not be dropped"
+            )
 
 
 def assert_registry_consistent() -> None:
@@ -436,6 +476,7 @@ class AgentRunner:
     model: Any
     schema_dir: Path = field(default_factory=lambda: Path("schemas"))
     max_attempts: int = MAX_ATTEMPTS
+    temperature: float = FORMAL_TEMPERATURE
     attempts: list[AttemptLog] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -476,18 +517,38 @@ class AgentRunner:
         request = {"system": spec.system_prompt, **body}
         if supplied:
             request[EVIDENCE_IMAGES_KEY] = supplied
-        runtime_cfg = {"response_schema": schema, "task_code": spec.task_code}
+        runtime_cfg = {
+            "response_schema": schema,
+            "task_code": spec.task_code,
+            "temperature": self.temperature,
+        }
 
         last_error = ""
+        correction: str | None = None
         for attempt in range(1, self.max_attempts + 1):
+            # 只有「上一次違反 schema」才附更正指示。transport 失敗時請求
+            # 本身沒有任何問題，改動它反而引入一個新的變因。
+            outgoing = dict(request)
+            if correction:
+                outgoing["format_correction"] = correction
             try:
                 response = self.adapter.invoke(
-                    self.connection, self.model, spec.task_code, request, runtime_cfg
+                    self.connection, self.model, spec.task_code, outgoing, runtime_cfg
                 )
                 parsed = _extract_json(response.text)
                 jsonschema.validate(parsed, schema)
-            except (ProviderError, AgentError, jsonschema.ValidationError) as error:
+            except ProviderError as error:
+                # 傳輸/HTTP 失敗。原封不動重送 —— 這類失敗多半是暫態，
+                # 若不重試，一次網路抖動就會終止整場 formal run。
                 last_error = f"{type(error).__name__}: {error}"
+                correction = None
+                self.attempts.append(
+                    AttemptLog(spec.task_code, attempt, ok=False, error=last_error[:400])
+                )
+                continue
+            except (AgentError, jsonschema.ValidationError) as error:
+                last_error = f"{type(error).__name__}: {error}"
+                correction = SCHEMA_CORRECTION
                 self.attempts.append(
                     AttemptLog(spec.task_code, attempt, ok=False, error=last_error[:400])
                 )
@@ -511,6 +572,59 @@ class AgentRunner:
 
 def _strip_images(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if k != EVIDENCE_IMAGES_KEY}
+
+
+#: 一個模態的證據散落在哪些欄位。withhold() 用它把整個模態拿掉。
+_MODALITY_FIELDS: dict[str, tuple[tuple[str, ...], ...]] = {
+    # Observation Agent 不做分類，因此也不該看到分類器的輸出。
+    # 它的 prompt 寫「If model probabilities are accidentally present in the
+    # input, do not use them」—— 最忠實的實作是根本不送，而不是送了再叫它
+    # 別看。這同時擋掉一條 anchoring 路徑：看得到 p(y|x) 的話，它的
+    # 「觀察」很容易被機率最高的那一類染色。
+    "class_probabilities": (
+        ("calibrated_class_probabilities",),
+    ),
+    "vision": (
+        ("calibrated_class_probabilities", "vision"),
+        ("modality_reliability", "q_vision"),
+        ("duq_signals", "Q_vision"),
+        ("duq_signals", "U_vision"),
+    ),
+    "tof": (
+        ("tof_summary",),
+        ("calibrated_class_probabilities", "tof"),
+        ("modality_reliability", "q_tof"),
+        ("duq_signals", "Q_tof"),
+        ("duq_signals", "U_tof"),
+    ),
+}
+
+
+def withhold(spec: AgentSpec, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """把這個角色不該看到的模態證據從 payload 中移除。
+
+    角色隔離必須是**結構上的**。prompt 說「不准看 RGB」但 payload 裡放著
+    p_vision，就跟叫 vision agent 別把路徑當影像一樣不可靠 —— 講了不算數，
+    沒送到才算數。這也讓兩位專家的一致度仍然是獨立證據：他們看的東西
+    真的不重疊。
+    """
+    if not spec.withheld_keys:
+        return dict(payload)
+
+    result = json.loads(json.dumps(payload, ensure_ascii=False))  # 深拷貝
+    removed: list[str] = []
+    for modality in spec.withheld_keys:
+        for path in _MODALITY_FIELDS.get(modality, ()):
+            node = result
+            for part in path[:-1]:
+                node = node.get(part) if isinstance(node, dict) else None
+                if node is None:
+                    break
+            if isinstance(node, dict) and path[-1] in node:
+                node.pop(path[-1])
+                removed.append(".".join(path))
+    result["withheld_from_this_role"] = sorted(removed)
+    return result
 
 
 def _image_digests(payload: Mapping[str, Any]) -> list[str]:
@@ -561,13 +675,15 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
         usage["latency"] += response.latency_ms
 
     observation, response = runner.run(
-        AGENTS["observation_agent"], body, images=images
+        AGENTS["observation_agent"],
+        withhold(AGENTS["observation_agent"], body),
+        images=images,
     )
     track(response)
 
     physics, response = runner.run(
         AGENTS["physics_agent"],
-        {**body, "observation_brief": observation},
+        withhold(AGENTS["physics_agent"], {**body, "observation_brief": observation}),
         images=[],
     )
     track(response)
@@ -579,7 +695,10 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
 
     visual, response = runner.run(
         AGENTS["visual_semantic_agent"],
-        {**body, "observation_brief": observation},
+        withhold(
+            AGENTS["visual_semantic_agent"],
+            {**body, "observation_brief": observation},
+        ),
         images=images,
     )
     track(response)
@@ -602,6 +721,18 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
     )
     track(response)
 
+    # raw 保留模型原話，validated 是正規化後的版本。兩份都留：
+    # 原始總和偏離 100 多少，是模型有沒有遵守指示的證據，
+    # 不該被正規化悄悄抹平。
+    raw_support = dict(arbitration.get("class_support") or {})
+    raw_sum = sum(float(v) for v in raw_support.values())
+    arbitration_validated = {
+        **arbitration,
+        "class_support": normalise_class_support(raw_support),
+        "support_sum_before_normalisation": round(raw_sum, 6),
+        "support_sum_within_tolerance": abs(raw_sum - 100.0) <= SUPPORT_SUM_TOLERANCE,
+    }
+
     return AgentBundle(
         artifacts={
             "observation_raw": observation,
@@ -609,7 +740,7 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
             "physics_proposal": physics,
             "visual_proposal": visual,
             "arbitration_raw": arbitration,
-            "arbitration_validated": arbitration,
+            "arbitration_validated": arbitration_validated,
         },
         provider_request_id=usage["request_id"],
         token_usage=int(usage["tokens"]),
