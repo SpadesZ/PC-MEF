@@ -62,7 +62,7 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
 $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"    # 少了會有一批模擬測試靜默 skip
 $env:PCMEF_REQUIRE_SIMULATION = "1"                  # 讓「缺相依」變成失敗而不是 skip
 py -3.10 -m pytest                                   # 全部測試（1681 條，約 3.5 分鐘）
-py -3.10 -m pcmef.cli config check                   # 待教授裁決的 10 項
+py -3.10 -m pcmef.cli config check                   # 待教授裁決的 8 項
 py -3.10 -m pcmef.cli params audit                   # 38 個參數的 formal 防線（exit 2 = 不可進 formal）
 py -3.10 -m pcmef.cli locks status                   # 22 個 formal lock 的狀態
 py -3.10 -m pcmef.cli sim smoke                      # M1 模擬 smoke
@@ -120,7 +120,8 @@ py -3.10 -m pcmef.cli llm connection add --provider stub_offline --name Demo --s
 | ~~Real split 三值未裁決~~ | — | **已裁決並凍結** 392/168（NOTE-014） |
 | ~~E1/E2 bootstrap 四值~~ | — | **已核定** 10000 / 20260826 / 20260827（NOTE-015） |
 | ~~Sigma register 未定阻擋 E1-G08~~ | — | **已由 AMD-001 拆解**：channel/scale 為 CONFIRMED，位址獨立為 CONFLICT 且不再擋 gate（NOTE-028） |
-| 10 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
+| 8 項數值未核定 | 全部 formal run | `config check` 有完整清單與出處；其中 `gate.*`、`e2.final_n_per_class` 須由搜尋或 pilot 產出，不是「請教授給數字」 |
+| **無真實 LLM 憑證** | Full PC-MEF 的 Formal E2 | 四 agent 與 provider path 已完成並以 stub 驗證（NOTE-047）；**尚缺的是連線本身**，見下方「Full PC-MEF LLM integration」專節 |
 | **26 個參數未解決** | 全部 formal run | `params audit`（exit 2）有完整清單。**防線已上線**（NOTE-030），不再需要人工數。**校準協定已預註冊凍結**（NOTE-041），可以開始跑 |
 | ~~CG-3 / Ambient 觀測量定義錯誤~~ | — | **已解除**：Ambient 改為獨立 ambient pass（NOTE-034） |
 | ~~M2 場景保真度~~ | — | **已解除**：`initial_simulation.lock` 已凍結（NOTE-039） |
@@ -1102,6 +1103,75 @@ Bubbly        NW  66408  (W1  81974)           Misty  NW 49811  (W1  61486)
 | families 28-35 改名為 deterministic-gate pilot / pre-LLM benchmark | 完成，結果一字未改 |
 | `q_m` 與 `p_m(y|x)` 分離 | 完成，見下 |
 | 待核定數值 | 由 10 項降為 8 項 |
+| 四個 agent 實作（observation / physics / visual_semantic / arbitration） | 完成，`pcmef/agents/pcmef_agents.py` |
+| provider execution path 修復（真送圖、真送 schema） | 完成，NOTE-047 |
+| 離線整合測試 | 32 條全過，`tests/agents/` |
+
+### LLM agent integration（2026-08-31，NOTE-047）
+
+四個 agent 沿用 §45 既有 task code 與 schema，**未新增研究角色**。
+`needs_image` 由 `assert_registry_consistent()` 對照 §45 的 VISION 要求，
+兩處不一致就在 import 時失敗 —— 不是各寫一份。
+
+| 角色 | schema | 送圖 | 依賴 |
+|---|---|---|---|
+| `observation_agent` | `observation_brief_v1` | ✅ | 原始證據 |
+| `physics_agent` | `specialist_proposal_v1` | ❌（§45 不要求 vision） | + observation brief |
+| `visual_semantic_agent` | `specialist_proposal_v1` | ✅ | + observation brief |
+| `arbitration_agent` | `arbitration_output_v1` | ❌ | + 兩份匿名意見 |
+
+**修復的缺陷（NOTE-047）**：原本 `_payload_to_parts()` 是
+`[{"text": json.dumps(payload)}]`，`OpenAICompatibleAdapter.invoke()` 是
+`_chat(..., _payload_to_text(payload))`。兩條路徑都把 payload 序列化成文字，
+於是 **vision agent 從來沒有看過圖、structured agent 從來沒有要求過 schema**，
+而且**不會拋任何例外** —— E2 會產出一組看起來完整的數字，
+而「多模態」那一半其實不存在。`verify_vision` probe 是綠的也救不了：
+probe 走 `_generate()` 手工組的 parts，`invoke()` 走另一條路，兩者無共用程式碼。
+
+現在 Google 送 `inlineData`（camelCase，與已驗證的 probe 同形）+
+`responseSchema`；OpenAI 相容送 `image_url` data URI + `response_format.json_schema`。
+兩者都由 `tests/agents/test_provider_execution_path.py` 攔截 `httpx.request`，
+**從實際送出的 request body 解出影像並斷言前 8 位元組是 PNG magic**。
+需要視覺的角色收不到圖時**直接拒絕執行**，不退回純文字請求。
+
+LLM payload = FIXED_SUMMARY + calibrated class probabilities + `q_v`/`q_t`，
+且三者在 payload 內被標成語意不同的區塊。四個 prompt 都攜帶
+「predictive confidence is NOT sensor reliability」並明文禁止以
+max-softmax / temperature-scaled confidence / entropy 推導可靠度。
+**reliability proxy 未更換**（gate-validation 分數不好不是換 proxy 的理由）。
+
+**stub 的邊界**：`stub_offline` 不在 `FORMAL_ELIGIBLE_PROVIDERS`，
+`build_runtime_snapshot()` 會把它列為 blocking（`test_a_non_formal_provider_cannot_be_frozen`）。
+stub 只證明工程路徑走得通，**其輸出不是研究結果**，也未凍結任何 `llm_runtime.lock`。
+
+### 尚缺的真實 provider 步驟
+
+1. 在環境變數放入真實 key（**只用 `secret_ref: env:<NAME>`**，不建 `.env`、不硬編、不 commit）
+2. `llm connection add --provider google --secret-ref env:<NAME>` → `fetch-models` → `select-model`
+3. `llm connection test`：chat / structured_json / vision 三項 probe 全過
+4. `llm connection lock` → 四個 `llm binding set` + `binding lock`
+5. `llm snapshot --freeze` 寫出 `freeze/llm_runtime.lock.json`
+6. 以真實 provider 重跑 `tests/agents/` 的等價驗證（確認回應真的符合 schema）
+7. 全部凍結後才產生 families 36-43 並跑一次 Formal E2
+
+**`READY_FOR_REAL_LLM_VALIDATION = YES`** —— 工程路徑已就緒且有測試背書；
+缺的只有憑證與上述連線步驟，沒有已知的程式缺口。
+
+### ⚠ 目錄命名陷阱：`outputs/perception/formal_e2/` 裡面是 families 28-35
+
+上一階段把報告 `formal_e2_report.json` 改名為
+`e2_deterministic_gate_pilot.json`，但**產出目錄沒有一起改名**。
+實測 `outputs/perception/formal_e2/dataset_manifest.json` 內的
+`family_index` 只有 **28-35**，沒有任何 36-43。
+
+也就是說這個目錄的名字現在是錯的：它裝的是 pilot，不是 final formal E2。
+**在跑真正的 Formal E2 之前必須先處理**，否則兩種情況都會發生而且都不會報錯：
+
+* 把 36-43 的輸出寫進這個目錄，與 28-35 的檔案混在一起；
+* 有人讀這個目錄，以為讀到的是 final test，其實是已經看過很多次的 pilot。
+
+刻意**不在本階段自行改名**：這是已產生的研究產物，改名屬於資料操作，
+應由知道下游還有誰在讀它的人決定。此處只如實記錄。
 
 ### 阻塞：LLM provider 不存在
 
@@ -2516,7 +2586,7 @@ policy 與 lock 內：Edge Impulse 匯出的 560 筆樣本 payload 只有
 
 ---
 
-## 待教授裁決事項（formal-blocking，共 10 項）
+## 待教授裁決事項（formal-blocking，共 8 項）
 
 執行 `py -3.10 -m pcmef.cli config check` 可隨時取得最新清單。
 這些數值依 SRC-PLAN Appendix A 與 SRC-SAI Appendix F **禁止實作端自行補值**，
@@ -2527,7 +2597,6 @@ policy 與 lock 內：Edge Impulse 匯出的 560 筆樣本 payload 只有
 | Perception | `training_seed_pairs` |
 | Reliability | `crossfit_folds` |
 | Gate | `alpha`、`beta`、`gamma`（須由 validation 搜尋選出後 freeze） |
-| Agents | `representation_mode`、`retry.max_attempts` |
 | E2 | `final_n_per_class`（只能由 e2_pilot 依預註冊 sizing rule 決定）、`severity_allocation` |
 | Conflict | `delta` |
 
@@ -2538,6 +2607,8 @@ policy 與 lock 內：Edge Impulse 匯出的 560 筆樣本 payload 只有
 | 2026-08-26 | real split allocation / minimum / seed | 70-30 / 100 / 20260826 | NOTE-014 |
 | 2026-08-26 | `e1.scientific_rule.bootstrap_replicates` / `_seed` | 10000 / 20260826 | NOTE-015 |
 | 2026-08-26 | `statistics.bootstrap_replicates` / `_seed` | 10000 / 20260827 | NOTE-015 |
+| 2026-08-31 | `agents.representation_mode` | `FIXED_SUMMARY` | NOTE-046 |
+| 2026-08-31 | `agents.retry.max_attempts` / `on_exhaustion` | 2 / `ABORT_FORMAL_RUN` | NOTE-046 |
 
 E1 那組核定時 held-out access_count 為 0 且尚無任何 E1 結果 —— 這是預註冊的
 前提條件，不是行政程序。**「換個 seed 看看」在任何情況下都不是除錯手段**

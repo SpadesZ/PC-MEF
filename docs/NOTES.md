@@ -324,12 +324,75 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-047 Provider execution path：影像必須是 bytes，schema 必須真的送出
+
+**決策日期**：2026-08-31
+
+**適用範圍**：`pcmef/agents/provider.py` 的 `_payload_to_parts`、
+`_payload_to_openai_content`、`GoogleAdapter.invoke`、
+`OpenAICompatibleAdapter.invoke`、`StubOfflineAdapter.invoke`；
+`pcmef/agents/pcmef_agents.py` 的四個 agent。
+
+**決策**：
+
+1. payload 以保留鍵 `evidence_images` 攜帶影像，值為 base64 bytes，
+   **不得是檔案路徑**。Google 走 `inlineData`（camelCase，與已驗證的
+   `verify_vision` probe 同形），OpenAI 相容走 `image_url` data URI。
+2. 需要 structured output 的角色一律送出 JSON schema
+   （Google `responseSchema` + `responseMimeType`；OpenAI
+   `response_format.json_schema`），回應必須 `json.loads` 後再經
+   `jsonschema.validate`。
+3. `needs_image` 的角色收不到影像時**直接拒絕執行**，不得退回純文字請求。
+4. `StubOfflineAdapter` 記錄每次 invoke 實際收到的影像數、影像位元組數與
+   是否帶 schema，並回傳一個 schema-valid 的合成實例。
+
+**原因**：
+
+修改前 `_payload_to_parts()` 是 `[{"text": json.dumps(payload)}]`，
+`OpenAICompatibleAdapter.invoke()` 是 `self._chat(..., _payload_to_text(payload))`。
+兩條路徑都把整個 payload 序列化成文字，於是：
+
+* **vision agent 從來沒有看過圖。** 它收到的是一段描述影像的 JSON 文字。
+* **structured agent 從來沒有要求過 schema。** 回應碰巧是 JSON 就過，
+  不是 JSON 也沒有人檢查。
+
+這種失敗**不會拋任何例外**，指標照樣算得出來 —— E2 會產生一組看起來
+完整的數字，而「多模態」那一半其實不存在。`verify_vision` probe 是綠的
+也救不了：probe 走 `_generate()` 手工組的 parts，`invoke()` 走另一條路，
+兩者之間沒有任何共用程式碼。
+
+第 3 點（收不到圖就拒絕）是關鍵：若容許退回純文字，上述失敗會在真實
+provider 上以「安靜降級」的形式重演，而且比原本更難發現，因為那時
+`evidence_images` 這個鍵已經存在了，只是碰巧是空的。
+
+禁止傳路徑另有 NOTE-003 / NOTE-004 的理由：路徑字串含 class 與
+condition，送進 provider 等於把 ground truth 一起送出去。
+
+第 4 點的用意是讓離線測試**證明得了**上述每一條，而不是只證明
+「呼叫沒有拋例外」—— 送出純文字也不會拋例外，那正是這個缺陷原本
+躲過所有測試的原因。stub 依 `STUB_ROLE_HINTS` 遵守角色契約
+（`visual_semantic_agent` 不得自稱 `physics`），因為它要模擬的是一個
+**守約**的模型，不是一個剛好通過 schema 的模型。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/agents -v
+```
+
+`test_google_puts_a_real_png_on_the_wire` 與
+`test_openai_compatible_puts_a_data_uri_on_the_wire` 攔截 `httpx.request`，
+從實際送出的 request body 取出影像並解碼，斷言前 8 個位元組是 PNG magic。
+`test_vision_agent_refuses_to_run_without_an_image` 斷言缺圖時拒絕執行。
+
+---
+
 ## NOTE-046 Agent 的 representation mode 與 bounded retry 次數核定
 
 **決策日期**：2026-08-31
 
 **適用範圍**：`configs/base.yaml` 的 `agents.representation_mode` 與
-`agents.retry.max_attempts`；`pcmef/perception/agents.py` 的 prompt 組裝與
+`agents.retry.max_attempts`；`pcmef/agents/pcmef_agents.py` 的 prompt 組裝與
 retry 迴圈；後續任何呼叫四個 agent 的 formal run。
 
 **決策**：

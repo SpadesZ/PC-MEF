@@ -159,12 +159,38 @@ def _build(registry, config, prompts_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_shipped_config_blocks_the_snapshot(formal_ready, prompts_dir):
+def _withdraw(config, *dotted_keys: str):
+    """把已裁決的值改回 !required，重現「教授還沒裁決」的狀態。
+
+    2026-08-31（NOTE-046）之後，configs/base.yaml 的
+    agents.representation_mode 與 agents.retry.max_attempts 都已核定，
+    因此 shipped config 本身不再示範這條紅線。紅線的**機制**仍必須有測試 ——
+    否則哪天補值邏輯被加回來，不會有任何測試變紅。
+    """
+    import copy
+
+    from pcmef.core.config import Required
+
+    clone = copy.deepcopy(config)
+    for dotted_key in dotted_keys:
+        node = clone.data
+        parts = dotted_key.split(".")
+        for part in parts[:-1]:
+            node = node[part]
+        node[parts[-1]] = Required(dotted_key)
+    return clone
+
+
+def test_an_undecided_value_blocks_the_snapshot(formal_ready, prompts_dir):
     """紅線一：未核定值一律 !required，禁補預設。"""
     registry, _, _ = formal_ready
-    shipped = load_config(["configs/base.yaml"])
+    undecided = _withdraw(
+        load_config(["configs/base.yaml"]),
+        "agents.representation_mode",
+        "agents.retry.max_attempts",
+    )
 
-    snapshot = _build(registry, shipped, prompts_dir)
+    snapshot = _build(registry, undecided, prompts_dir)
 
     assert snapshot.freezable is False
     blocking = " ".join(snapshot.blocking_reasons)
@@ -175,12 +201,35 @@ def test_shipped_config_blocks_the_snapshot(formal_ready, prompts_dir):
         snapshot.to_lock_payload()
 
 
+def test_shipped_config_now_carries_both_advisor_decisions(formal_ready, prompts_dir):
+    """NOTE-046：兩項裁決已於 2026-08-31 核定，因此不再是 blocking 原因。
+
+    核定發生在 families 36-43 的 Formal E2 產生**之前**，且未看過任何
+    final 結果。這個測試記錄的是「現在的真實狀態」，不是放寬檢查。
+    """
+    registry, _, _ = formal_ready
+    shipped = load_config(["configs/base.yaml"])
+
+    snapshot = _build(registry, shipped, prompts_dir)
+
+    assert snapshot.representation_mode == "FIXED_SUMMARY"
+    assert snapshot.runtime_config["retry_max_attempts"] == 2
+    blocking = " ".join(snapshot.blocking_reasons)
+    assert "agents.representation_mode" not in blocking
+    assert "agents.retry.max_attempts" not in blocking
+
+
 def test_an_unresolved_value_still_changes_the_candidate_hash(
     formal_ready, prompts_dir, decided_config
 ):
     """帶缺口的快照不該和補齊之後的快照得到相同雜湊。"""
     registry, _, _ = formal_ready
-    blocked = _build(registry, load_config(["configs/base.yaml"]), prompts_dir)
+    withdrawn = _withdraw(
+        load_config(["configs/base.yaml"]),
+        "agents.representation_mode",
+        "agents.retry.max_attempts",
+    )
+    blocked = _build(registry, withdrawn, prompts_dir)
     decided = _build(registry, decided_config, prompts_dir)
     assert blocked.candidate_hash() != decided.candidate_hash()
 

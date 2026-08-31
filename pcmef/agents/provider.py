@@ -38,6 +38,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import struct
 import time
@@ -63,6 +64,7 @@ __all__ = [
     "StubOfflineAdapter",
     "PROVIDER_ADAPTERS",
     "FORMAL_ELIGIBLE_PROVIDERS",
+    "EVIDENCE_IMAGES_KEY",
     "get_adapter",
     "PROBE_CHAT_PROMPT",
     "PROBE_STRUCTURED_PROMPT",
@@ -656,7 +658,28 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
         return self._probe(Capability.EMBEDDING, run)
 
     def invoke(self, connection, model, task_code, payload, runtime_cfg) -> ProviderResponse:
-        text, latency = self._chat(connection, model, _payload_to_text(payload))
+        """影像走 image_url data URI，structured 走 response_format。
+
+        先前這裡是 `_payload_to_text(payload)` —— 影像會被 JSON 序列化成
+        文字，於是 vision agent 其實從來沒有看過圖；structured 也沒有真的
+        要求 schema。兩者都是「跑得動但量錯東西」的那種錯。
+        """
+        schema = runtime_cfg.get("response_schema")
+        response_format = (
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": str(task_code),
+                    "schema": _to_provider_schema(schema),
+                    "strict": True,
+                },
+            }
+            if schema
+            else None
+        )
+        text, latency = self._chat(
+            connection, model, _payload_to_openai_content(payload), response_format
+        )
         return ProviderResponse(
             text=text, model_id=model.model_id, provider=self.provider,
             provider_revision=model.provider_revision, latency_ms=latency,
@@ -691,6 +714,8 @@ class StubOfflineAdapter(HTTPProviderAdapter):
             (environ if environ is not None else os.environ).get(self.CATALOGUE_ENV, "")
         )
         self.calls: list[tuple[str, str]] = []
+        #: 每次 invoke 收到什麼的完整記錄，供測試斷言影像與 schema 真的到位。
+        self.invocations: list[dict[str, Any]] = []
 
     def _supported(self, model: ModelDescriptor) -> tuple[Capability, ...]:
         return self.catalogue.get(model.model_id, model.declared_capabilities)
@@ -736,10 +761,36 @@ class StubOfflineAdapter(HTTPProviderAdapter):
         return self._stub_probe(connection, model, Capability.EMBEDDING)
 
     def invoke(self, connection, model, task_code, payload, runtime_cfg) -> ProviderResponse:
+        """離線回應。**會記錄它到底收到了什麼**，因此測試證明得了
+        「影像真的送進 adapter」與「schema 真的被要求」，而不是只證明
+        呼叫沒有拋例外。
+
+        要求 structured 時回傳一個 schema-valid 的實例，讓
+        parse + jsonschema 驗證這條路在離線也走得完整。
+        """
         self._resolve_secret(connection.secret_ref)
+        rest, images = _split_evidence(payload)
+        schema = runtime_cfg.get("response_schema")
         self.calls.append((model.model_id, f"invoke:{task_code}"))
+        self.invocations.append(
+            {
+                "task_code": str(task_code),
+                "image_count": len(images),
+                "image_bytes": sum(len(i.get("data_b64", "")) for i in images),
+                "schema_requested": bool(schema),
+                "schema_title": (schema or {}).get("title"),
+            }
+        )
+        text = (
+            json.dumps(
+                _synthesise_from_schema(schema, STUB_ROLE_HINTS.get(str(task_code))),
+                ensure_ascii=False, sort_keys=True,
+            )
+            if schema
+            else hash_object(rest)[:32]
+        )
         return ProviderResponse(
-            text=hash_object(payload)[:32], model_id=model.model_id,
+            text=text, model_id=model.model_id,
             provider=self.provider, provider_revision=model.provider_revision,
             request_id=f"stub-{len(self.calls)}", latency_ms=1,
         )
@@ -772,6 +823,57 @@ def _parse_stub_catalogue(raw: str) -> dict[str, tuple[Capability, ...]]:
             if name.strip()
         )
     return catalogue
+
+
+#: stub 在合成回應時要遵守的角色契約。
+#: enum 的第一個值未必是該角色該給的值 —— specialist_proposal_v1 的
+#: modality enum 是 [physics, visual_semantic]，照字面取第一個會讓
+#: visual_semantic_agent 自稱 physics，而那是真實模型會被擋下的違約。
+#: stub 要模擬的是一個**守約**的模型，不是一個剛好通過 schema 的模型。
+STUB_ROLE_HINTS: dict[str, dict[str, Any]] = {
+    "physics_agent": {"modality": "physics"},
+    "visual_semantic_agent": {"modality": "visual_semantic"},
+}
+
+
+def _synthesise_from_schema(
+    schema: dict[str, Any], hints: dict[str, Any] | None = None
+) -> Any:
+    """由 JSON Schema 造出一個**滿足該 schema** 的最小實例。
+
+    只給 stub 用。它的用途是讓離線測試能真的跑完
+    「要求 schema -> 回應 -> json.loads -> jsonschema.validate」整條路 ——
+    否則離線只驗到「沒有拋例外」，而 schema 驗證那一段永遠沒被執行過。
+    """
+    if not isinstance(schema, dict):
+        return None
+    if "const" in schema:
+        return schema["const"]
+    if "enum" in schema:
+        return schema["enum"][0]
+    kind = schema.get("type")
+    if kind == "object":
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or list(properties)
+        return {
+            name: (
+                (hints or {})[name]
+                if name in (hints or {})
+                else _synthesise_from_schema(
+                    properties.get(name, {"type": "string"}), hints
+                )
+            )
+            for name in required
+        }
+    if kind == "array":
+        return [_synthesise_from_schema(schema.get("items") or {"type": "string"}, hints)]
+    if kind == "number":
+        return float(schema.get("minimum", 0.0))
+    if kind == "integer":
+        return int(schema.get("minimum", 0))
+    if kind == "boolean":
+        return False
+    return str(schema.get("pattern", "stub"))
 
 
 def _to_provider_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -816,14 +918,75 @@ def _validate_embedding(values: Any) -> str:
     return f"finite vector of length {len(values)}"
 
 
+#: payload 中攜帶**影像證據**的保留鍵。值為
+#: `[{"mime_type": "image/png", "data_b64": "..."}]`。
+#:
+#: 影像必須以 bytes 進 payload，不得以檔案路徑進 —— 路徑會洩漏
+#: class/condition（NOTE-003、NOTE-004 的紅線），而且 provider 收到路徑
+#: 也看不到影像，vision agent 會安靜地退化成純文字 agent。
+EVIDENCE_IMAGES_KEY = "evidence_images"
+
+
+def _split_evidence(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """把影像證據從 payload 中拆出來。回傳 (可序列化為文字的部分, 影像清單)。"""
+    images = payload.get(EVIDENCE_IMAGES_KEY) or []
+    if not isinstance(images, list):
+        raise ProviderError(
+            f"{EVIDENCE_IMAGES_KEY} must be a list of "
+            "{'mime_type': ..., 'data_b64': ...} entries"
+        )
+    for entry in images:
+        if not isinstance(entry, dict) or "data_b64" not in entry:
+            raise ProviderError(
+                f"each {EVIDENCE_IMAGES_KEY} entry needs a base64 'data_b64' field; "
+                "a path or a filename is not image evidence"
+            )
+    rest = {k: v for k, v in payload.items() if k != EVIDENCE_IMAGES_KEY}
+    return rest, list(images)
+
+
 def _payload_to_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    return [{"text": _payload_to_text(payload)}]
+    """Google 的 parts：文字一則，加上每張影像一則 inline_data。"""
+    rest, images = _split_evidence(payload)
+    parts: list[dict[str, Any]] = [{"text": _payload_to_text(rest)}]
+    for image in images:
+        # camelCase 與 verify_vision 的 probe 一致。Google 的 protobuf JSON
+        # 兩種寫法都收，但 probe 用的那一種是已經對真實端點驗證過的形狀；
+        # 兩處寫得不一樣，probe 綠燈就不再保證 invoke 也送得出去。
+        parts.append(
+            {
+                "inlineData": {
+                    "mimeType": image.get("mime_type", "image/png"),
+                    "data": image["data_b64"],
+                }
+            }
+        )
+    return parts
+
+
+def _payload_to_openai_content(payload: dict[str, Any]) -> Any:
+    """OpenAI 相容的 content：純文字時回字串，帶影像時回 content 陣列。"""
+    rest, images = _split_evidence(payload)
+    text = _payload_to_text(rest)
+    if not images:
+        return text
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for image in images:
+        mime = image.get("mime_type", "image/png")
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{image['data_b64']}"},
+            }
+        )
+    return content
 
 
 def _payload_to_text(payload: dict[str, Any]) -> str:
     import json
 
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    rest, _images = _split_evidence(payload)
+    return json.dumps(rest, ensure_ascii=False, sort_keys=True)
 
 
 #: provider 名稱 -> adapter 類別。UI 與 CLI 只透過這張表取得 adapter，

@@ -184,13 +184,23 @@ def test_snapshot_reports_blocking_and_exits_zero(capsys, store_args, tmp_path):
 
 
 def test_snapshot_freeze_exits_two_when_blocked(capsys, store_args, tmp_path):
-    """--freeze 遇到未決的教授裁決必須以 formal-blocking 的 exit code 中斷。"""
+    """--freeze 遇到未滿足的前提必須以 formal-blocking 的 exit code 中斷。
+
+    NOTE-046 之後 representation_mode 與 retry.max_attempts 已核定，因此
+    這裡的 blocking 原因換成「四個 task 都還沒有 draft binding」——
+    真實 provider 尚未連線時本來就該是這個狀態。要守的事沒有變：
+    **只要有任何前提未滿足，就不得產生 lock 檔。**
+    """
     assert main([
         "llm", "snapshot", "--out", str(tmp_path / "out"), "--freeze", *store_args,
     ]) == 2
     captured = capsys.readouterr()
     assert "refusing to freeze" in captured.err
-    assert "agents.representation_mode" in captured.err
+    for task_code in (
+        "observation_agent", "physics_agent",
+        "visual_semantic_agent", "arbitration_agent",
+    ):
+        assert f"task {task_code} has no draft binding" in captured.err
     assert not (tmp_path / "freeze" / "llm_runtime.lock.json").exists()
 
 
