@@ -129,8 +129,40 @@ def collect_family_hashes() -> dict[str, Any]:
                 )
             families[key] = identity
             realizations[key] = realizations.get(key, 0) + 1
+        # gate-validation 另記 corrective exclusion 之後的 effective set。
+        # 只留原始 32-family hash 會讓 lock 指向一個**不是實際擬合所用**的集合 ——
+        # gate threshold 是在 31 family / 93 sample 上定的，那才是它的來源。
+        effective: dict[str, Any] | None = None
+        if name == "gate_validation":
+            gate_rule = json.loads(
+                Path("outputs/perception/gate/gate_rule.json").read_text(encoding="utf-8")
+            )
+            excluded = {
+                (e["class_label"], e["family_index"])
+                for e in gate_rule.get("family_exclusion", {}).get("excluded_families", [])
+            }
+            kept = {
+                key: identity for key, identity in sorted(families.items())
+                if (key.split("|")[0], int(key.split("|")[1])) not in excluded
+            }
+            kept_samples = sum(
+                count for key, count in realizations.items()
+                if (key.split("|")[0], int(key.split("|")[1])) not in excluded
+            )
+            effective = {
+                "reason": "corrective exclusion of duplicate identity (NOTE-048)",
+                "excluded_families": sorted(
+                    f"{c}|{f}" for c, f in excluded
+                ),
+                "n_families": len(kept),
+                "n_samples": kept_samples,
+                "families": kept,
+                "families_hash": hash_object(kept),
+            }
+
         partitions[name] = {
             "manifest": path,
+            "effective_set_after_exclusion": effective,
             "historical_purpose": purpose,
             "family_domain": manifest.get("family_domain"),
             "family_indices": sorted({r["family_index"] for r in rows}),
