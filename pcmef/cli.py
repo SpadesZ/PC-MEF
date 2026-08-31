@@ -3305,7 +3305,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     perception_e2.add_argument("--ds-dir", default="outputs/perception/ds_v2")
     perception_e2.add_argument("--gate-rule", default="outputs/perception/gate/gate_rule.json")
-    perception_e2.add_argument("--e2-dir", default="outputs/perception/formal_e2")
+    # 預設刻意指向一個**目前不存在**的目錄。families 28-35 的 pilot 已改名為
+    # outputs/perception/e2_deterministic_gate_pilot/，這個路徑保留給
+    # families 36-43 的 final Formal E2。指不到就失敗，比默默讀到 pilot
+    # 再把它當 final 報出來安全（那批結果已經被看過很多次）。
+    perception_e2.add_argument(
+        "--e2-dir", default="outputs/perception/formal_e2",
+        help=(
+            "final Formal E2（families 36-43）的資料目錄。"
+            "**不要指向 e2_deterministic_gate_pilot** —— 那是 pilot，非 final test。"
+        ),
+    )
     perception_e2.add_argument("--out", default="outputs/perception/e2")
     perception_e2.set_defaults(func=cmd_perception_e2)
 
