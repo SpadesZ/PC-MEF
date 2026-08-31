@@ -383,3 +383,96 @@ def test_epsilon_constants_match_the_frozen_specification():
     from pcmef.core.constants import EPS_S
 
     assert EPS_P == EPS_R == EPS_S == 1e-6
+
+
+# ---------------------------------------------------------------------------
+# selective_escalation_bridge_v1（進 gate.lock 的最終決策定義）
+# ---------------------------------------------------------------------------
+
+
+def _p(*values):
+    return np.asarray(values, dtype=np.float64)
+
+
+def test_bridge_version_and_routes_are_the_locked_ones():
+    from pcmef.core.numeric import ROUTES, SELECTIVE_ESCALATION_BRIDGE_VERSION
+
+    assert SELECTIVE_ESCALATION_BRIDGE_VERSION == "selective_escalation_bridge_v1"
+    assert ROUTES == ("trust_vision", "trust_tof", "fusion", "escalated")
+
+
+@pytest.mark.parametrize("route,expected_e", [
+    ("trust_vision", 0), ("trust_tof", 0), ("fusion", 0), ("escalated", 1),
+])
+def test_escalation_indicator_is_one_only_for_escalated(route, expected_e):
+    from pcmef.core.numeric import escalation_indicator
+
+    assert escalation_indicator(route) == expected_e
+
+
+def test_route_trust_vision_returns_vision_untouched():
+    from pcmef.core.numeric import selective_escalation_bridge
+
+    p_v, p_t = _p(0.7, 0.1, 0.1, 0.1), _p(0.1, 0.7, 0.1, 0.1)
+    out = selective_escalation_bridge("trust_vision", p_v, p_t, fusion_weight=0.5)
+    assert np.allclose(out, p_v, atol=1e-12)
+
+
+def test_route_trust_tof_returns_tof_untouched():
+    from pcmef.core.numeric import selective_escalation_bridge
+
+    p_v, p_t = _p(0.7, 0.1, 0.1, 0.1), _p(0.1, 0.7, 0.1, 0.1)
+    out = selective_escalation_bridge("trust_tof", p_v, p_t, fusion_weight=0.5)
+    assert np.allclose(out, p_t, atol=1e-12)
+
+
+def test_route_fusion_uses_the_vision_tof_weight_not_an_agent_weight():
+    """w 作用在 p_vision 與 p_tof 之間，與 e(x) 不同層。"""
+    from pcmef.core.numeric import selective_escalation_bridge
+
+    p_v, p_t = _p(0.8, 0.1, 0.05, 0.05), _p(0.1, 0.8, 0.05, 0.05)
+    out = selective_escalation_bridge("fusion", p_v, p_t, fusion_weight=0.5)
+    assert np.allclose(out, 0.5 * p_v + 0.5 * p_t, atol=1e-9)
+    # 非對稱權重時仍必須是 Vision<->ToF 的內插。
+    skewed = selective_escalation_bridge("fusion", p_v, p_t, fusion_weight=0.75)
+    assert np.allclose(skewed, 0.75 * p_v + 0.25 * p_t, atol=1e-9)
+
+
+def test_route_escalated_returns_s_a_entirely():
+    """escalated 時 F == s_A，傳統向量完全不參與。"""
+    from pcmef.core.numeric import selective_escalation_bridge
+
+    p_v, p_t = _p(0.7, 0.1, 0.1, 0.1), _p(0.1, 0.7, 0.1, 0.1)
+    s_a = _p(0.05, 0.05, 0.8, 0.1)
+    out = selective_escalation_bridge("escalated", p_v, p_t, s_a=s_a)
+    assert np.allclose(out, s_a, atol=1e-12)
+    assert not np.allclose(out, p_v, atol=1e-3)
+
+
+def test_escalated_without_s_a_is_refused_not_silently_downgraded():
+    """缺 s_A 時退回 p_trad 會讓 agent 那一半安靜地消失。"""
+    from pcmef.core.numeric import InvalidRoute, selective_escalation_bridge
+
+    with pytest.raises(InvalidRoute, match="needs s_A"):
+        selective_escalation_bridge(
+            "escalated", _p(0.7, 0.1, 0.1, 0.1), _p(0.1, 0.7, 0.1, 0.1)
+        )
+
+
+def test_every_route_yields_a_finite_distribution_summing_to_one():
+    from pcmef.core.numeric import ROUTES, selective_escalation_bridge
+
+    p_v, p_t, s_a = _p(0.7, 0.1, 0.1, 0.1), _p(0.1, 0.7, 0.1, 0.1), _p(0.25,) * 1
+    s_a = _p(0.4, 0.3, 0.2, 0.1)
+    for route in ROUTES:
+        out = selective_escalation_bridge(route, p_v, p_t, s_a=s_a)
+        assert np.all(np.isfinite(out)) and np.all(out >= 0)
+        assert np.isclose(out.sum(), 1.0, rtol=0.0, atol=1e-12)
+
+
+def test_an_unknown_route_is_refused():
+    from pcmef.core.numeric import InvalidRoute, selective_escalation_bridge
+
+    with pytest.raises(InvalidRoute):
+        selective_escalation_bridge("trust_everything", _p(0.25, 0.25, 0.25, 0.25),
+                                    _p(0.25, 0.25, 0.25, 0.25))

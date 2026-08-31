@@ -238,16 +238,24 @@ LOCK_SPECS: dict[str, LockSpec] = {
         ),
         LockSpec(
             name="gate",
+            # 2026-09-01（NOTE-049）：改為反映**實際 production gate**。
+            # 舊的 alpha/beta/gamma 對應早期的連續 simplex gate，該設計
+            # 從未有 production caller；把它們留在 required_keys 會逼出一個
+            # 永遠不會被讀取的裁決，並讓 lock 記載一個不曾執行過的方法。
             required_keys=(
-                "alpha",
-                "beta",
-                "gamma",
-                "search_grid",
+                "routing_policy_version",
+                "decision_bridge_version",
+                "q_vision_threshold",
+                "q_tof_threshold",
+                "disagreement_threshold",
+                "fusion_weight",
+                "temperature_vision",
+                "temperature_tof",
+                "effective_gate_validation_hash",
+                "search_grid_hash",
                 "objective",
                 "tie_break",
-                "representation_mode",
                 "reliability_config_hash",
-                "crossfit_folds",
             ),
             requires=("reliability_final",),
         ),

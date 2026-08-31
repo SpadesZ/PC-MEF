@@ -324,6 +324,69 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-049 連續 simplex gate 由 selective escalation 取代（未曾啟用）
+
+**決策日期**：2026-09-01（教授裁決）
+
+**適用範圍**：`configs/base.yaml` 的 `gate.alpha/beta/gamma`；
+`pcmef/core/locks.py` 的 gate LockSpec；`pcmef/core/numeric.py` 的
+`check_gate_coefficients()`；PC-MEF 最終決策 F(x) 的定義。
+
+**決策**：
+
+1. 早期規格的連續 gate `g = clip(αD + βU + γQ)`（α+β+γ=1，simplex grid
+   step 0.1，由 validation worst-condition Macro-F1 選出）標記為
+   **legacy preregistration design, never activated in production formal path**。
+2. PC-MEF 最終決策改由 **`selective_escalation_bridge_v1`** 定義：
+
+   ```
+   e(x)  = 1 iff route == "escalated" else 0
+   p_trad = p_vision                    if trust_vision
+            p_tof                       if trust_tof
+            w·p_vision + (1-w)·p_tof     if fusion      (w = fusion_weight = 0.5)
+   F(x)  = (1 - e)·p_trad + e·s_A
+   ```
+
+3. `gate.lock` 的 required_keys 改為反映實際 production gate，
+   **不再包含 alpha/beta/gamma**。
+4. `check_gate_coefficients()` 保留為 legacy utility，不屬 formal active path。
+
+**原因**：
+
+稽核結果：`alpha/beta/gamma` **沒有任何 production caller**。唯一提及它們的
+函式是 `check_gate_coefficients()`，而該函式的呼叫者只有
+`tests/unit/test_numeric.py`。同時 `p_rel` 也沒有實作 —— `reliability_weights()`
+的呼叫者同樣只有測試。也就是說整條連續 gate 從未執行過。
+
+實際實作的是離散 D/U/Q reliability routing：`GateRule` 以
+`q_vision_threshold` / `q_tof_threshold` / `disagreement_threshold` 產出四個
+路由標籤，pilot 本來就是 escalated case 才交給 arbiter。
+
+取代的理由是**對齊已實作且已驗證的行為**，不是根據 Final E2 的結果選方法 ——
+families 36-43 在本決策當下尚未生成、尚未讀取。同時這避免了在最後階段為了
+搜 α/β/γ 而再動一次已被反覆使用的 gate-validation，那會是 post-hoc tuning。
+
+二值的 e(x) 也比人工填一個 0.3 / 0.5 / 0.7 的 g 容易答辯：那個數字沒有來源，
+而任何從資料選出的來源都得再碰 gate-validation。
+
+**歷史 NOTE 未修改。** 連續 gate 的記載留在原處（NOTE-006、NOTE-003 等），
+本 NOTE 只記錄它被取代這件事。
+
+**論文用字**：`s_A` 是 **normalized Evidence-Support Score，不是 calibrated
+posterior probability**。因此以 F 評估 Full PC-MEF 時只報 accuracy / macro-F1，
+**不得**宣稱 NLL / ECE calibration。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/unit/test_numeric.py -k "bridge or route" -v
+py -3.10 -m pcmef.cli config check
+```
+
+四種 route 逐項有測試；`config check` 的待裁決項由 8 降為 5。
+
+---
+
 ## NOTE-048 Family-level leakage 的 corrective rule，與 Final E2 的 family_domain
 
 **決策日期**：2026-09-01（教授裁決）

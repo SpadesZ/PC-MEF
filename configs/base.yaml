@@ -222,17 +222,20 @@ gate:
   objective: validation_worst_condition_macro_f1
   tie_break: [overall_macro_f1, fewer_nonzero_weights]
   cross_pair_aggregation: arithmetic_mean
-  # alpha/beta/gamma 的最終值必須由 validation 選出後 freeze，
-  # 不得手填 —— 手填等於跳過整個 gate selection 程序。
-  alpha: !required
-    source: "SRC-SAI §16"
-    reason: "由 validation worst-condition Macro-F1 搜尋選出後才寫入 gate.lock"
-  beta: !required
-    source: "SRC-SAI §16"
-    reason: "同 alpha"
-  gamma: !required
-    source: "SRC-SAI §16"
-    reason: "同 alpha"
+  # alpha/beta/gamma：**legacy preregistration design，未曾在 production 啟用**
+  # （NOTE-049）。早期規格的連續 gate g = clip(alpha*D + beta*U + gamma*Q)
+  # 從未有 production caller；實際實作採離散 D/U/Q reliability routing，
+  # 最終決策由 selective_escalation_bridge_v1 定義。
+  #
+  # 因此它們不再是 active !required —— 留著會讓 config check 要求一個
+  # 永遠不會被讀取的裁決，而那個裁決需要再動一次已被反覆使用的
+  # gate-validation 去搜 simplex。
+  legacy_continuous_gate:
+    status: SUPERSEDED_NEVER_ACTIVATED
+    superseded_by: selective_escalation_bridge_v1
+    superseded_on: "2026-09-01"
+    note: "見 docs/NOTES.md NOTE-049；歷史 NOTE 未修改"
+    formula: "g = clip(alpha*D + beta*U + gamma*Q), alpha+beta+gamma = 1"
 
 # ---------------------------------------------------------------------------
 # Multi-Agent

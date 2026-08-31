@@ -56,6 +56,12 @@ __all__ = [
     "normalize_support",
     "arbitration_support_bridge",
     "ARBITRATION_SUPPORT_BRIDGE_VERSION",
+    "SELECTIVE_ESCALATION_BRIDGE_VERSION",
+    "InvalidRoute",
+    "ROUTES",
+    "escalation_indicator",
+    "traditional_decision",
+    "selective_escalation_bridge",
     "reliability_weights",
     "check_reliability",
     "check_gate_coefficients",
@@ -249,6 +255,102 @@ def arbitration_support_bridge(agent_output: dict, eps: float = EPS_S) -> np.nda
     加上呼叫端自己決定的順序與 eps」指不到。
     """
     return normalize_support(support_to_vector(agent_output), eps=eps)
+
+
+#: `gate.lock` 的 decision_bridge_version（教授裁決 2026-09-01）。
+#:
+#: 這是 PC-MEF 最終決策的**唯一**正式定義。它把已實作、已驗證的離散路由
+#: 正式化，而不是退而求其次：傳統證據足夠就不叫 LLM，只有弱證據或衝突
+#: 才 selective escalation —— 那正是本研究的核心敘事。
+#:
+#: 刻意**不**沿用舊名 `g`：早期規格的 g = clip(αD + βU + γQ) 是連續量且
+#: 由 simplex grid 搜出，語意不同。共用一個名字會讓兩份文獻互相污染。
+SELECTIVE_ESCALATION_BRIDGE_VERSION = "selective_escalation_bridge_v1"
+
+#: 四種路由標籤。與 perception.gate.reliability_route 的輸出一一對應。
+ROUTE_TRUST_VISION = "trust_vision"
+ROUTE_TRUST_TOF = "trust_tof"
+ROUTE_FUSION = "fusion"
+ROUTE_ESCALATED = "escalated"
+ROUTES: tuple[str, ...] = (
+    ROUTE_TRUST_VISION, ROUTE_TRUST_TOF, ROUTE_FUSION, ROUTE_ESCALATED,
+)
+
+
+class InvalidRoute(ValueError):
+    """route 標籤不在四個合法值之內，或 escalated 缺 s_A。"""
+
+
+def escalation_indicator(route: str) -> int:
+    """e(x) = 1 iff route == "escalated"，否則 0。"""
+    if route not in ROUTES:
+        raise InvalidRoute(f"unknown route {route!r}; expected one of {list(ROUTES)}")
+    return 1 if route == ROUTE_ESCALATED else 0
+
+
+def traditional_decision(
+    route: str, p_vision, p_tof, fusion_weight: float
+) -> np.ndarray:
+    """p_trad(x)：非 escalated 時的傳統決策向量。
+
+    fusion_weight 是 **Vision <-> ToF** 的權重，作用在兩個感測模態之間。
+    它**不是** agent weight —— 那一層由 e(x) 決定，兩者不同層，不得互相代用。
+    """
+    if route == ROUTE_ESCALATED:
+        raise InvalidRoute(
+            "escalated cases have no p_trad; F is s_A entirely for them"
+        )
+    p_v = stabilize_prob(p_vision)
+    p_t = stabilize_prob(p_tof)
+    if route == ROUTE_TRUST_VISION:
+        return p_v
+    if route == ROUTE_TRUST_TOF:
+        return p_t
+    if route == ROUTE_FUSION:
+        w = float(fusion_weight)
+        if not np.isfinite(w) or not 0.0 <= w <= 1.0:
+            raise InvalidRoute(f"fusion_weight must lie in [0,1], got {fusion_weight!r}")
+        return stabilize_prob(w * p_v + (1.0 - w) * p_t)
+    raise InvalidRoute(f"unknown route {route!r}")
+
+
+def selective_escalation_bridge(
+    route: str,
+    p_vision=None,
+    p_tof=None,
+    s_a=None,
+    fusion_weight: float = 0.5,
+) -> np.ndarray:
+    """`selective_escalation_bridge_v1`：PC-MEF 的最終決策 F(x)。
+
+        e(x) = 1 iff route == "escalated" else 0
+        F(x) = (1 - e) * p_trad(x) + e * s_A(x)
+
+    因為 e 取值只有 0 或 1，語意是乾淨的二選一：
+
+      * non-escalated -> 完全採信既有傳統路由結果，**不呼叫 LLM**
+      * escalated     -> 完全交由 multi-agent arbitration 的 s_A
+
+    這比硬塞一個 0.3 / 0.5 / 0.7 的人工權重容易答辯：那個數字沒有來源，
+    而任何從資料選出來的來源都得再動一次已被反覆使用的 gate-validation。
+
+    **s_A 是 normalized Evidence-Support Score，不是 calibrated posterior。**
+    因此以 F 評估時只報 accuracy / macro-F1，不得宣稱 NLL / ECE calibration。
+    """
+    e = escalation_indicator(route)
+    if e:
+        if s_a is None:
+            raise InvalidRoute(
+                "an escalated case needs s_A; without it there is no decision, "
+                "and substituting p_trad would silently turn the agent arm off"
+            )
+        result = stabilize_prob(s_a)
+    else:
+        if p_vision is None or p_tof is None:
+            raise InvalidRoute(f"route {route!r} needs both p_vision and p_tof")
+        result = traditional_decision(route, p_vision, p_tof, fusion_weight)
+    assert_finite_nonnegative_sum1(result)
+    return result
 
 
 def normalize_support(a_support, eps: float = EPS_S) -> np.ndarray:
