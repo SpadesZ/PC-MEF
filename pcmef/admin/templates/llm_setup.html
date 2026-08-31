@@ -218,8 +218,15 @@
       <div class="conn-detail">
         {% if connection.next_step %}
           <span class="next-step">下一步：{{ connection.next_step }}</span>
-        {% else %}
+        {% elif connection.servable_roles %}
           <span class="badge ok">這條線路已就緒，可在步驟 3 綁定</span>
+        {% else %}
+          {# 走完四個按鈕不等於能綁。能力是「最近一次 Test 的結果」，
+             所以一條鎖定過、但最近一次 probe 失敗的線路會落在這裡。
+             舊版只看 next_step 是否為空，於是它照樣宣稱「已就緒可綁定」，
+             而步驟 3 的下拉根本不會列出它 —— 兩個畫面互相矛盾。 #}
+          <span class="badge bad">這條線路目前一個 agent 都服務不了</span>
+          <span class="note">能力以最近一次 Test 為準；請重按 Test，或改用其他線路</span>
         {% endif %}
 
         {% if connection.selected_model_id %}

@@ -235,6 +235,27 @@ def test_llm_ui_04_deleting_a_bound_model_profile_returns_409_with_dependencies(
     assert registry.get_model_profile(seeded.full_model_id) is not None
 
 
+def test_a_locked_line_that_serves_no_role_does_not_claim_to_be_ready(
+    client, seeded
+):
+    """走完四個按鈕不等於能綁 agent。
+
+    能力是「最近一次 Test 的結果」，所以一條鎖定過、但最近一次 probe 失敗的
+    線路會是 Locked 且沒有 next_step，卻一個角色都服務不了。舊版只看
+    next_step 是否為空就顯示「已就緒，可在步驟 3 綁定」，而步驟 3 的下拉
+    根本不列它 —— 同一頁的兩個區塊互相矛盾，實測讓人以為系統壞了。
+    """
+    registry = seeded.registry
+    # 只驗證 chat + vision：四個角色都需要 structured_json，因此可服務 0 個。
+    _verify(registry, seeded.full_model_id, (Capability.CHAT, Capability.VISION))
+    _lock_line(registry, seeded.connection_id, seeded.full_model_id)
+
+    page = client.get("/admin/llm-setup").get_data(as_text=True)
+
+    assert "這條線路已就緒" not in page
+    assert "一個 agent 都服務不了" in page
+
+
 def test_a_form_error_redirects_so_the_browser_shows_the_reason(client, csrf, seeded):
     """表單送出後出錯，必須回一個瀏覽器**會跟隨**的轉址。
 
