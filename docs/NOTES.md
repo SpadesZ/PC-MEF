@@ -324,6 +324,129 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-052 Evidence contract correction：channel-preserving ToF 與角色最小隔離
+
+**決策日期**：2026-09-01（教授裁決，Pre-Final Evidence-Contract Correction）
+
+**適用範圍**：`pcmef/agents/pcmef_agents.py` 的 ToF 摘要與角色 payload；
+`pcmef/llm/registry.py` 的 `set_connection_timeout()`；
+`pcmef/experiments/{throughput_ladder,evidence_regression}.py`；
+`llm_runtime` 與 `formal_config` 的 runtime identity。
+
+**決策**：
+
+1. `tof_fixed_summary` 正式廢止，改用
+   `tof_fixed_summary_v2_channel_preserving`：四個 channel 各自獨立摘要。
+2. 角色隔離由**減法**（`withhold`）改為**加法白名單**
+   （`role_evidence_contract_v2` + `project_for_role`）。
+3. `gate_route` 自所有角色的 payload 移除。
+4. 四個 agent 可分散到多把 API key（同 model + revision），
+   由 `assert_single_model_identity()` 擋住「多 key」變成「多模型」。
+5. connection 的 `timeout_sec` 由 30 提高到 120。
+
+**原因**：
+
+### 1. 攤平 ToF 摘要是錯的，而且錯得不明顯
+
+v1 把 (500, 4) 攤平成 2000 點「波形」再取 peak / centroid / spread。
+攤平之後，`distance_mm`（毫米，~90）、`ambient_rate_mcps`（~0.06）、
+`signal_rate_mcps`（~12）、`sigma_like`（無因次，~1.2）被當成**同一個量的
+連續取樣**。後果具體且可預測：
+
+- `peak_bin` 的位置完全由**單位最大的那個 channel** 決定（永遠是 distance）
+- `centroid_bin` 是四個不同物理量的加權平均 —— 它不對應任何可量測的東西
+- 改 ambient 會污染「距離」的讀數，因為它們在同一條假波形上
+
+v2 逐 channel 各報 mean / std / median / p10 / p90 / temporal_diff_std，
+外加 `signal_to_ambient_ratio` 與 `valid_sample_ratio`。
+欄位集合與順序固定（§18 FIXED_SUMMARY 要求逐 case 等長），
+channel 名稱與單位語意原樣保留。
+
+`temporal_diff_std` 是**唯一**對時間順序敏感的量，這件事由測試釘住：
+打亂時間順序後，其餘五個統計量必須逐一不變。
+
+### 2. 減法式隔離對「未來的欄位」預設放行
+
+舊 `withhold()` 從完整 payload 移除具名欄位。問題不在它當下漏了什麼，
+而在它的**預設方向**：之後任何人往 evidence bundle 加一個欄位，
+四個角色全部自動看得到，而且**不會有任何測試失敗**。
+
+v2 改為正向白名單。新欄位預設不送，
+`test_new_evidence_fields_are_not_auto_forwarded` 釘住這個性質。
+
+契約（原則是「只移除角色重複與跨模態 anchoring」，不是「越少越好」）：
+
+| 角色 | 收到 | 不收到 |
+|---|---|---|
+| Observation | image、ToF summary v2、raw Q | 一切分類器導出量（p、q、D、U）、route |
+| Physics | brief、ToF summary v2、p_tof、q_tof、Q_tof、U_tof | RGB、vision 側全部、D、route |
+| Visual-Semantic | image、brief、p_vision、q_vision、Q_vision、U_vision | ToF summary、tof 側全部、D、route |
+| Arbitration | brief、兩份匿名 proposal、全部數值含 D | raw image、raw ToF summary、route |
+
+Arbitration 保留數值是因為它負責最終 evidence arbitration；
+raw evidence 已由兩位 specialist 解讀過，重複送等於複製他們的角色而不是仲裁。
+
+**`_meaning` 散文也做了 modality scoping。** 對 physics agent 寫
+「Q_vision 是影像的高頻能量」，等於用一句說明告訴它 vision 側存在且怎麼讀 ——
+同一種 anchoring，只是換成散文形式。各模態的讀法屬於該角色自己的 prompt。
+
+### 3. `gate_route` 是 benchmark metadata
+
+route 與 condition 高度相關（被劣化的 case 才會 trust_*），
+送給 agent 等於告訴它「這一筆被動過手腳」。路由由系統決定，
+agent 不需要知道自己是怎麼被叫來的。
+
+### 4. 順帶修掉的 CLASS_ORDER 重複宣告
+
+`pcmef/agents/pcmef_agents.py` 原本**自己宣告一份** `CLASS_ORDER` 字面值，
+而 `agent_schema.lock` 記載的是 `pcmef.core.constants.CLASS_ORDER`。
+兩者若哪天不一致，lock 會證明一個 agent 從未用過的順序，
+而且不會有任何症狀。改為從單一來源匯入。
+
+### 5. 多 key 是吞吐決策，不是科學決策
+
+四個角色可以分散到多把 API key，但 `model_id` 與 `provider_revision`
+必須完全相同。`assert_single_model_identity()` 讓前者不會悄悄變成後者 ——
+換模型會讓 `llm_runtime.lock` 記載的推論器對應不到實際執行的東西。
+
+### 6. `timeout_sec` 30 秒對 thinking model 太緊
+
+實測單次 agent 呼叫 10.9–13.8 秒，而 thinking token 占 billable output 的
+七成以上、變異也大。30 秒只有約 2 倍餘裕；實測已出現連續兩次 30 秒逾時
+把整個 level 打掉。提高到 120 秒。
+
+逾時是**營運**設定（願意等多久），不是研究設定（送什麼、怎麼判斷）。
+但它會進 `runtime_config_hash`，因此改它等同改 runtime identity。
+先前 registry **沒有**修改逾時的 API，唯一的改法是直接改 SQLite ——
+那條路繞過 `add_connection()` 的驗證且不留痕跡，因此補上
+`set_connection_timeout()`。
+
+**實測結果（免費層吞吐）**：
+
+```
+level 2（目標 2 case / 8 calls）：ABORTED
+  完成 1 case、8 requests，第 9 個 request 撞到 429
+  quota_id = GenerateRequestsPerDayPerProjectPerModel-FreeTier
+  4 次成功呼叫：9,992 prompt / 4,469 billable output（3,170 thinking）
+```
+
+**免費層今日餘額不足以完成任何一級**，因此 ladder 停在第一級，
+未用免費 key 硬跑 500+ calls。Final E2 需要約 586 calls，必須付費層。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/agents/test_evidence_contract_v2.py -v
+py -3.10 -m pcmef.cli corrective throughput-ladder
+py -3.10 -m pcmef.cli corrective evidence-regression --cases 2
+```
+
+families 36-43 在本次更正全程**未生成、未讀取、未推論**。
+`llm_runtime` 與 `formal_config` 因 runtime identity 改變而必須重凍，
+但必須等真實 provider validation 通過 —— 配額恢復前維持 **pending**。
+
+---
+
 ## NOTE-051 Pre-final corrective pass：補完 NOTE-048 的 exclusion，並實作真正的 Formal E2 executor
 
 **決策日期**：2026-09-01（教授裁決，Pre-Final Corrective Pass）

@@ -46,6 +46,19 @@ GATE_VALIDATION = Path("outputs/perception/gate_validation")
 EFFECTIVE_STRESS = Path("outputs/perception/gate/stress/stress_manifest.json")
 
 
+def _calls_by_connection(
+    counted_roles: dict[str, tuple[Any, Any, Any]], counting: Any, profile: Any
+) -> dict[str, int]:
+    """逐 connection 累加呼叫數。多個角色共用一把 key 時必須相加。"""
+    if not counted_roles:
+        return {str(profile.connection_id): counting.calls}
+    totals: dict[str, int] = {}
+    for _code, (adapter, connection, _model) in counted_roles.items():
+        key = str(connection.connection_id)
+        totals[key] = totals.get(key, 0) + adapter.calls
+    return totals
+
+
 def _quota_error(error: Exception) -> bool:
     text = str(error)
     return "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower()
@@ -157,13 +170,14 @@ def run_level(
         "wall_time_sec": round(wall, 2),
         "sec_per_case": round(wall / completed, 2) if completed else None,
         "usage": usage,
-        "calls_by_connection": (
-            {
-                str(c.connection_id): a.calls
-                for _code, (a, c, _m) in counted_roles.items()
-            }
+        # 兩個角色可能共用一把 key，因此必須**累加**而不是用 dict comprehension
+        # 直接鍵入 connection_id —— 後者會讓同一把 key 的第二個角色覆蓋第一個，
+        # 而每把 key 各打了幾通正是多 key 量測要回答的問題。
+        "calls_by_connection": _calls_by_connection(counted_roles, counting, profile),
+        "calls_by_role": (
+            {code: a.calls for code, (a, _c, _m) in counted_roles.items()}
             if counted_roles
-            else {str(profile.connection_id): counting.calls}
+            else {"all": counting.calls}
         ),
         "role_connection_map": identity.get("role_connection_map", {}),
     }
@@ -231,6 +245,16 @@ def run_ladder(
         "levels": levels,
         "max_successful_escalated_cases": best["successful_cases"] if best else 0,
         "max_successful_requests": best["total_api_requests"] if best else 0,
+        # 「沒有任何一級通過」與「一個 case 都跑不完」是兩件事。
+        # 只報前者會把已經量到的東西丟掉：配額在第 9 個 request 才斷，
+        # 那個數字就是這把 key 今天剩下的餘裕。
+        "best_effort_cases_completed": max(
+            (lv["successful_cases"] for lv in levels), default=0
+        ),
+        "best_effort_requests_completed": max(
+            (lv["total_api_requests"] for lv in levels), default=0
+        ),
+        "any_level_passed": bool(passed),
         "first_429_request_index": next(
             (lv["first_429_request_index"] for lv in levels
              if lv["first_429_request_index"] is not None), None

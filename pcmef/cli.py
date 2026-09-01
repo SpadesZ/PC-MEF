@@ -3037,6 +3037,31 @@ def cmd_corrective_freeze_formal_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_corrective_evidence_regression(args: argparse.Namespace) -> int:
+    """v1 vs v2 payload 的回歸比較。v2 明顯壞掉即 exit 2。"""
+    from pcmef.experiments.evidence_regression import run_regression
+
+    document = run_regression(
+        freeze_dir=args.freeze_dir, registry_dir=args.registry_dir,
+        out_dir=args.out, n_cases=args.cases,
+        progress=lambda message: print(message, flush=True),
+    )
+    rates = document["schema_success_rate"]
+    print(f"\n  cases: {document['n_cases']}")
+    print(f"  schema success rate : v1 {rates['v1']:.4f}  v2 {rates['v2']:.4f}")
+    for version, diag in document["diagnostics"].items():
+        print(f"  {version} diagnostic accuracy: {diag['accuracy']} "
+              f"(n={diag['n_scored']}, development only)")
+    print(f"  routing unchanged   : {document['routing_unchanged']}")
+    print(f"  disagreements       : {len(document['disagreements'])}")
+    for arm in document["arms"].values():
+        if arm["failures"]:
+            print(f"    {arm['version']} failures: {arm['failures'][:2]}")
+    print(f"\n  VERDICT = {document['verdict']}")
+    print(f"  FINAL_E2_36_43_TOUCHED = {document['FINAL_E2_36_43_TOUCHED']}")
+    return 0 if document["verdict"] == "V2_OK" else 2
+
+
 def cmd_corrective_throughput_ladder(args: argparse.Namespace) -> int:
     """免費層吞吐量測。operational test，不產生任何研究結論。"""
     from pcmef.experiments.throughput_ladder import run_ladder
@@ -3060,6 +3085,11 @@ def cmd_corrective_throughput_ladder(args: argparse.Namespace) -> int:
           f"{document['max_successful_requests']}")
     print(f"  FIRST_429_REQUEST_INDEX                  = "
           f"{document['first_429_request_index']}")
+    if not document.get("any_level_passed", True):
+        print(f"  (no level completed; best effort was "
+              f"{document.get('best_effort_cases_completed', 0)} case(s) / "
+              f"{document.get('best_effort_requests_completed', 0)} request(s) "
+              f"before the quota cut in)")
     print(f"  cumulative tokens: {usage['prompt_tokens']:,} prompt / "
           f"{usage['billable_output_tokens']:,} billable output "
           f"({usage['thoughts_tokens']:,} thinking) over {usage['calls']} call(s)")
@@ -4089,6 +4119,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="只跑 LADDER 的前 N 級（不給就跑到第一次 429）",
     )
     corrective_ladder.set_defaults(func=cmd_corrective_throughput_ladder)
+
+    corrective_regression = corrective_sub.add_parser(
+        "evidence-regression",
+        help="v1 vs role_evidence_contract_v2 的一次性回歸（診斷用，不是結果）",
+    )
+    corrective_regression.add_argument("--freeze-dir", default="freeze/runs/PFC-001")
+    corrective_regression.add_argument("--registry-dir", default="registry")
+    corrective_regression.add_argument("--out", default="outputs/corrective")
+    corrective_regression.add_argument("--cases", type=int, default=2)
+    corrective_regression.set_defaults(func=cmd_corrective_evidence_regression)
 
     locks_parser = subparsers.add_parser("locks", help="formal freeze 狀態")
     locks_sub = locks_parser.add_subparsers(dest="locks_command", required=True)
