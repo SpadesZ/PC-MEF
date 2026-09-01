@@ -287,11 +287,22 @@ def run_regression(
 
     v1_rate = arms["v1"]["schema_success_rate"]
     v2_rate = arms["v2"]["schema_success_rate"]
-    verdict = "V2_OK"
-    if v2_rate < v1_rate - 0.001:
-        verdict = "V2_SCHEMA_REGRESSION"
-    if arms["v2"]["schema_success"] == 0 and arms["v1"]["schema_success"] > 0:
+    # 兩臂都沒跑完任何 case 時，0 == 0 **不是** 「v2 沒問題」。
+    # 那是「沒有量到」。把它報成 PASS 正是這套系統要防的假通過。
+    quota_blocked = all(
+        any("429" in f or "RESOURCE_EXHAUSTED" in f for f in arm["failures"])
+        for arm in arms.values()
+    )
+    if arms["v1"]["schema_success"] == 0 and arms["v2"]["schema_success"] == 0:
+        verdict = (
+            "INCONCLUSIVE_PROVIDER_QUOTA" if quota_blocked else "INCONCLUSIVE_NO_CASES"
+        )
+    elif arms["v2"]["schema_success"] == 0 and arms["v1"]["schema_success"] > 0:
         verdict = "V2_BROKEN"
+    elif v2_rate < v1_rate - 0.001:
+        verdict = "V2_SCHEMA_REGRESSION"
+    else:
+        verdict = "V2_OK"
 
     document = {
         "report_id": "evidence_contract_regression",

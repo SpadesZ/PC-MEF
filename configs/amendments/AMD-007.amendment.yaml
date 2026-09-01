@@ -1,0 +1,182 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 供 `pcmef amendment freeze --spec` 讀取。**尚未凍結** ——
+#         依 NOTE-052 的閘門，必須先通過真實 provider 的 v2 validation。
+#         凍結後才會產生 freeze/amendments/AMD-007.amendment.json，
+#         並據以重凍 llm_runtime 與 formal_config。
+# 檔案路徑: configs/amendments/AMD-007.amendment.yaml
+# 產生時間: 2026-09-02 01:30 +08:00
+# 版本: v0.1.0
+# 功能說明: 記錄 evidence 契約更換（channel-preserving ToF + 角色最小隔離）
+#           造成的 LLM runtime identity 變更，以及它發生在 Formal E2 開啟之前。
+# 模組定位: operational/evidence amendment 的草稿。它「不是」已生效的記錄 ——
+#           spec 進版控代表決策內容公開可稽核，凍結才代表承諾。
+# 主要責任:
+#   1. 記錄 ToF summary v2 與 role_evidence_contract_v2 的變更與理由
+#   2. 記錄多 key 綁定與 timeout 變更對 runtime identity 的影響
+#   3. 以 precondition_evidence 證明 families 36-43 仍為 sealed
+#   4. 列出未變動的 scientific lock
+# 維護提醒:
+#   - 不得在 v2 尚未通過真實 provider validation 之前凍結本修訂。
+#     凍一份「宣稱已驗證」而其實沒驗證過的記錄，比不凍更糟。
+#   - 不得在 families 36-43 生成或讀取之後才凍結。
+#   - v0.1.0 新增：草稿，對應 NOTE-052。
+# 驗證方式:
+#   - py -3.10 -m pcmef.cli corrective evidence-regression --cases 2
+#   - py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-007.amendment.yaml
+# ------------------------------------------------------------
+
+amendment_id: AMD-007
+
+title: >
+  Correct the agent evidence contract before Formal E2 opens: channel-preserving
+  ToF summarisation and a positive-allowlist role isolation contract. Supersedes
+  the LLM runtime identity only; every scientific lock is carried forward.
+
+supersedes: >
+  The llm_runtime and formal_config identities of the PFC-001 corrective run
+  (llm_runtime 969c45695d70fffe528ded33886a2f5852f0e5d529ace0aa75462a1da973773a,
+  formal_config aec8e88a51bb2c9e1535921b283e1e41d99e932a4bfa893191b98fb637618293).
+  Both files remain in place as history. No scientific lock is superseded:
+  reliability_final, gate, validation_pool, conflict_operational, e2_sample_size,
+  statistics_config, agent_schema, inference_firewall, synthetic_split_policy,
+  training_seed_pairs and perception_condition_policy are all carried forward
+  byte-identically, because none of their content depends on how evidence is
+  serialised for the agents.
+
+rationale: >
+  Two defects in how evidence reaches the agents, both found and corrected before
+  families 36-43 were generated, read or inferred over.
+
+  First, tof_fixed_summary flattened the (500, 4) recording into a 2000-point
+  "waveform" and took peak, centroid and spread over it. distance_mm in
+  millimetres (order 90), the two rate channels in mega-counts per second (order
+  0.06 and 12) and the dimensionless sigma_like (order 1.2) were treated as
+  consecutive samples of a single quantity. The consequences are specific: the
+  peak index is decided entirely by whichever channel carries the largest units,
+  the centroid is a weighted average across four incommensurable physical
+  quantities and corresponds to nothing measurable, and changing the ambient
+  channel perturbs the apparent distance reading because both live on the same
+  fictitious waveform. tof_fixed_summary_v2_channel_preserving reports six
+  statistics per channel plus signal_to_ambient_ratio and valid_sample_ratio,
+  keeping channel names, units and order, with temporal_diff_std as the only
+  order-sensitive statistic.
+
+  Second, role isolation was subtractive. withhold() removed named fields from a
+  full payload, which means any field added to the evidence bundle later would be
+  forwarded to all four roles by default, silently, with no failing test. The
+  defect is in the default direction, not in what it happened to miss.
+  role_evidence_contract_v2 selects instead of removes, so new fields default to
+  not being sent. gate_route is now withheld from every role: it correlates with
+  the generation condition and is benchmark metadata. The _meaning prose is
+  modality-scoped for the same reason the numbers are -- telling the physics agent
+  what Q_vision measures is the same anchoring in prose form.
+
+  Neither change touches any threshold, any anchor, any model weight, any prompt
+  or any schema. What changed is how the same evidence is serialised and which
+  role receives which part of it.
+
+changed_contracts:
+  tof_evidence_representation:
+    before: >
+      tof_fixed_summary: the (500, 4) recording flattened to 2000 points, then
+      peak_bin, centroid_bin, temporal_spread_bins, leading_edge_bin,
+      peak_to_noise_ratio, late_tail_fraction and total_return computed across
+      the concatenated channels.
+    after: >
+      tof_fixed_summary_v2_channel_preserving: mean, std, median, p10, p90 and
+      temporal_diff_std per channel, in TOF_SCHEMA order, plus
+      signal_to_ambient_ratio and valid_sample_ratio. No cross-channel quantity
+      exists.
+    why: >
+      The flattened statistics mixed four different physical quantities in four
+      different units and did not correspond to anything measurable.
+  role_isolation_mechanism:
+    before: >
+      withhold(): subtractive. Named fields were removed per role; anything not
+      named was forwarded.
+    after: >
+      project_for_role() against role_evidence_contract_v2: a positive allowlist.
+      Anything not listed is not sent.
+    why: >
+      A subtractive filter forwards future fields by default and fails silently.
+  gate_route_visibility:
+    before: "gate_route was present in the evidence bundle sent to every role."
+    after: "gate_route is withheld from all four roles."
+    why: >
+      Route correlates with the generation condition, so sending it tells the
+      model the case was degraded. That is benchmark metadata.
+  llm_runtime_connection_topology:
+    before: >
+      Four roles bound to one model profile on one connection
+      (5ee9fcab, secret_ref vault:85f2c7bd).
+    after: >
+      Four roles across two connections (a72b52f7 and 994b947c) sharing one
+      model identity, gemini-3.6-flash at revision 3.6-flash-07-2026.
+      role_connection_map is recorded in the lock.
+    why: >
+      Throughput. The free-tier daily quota cannot complete a 586-call run on a
+      single key. assert_single_model_identity() prevents this from becoming a
+      model change: multiple keys are allowed, multiple models are not.
+  connection_timeout:
+    before: "timeout_sec 30 on every connection."
+    after: "timeout_sec 120 on every connection."
+    why: >
+      Measured agent calls take 10.9-13.8s and thinking tokens are over 70% of
+      billable output with high variance. 30s left roughly 2x headroom and was
+      observed to exhaust both attempts on a slow response, aborting a run.
+      Timeout is operational -- how long we wait -- but it enters
+      runtime_config_hash, so it changes runtime identity.
+
+precondition_evidence:
+  final_e2_families_36_43_generated: false
+  final_e2_families_36_43_read: false
+  final_e2_families_36_43_inferred_over: false
+  formal_e2_report_exists: false
+  heldout_access_count: 0
+  calibration_access_count: 3
+  note: >
+    Every measurement supporting this amendment comes from the already-seen
+    effective-93 gate-validation stress set. No Final E2 quantity exists to have
+    been consulted.
+  v2_real_provider_validation: PENDING_PROVIDER_QUOTA
+  v2_validation_blocker: >
+    The free-tier daily quota (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+    was exhausted during characterization: the throughput ladder completed 1 of 2
+    escalated cases and hit 429 at request 9, and the v1-vs-v2 regression
+    returned INCONCLUSIVE_PROVIDER_QUOTA with both arms at zero completed cases.
+    This amendment must NOT be frozen until that regression completes on a real
+    provider, because freezing it now would record a validation that never
+    happened.
+
+invariants_preserved:
+  thresholds_unchanged: >
+    q_vision 1.3157833714234424, q_tof 17.01321693530837, disagreement
+    0.48965981236738715, fusion weight 0.5 and both temperatures are untouched.
+    The evidence contract is not an input to the gate search.
+  reliability_unchanged: >
+    The effective-93 anchors frozen in PFC-001 are unchanged. q_m is still
+    computed from sensor quality, degradation margin and cross-modal support
+    only, and max-softmax, entropy and calibrated confidence remain forbidden.
+  prompts_and_schemas_unchanged: >
+    The four prompt files and the three JSON schemas are byte-identical. Their
+    hashes in llm_runtime.lock will carry over unchanged.
+  model_unchanged: >
+    gemini-3.6-flash at provider_revision 3.6-flash-07-2026 on both connections,
+    enforced by assert_single_model_identity().
+  sampling_and_statistics_unchanged: >
+    e2_sample_size and statistics_config are untouched: 384 condition rows,
+    10000 replicates, seed 20260827, physical_scene_family clusters, class
+    stratification.
+  reliability_clause_preserved: >
+    "Predictive confidence is NOT sensor reliability" still holds structurally:
+    p_m and q_m remain in separate blocks, each carrying its own _meaning, and
+    any role receiving one receives the distinction with it.
+
+authority: >
+  Researcher decision under the NOTE-049 / NOTE-050 / NOTE-051 principle that
+  contracts are aligned to what actually executes, before the final partition is
+  opened. This amendment changes evidence serialisation and runtime identity, not
+  any scientific parameter, so no scientific lock is superseded. It is written
+  while families 36-43 remain sealed, which is the only thing that makes
+  "not chosen from the outcome" checkable, and it is deliberately left unfrozen
+  until the v2 path has been validated against a real provider.

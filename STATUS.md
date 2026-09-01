@@ -3,7 +3,78 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-09-01
+最後更新：2026-09-02
+
+---
+
+## EVIDENCE-CONTRACT CORRECTION（2026-09-02，NOTE-052）
+
+**程式碼已完成並通過離線測試；`llm_runtime` 與 `formal_config` 的重凍
+維持 PENDING —— 免費層配額耗盡，真實 provider validation 跑不完。**
+
+### 兩項更正
+
+| | 舊 | 新 |
+|---|---|---|
+| ToF 摘要 | `tof_fixed_summary`：(500,4) 攤平成 2000 點取 peak/centroid/spread | `tof_fixed_summary_v2_channel_preserving`：四 channel 各報 6 個統計量 |
+| 角色隔離 | `withhold()` **減法**：移除具名欄位 | `project_for_role()` **加法白名單**：未列出的一律不送 |
+
+攤平的具體後果：`peak_bin` 永遠由單位最大的 channel（distance，~90 mm）決定，
+`centroid_bin` 是四個不同物理量的加權平均，改 ambient 會污染距離讀數。
+
+減法的問題不在它當下漏了什麼，而在**預設方向**：日後往 evidence bundle
+加欄位，四個角色全部自動看得到，而且不會有任何測試失敗。
+
+`gate_route` 已自所有角色移除（與 condition 高度相關，屬 benchmark metadata）。
+`_meaning` 散文也做了 modality scoping。
+
+```
+Observation receives image  = YES
+Physics receives image      = NO
+Visual receives image       = YES
+Arbitration receives image  = NO
+```
+
+### 免費層吞吐實測
+
+```
+level 2（目標 2 case / 8 calls）：ABORTED
+  完成 1 case、8 requests，第 9 個 request 撞 429
+  quota_id = GenerateRequestsPerDayPerProjectPerModel-FreeTier
+  4 次成功呼叫：9,992 prompt / 4,469 billable output（3,170 thinking）
+  role->key：observation+physics -> a72b52f7，visual+arbitration -> 994b947c
+```
+
+**沒有任何一級通過**，因此未用免費 key 硬跑 500+ calls。
+v1 vs v2 regression 兩臂皆 0 完成 → `INCONCLUSIVE_PROVIDER_QUOTA`（exit 2）。
+**兩臂都 0 不等於「v2 沒問題」，那是「沒有量到」** —— verdict 邏輯已據此修正。
+
+### 其他修正
+
+- `timeout_sec` 30 → 120。實測單次呼叫 10.9–13.8 秒，30 秒只有約 2 倍餘裕，
+  已實測出現連續兩次逾時打掉整個 level。逾時是營運設定，但會進
+  `runtime_config_hash`。
+- 補上 `LLMRegistry.set_connection_timeout()` —— 先前**沒有**修改逾時的 API，
+  唯一改法是直接改 SQLite（繞過驗證、不留痕跡）。
+- `pcmef/agents/pcmef_agents.py` 原本自己宣告一份 `CLASS_ORDER` 字面值，
+  而 `agent_schema.lock` 記的是 `core.constants.CLASS_ORDER`。改為單一來源匯入。
+- ladder 的 `calls_by_connection` 曾用 dict comprehension 鍵入 connection_id，
+  兩個角色共用一把 key 時會互相覆蓋（8 requests 報成 1+2）。改為累加。
+
+### 現在卡在哪
+
+`AMD-007` 已寫成 spec（`configs/amendments/AMD-007.amendment.yaml`）
+但**刻意未凍結**：依閘門，必須先通過真實 provider 的 v2 validation。
+凍一份「宣稱已驗證」而其實沒驗證過的記錄，比不凍更糟。
+
+```
+new_llm_runtime_hash   = PENDING（等 v2 real-provider validation）
+new_formal_config_hash = PENDING（等 llm_runtime）
+```
+
+配額恢復後的順序：`corrective evidence-regression --cases 2` →
+`corrective validate-executor` → `amendment freeze --spec AMD-007` →
+重凍 `llm_runtime` → 重凍 `formal_config`。
 
 ---
 

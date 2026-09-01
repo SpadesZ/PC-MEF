@@ -3059,6 +3059,7 @@ def cmd_corrective_evidence_regression(args: argparse.Namespace) -> int:
             print(f"    {arm['version']} failures: {arm['failures'][:2]}")
     print(f"\n  VERDICT = {document['verdict']}")
     print(f"  FINAL_E2_36_43_TOUCHED = {document['FINAL_E2_36_43_TOUCHED']}")
+    # INCONCLUSIVE 也回非零：沒有量到就不算通過，不得被當成綠燈。
     return 0 if document["verdict"] == "V2_OK" else 2
 
 
