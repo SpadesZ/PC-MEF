@@ -158,9 +158,16 @@ def prepare_cases(
     ds_dir: str | Path = DS_V2,
     severity: dict[str, float] | None = None,
     code_version: str = "",
+    stress_manifest: str | Path | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """由 clean base manifest 產生四 condition 的 stress 列並算出決策訊號。"""
+    """由 clean base manifest 產生四 condition 的 stress 列並算出決策訊號。
+
+    `stress_manifest` 給定時改為**讀回既有的** stress set 而不是重建。
+    驗證階段必須走這條：重建會換掉 stress seed，於是驗證看到的就不是
+    當初擬合門檻的那一份資料。Final E2 則相反 —— 那時 stress set 尚未存在，
+    必須由本函式產生。
+    """
     from pcmef.perception.gate import (
         _logits, _prepare, _quality_batch, duq_signals, load_frozen_models,
         reliability_route, reliability_scores, softmax,
@@ -174,16 +181,20 @@ def prepare_cases(
     base = json.loads(
         (Path(base_manifest_dir) / "dataset_manifest.json").read_text(encoding="utf-8")
     )
-    if severity is None:
-        raise FormalE2Error(
-            "severity must come from the frozen gate-validation selection; "
-            "this executor must not select it"
+    if stress_manifest is not None:
+        stress = json.loads(Path(stress_manifest).read_text(encoding="utf-8"))
+        say(f"reusing the existing stress set at {stress_manifest}")
+    else:
+        if severity is None:
+            raise FormalE2Error(
+                "severity must come from the frozen gate-validation selection; "
+                "this executor must not select it"
+            )
+        say(f"building the stress set at severity {severity}")
+        stress = build_stress_dataset(
+            base, severity["vision"], severity["tof"],
+            Path(out_dir) / "stress", code_version, say,
         )
-    say(f"building the stress set at severity {severity}")
-    stress = build_stress_dataset(
-        base, severity["vision"], severity["tof"],
-        Path(out_dir) / "stress", code_version, say,
-    )
     rows = stress["rows"]
 
     rgb_x, tof_x = _prepare(rows, preprocessing)

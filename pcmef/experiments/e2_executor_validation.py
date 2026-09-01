@@ -44,6 +44,10 @@ DS_V2 = Path("outputs/perception/ds_v2")
 GATE_VALIDATION = Path("outputs/perception/gate_validation")
 PILOT = Path("outputs/perception/e2_deterministic_gate_pilot")
 
+#: 已套用 NOTE-048 exclusion 的 stress set —— 31 family / 93 base / 372 列。
+#: 這就是當初擬合 gate 門檻所用的那一份，驗證必須看同一份。
+EFFECTIVE_STRESS_MANIFEST = Path("outputs/perception/gate/stress/stress_manifest.json")
+
 
 def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"check": name, "passed": bool(passed), "detail": detail}
@@ -273,6 +277,7 @@ def run_executor_validation(
     registry_dir: str | Path = "registry",
     max_real_cases: int = 2,
     base_manifest_dir: str | Path = GATE_VALIDATION,
+    stress_manifest: str | Path = EFFECTIVE_STRESS_MANIFEST,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Full PC-MEF executor 的執行驗證。**不看任何準確率。**"""
@@ -304,13 +309,26 @@ def run_executor_validation(
         )
     )
 
-    say("preparing cases on the already-seen validation pool")
+    say("preparing cases on the already-seen effective-93 stress set")
+    # 重用既有的 effective-93 stress set，不重建。兩個理由：那一份就是當初
+    # 擬合門檻所用的資料（重建會換掉 stress seed），而且它已經套過 NOTE-048
+    # 的 exclusion —— 直接拿 gate_validation manifest 會把 Empty f27 帶回來。
     prepared = prepare_cases(
         base_manifest_dir, stack, Path(out_dir) / "executor_validation",
-        ds_dir=DS_V2, severity={"vision": 2.0, "tof": 0.05},
+        ds_dir=DS_V2, stress_manifest=stress_manifest,
         code_version="executor-validation", progress=say,
     )
     rows, labels = prepared["rows"], prepared["labels"]
+    families = {(r["class_label"], r["family_index"]) for r in rows}
+    checks.append(
+        _check(
+            "validation_pool_is_the_effective_93",
+            len(families) == 31 and len(rows) == 372
+            and ("Empty", 27) not in families,
+            f"{len(rows)} rows / {len(families)} families; "
+            f"Empty f27 present = {('Empty', 27) in families}",
+        )
+    )
     routes = prepared["routes"]
     escalated_index = [i for i, r in enumerate(routes) if str(r) == "escalated"]
     other_index = [i for i, r in enumerate(routes) if str(r) != "escalated"]
