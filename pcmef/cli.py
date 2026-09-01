@@ -3037,6 +3037,49 @@ def cmd_corrective_freeze_formal_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_corrective_estimate_cost(args: argparse.Namespace) -> int:
+    """以實測 token 用量外推 Final E2 成本。沒有實測值就拒絕估。"""
+    from pcmef.experiments.e2_cost import estimate
+
+    try:
+        result = estimate(
+            validation_path=args.validation, total_rows=args.rows,
+            out_dir=args.out, usd_to_twd=args.twd_per_usd,
+        )
+    except RuntimeError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    measured, projection, cost = result["measured"], result["projection"], result["cost"]
+    print(f"measured on {measured['escalated_cases_measured']} escalated case(s), "
+          f"{measured['calls_measured']} call(s)\n")
+    print(f"  {'role':<24}{'calls':>6}{'prompt':>10}{'output':>9}{'thinking':>10}")
+    for role, bucket in sorted(measured["by_role"].items()):
+        print(f"  {role:<24}{bucket['calls']:>6}{bucket['prompt_tokens']:>10}"
+              f"{bucket['completion_tokens']:>9}{bucket['thoughts_tokens']:>10}")
+    per_case = result["per_escalated_case"]
+    print(f"\n  per escalated case: {per_case['prompt_tokens']:.0f} prompt + "
+          f"{per_case['billable_output_tokens']:.0f} billable output "
+          f"(of which {per_case['thoughts_tokens']:.0f} thinking)")
+
+    print(f"\n  escalation rate {projection['escalation_rate']:.4f} "
+          f"({projection['escalation_rate_source']})")
+    print(f"  projected: {projection['projected_escalated_cases']} escalated case(s), "
+          f"{projection['projected_provider_calls']} call(s)")
+    print(f"  projected tokens: {projection['projected_prompt_tokens']:,} prompt / "
+          f"{projection['projected_billable_output_tokens']:,} billable output "
+          f"({projection['projected_thinking_tokens']:,} thinking)")
+    print(f"\n  cost: US${cost['total_usd']:.2f}  (input US${cost['input_usd']:.2f} + "
+          f"output US${cost['output_usd']:.2f})  ~= NT${cost['total_twd']:,}")
+    print("\n  uncertainty bands:")
+    for name, band in result["uncertainty_bands"].items():
+        print(f"    {name:<5} US${band['usd']:>6.2f}  NT${band['twd']:,}")
+    print("\n  caveats:")
+    for caveat in result["caveats"]:
+        print(f"    - {caveat}")
+    return 0
+
+
 def _print_preflight(document: dict[str, Any]) -> None:
     scenarios = document["final_e2_scenarios"]
     print()
@@ -3993,6 +4036,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     corrective_freeze.add_argument("--allow-dirty", action="store_true")
     corrective_freeze.set_defaults(func=cmd_corrective_freeze_formal_config)
+
+    corrective_cost = corrective_sub.add_parser(
+        "estimate-cost", help="以實測 token 用量外推 Final E2 的 provider 成本"
+    )
+    corrective_cost.add_argument(
+        "--validation", default="outputs/corrective/executor_validation.json"
+    )
+    corrective_cost.add_argument("--rows", type=int, default=384)
+    corrective_cost.add_argument("--out", default="outputs/corrective")
+    corrective_cost.add_argument("--twd-per-usd", type=float, default=31.67)
+    corrective_cost.set_defaults(func=cmd_corrective_estimate_cost)
 
     locks_parser = subparsers.add_parser("locks", help="formal freeze 狀態")
     locks_sub = locks_parser.add_subparsers(dest="locks_command", required=True)

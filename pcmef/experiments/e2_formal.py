@@ -81,12 +81,35 @@ class CountingAdapter:
     inner: Any
     calls: int = 0
     calls_by_task: dict[str, int] = field(default_factory=dict)
+    #: 逐角色累計的實際 token 用量。thinking token 單獨記 ——
+    #: 它照 output 計費卻不在 candidatesTokenCount 裡，是成本估算誤差最大的一項。
+    usage_by_task: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def invoke(self, connection, model, task_code, payload, runtime_cfg):
         self.calls += 1
         key = str(task_code)
         self.calls_by_task[key] = self.calls_by_task.get(key, 0) + 1
-        return self.inner.invoke(connection, model, task_code, payload, runtime_cfg)
+        response = self.inner.invoke(connection, model, task_code, payload, runtime_cfg)
+        bucket = self.usage_by_task.setdefault(
+            key, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                  "thoughts_tokens": 0}
+        )
+        bucket["calls"] += 1
+        bucket["prompt_tokens"] += int(getattr(response, "prompt_tokens", 0) or 0)
+        bucket["completion_tokens"] += int(getattr(response, "completion_tokens", 0) or 0)
+        bucket["thoughts_tokens"] += int(getattr(response, "thoughts_tokens", 0) or 0)
+        return response
+
+    def usage_totals(self) -> dict[str, int]:
+        total = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                 "thoughts_tokens": 0}
+        for bucket in self.usage_by_task.values():
+            for key in total:
+                total[key] += bucket[key]
+        total["billable_output_tokens"] = (
+            total["completion_tokens"] + total["thoughts_tokens"]
+        )
+        return total
 
     def __getattr__(self, name: str) -> Any:
         # 其餘 adapter 介面原樣轉發；只有 invoke 需要被計數。

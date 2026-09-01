@@ -353,6 +353,7 @@ def run_executor_validation(
     # -- 真實 provider 路徑 --------------------------------------------------
     runtime_identity: dict[str, Any] = {}
     real_calls = 0
+    measured_usage: dict[str, Any] = {}
     try:
         from pcmef.experiments.llm_real_validation import _binding
 
@@ -404,6 +405,11 @@ def run_executor_validation(
             # 每 case 結束就更新，不等整個迴圈跑完 —— 中途失敗時
             # 「已經打了幾通」是判斷失敗性質（配額 vs 程式）的關鍵資訊。
             real_calls = counting.calls
+            measured_usage = {
+                "by_role": {k: dict(v) for k, v in counting.usage_by_task.items()},
+                "totals": counting.usage_totals(),
+                "escalated_cases_measured": len(finals),
+            }
         checks.append(
             _check(
                 "real_llm_path_executes_all_four_agents",
@@ -463,6 +469,9 @@ def run_executor_validation(
         "n_rows": len(rows),
         "n_escalated_rows": len(escalated_index),
         "real_provider_calls": real_calls,
+        # 實測 token 用量。Final E2 的成本只能由這裡外推 —— prompt 大小可以
+        # 從 payload 推得，thinking token 不行，只能量。
+        "measured_usage": measured_usage,
         "runtime_identity": runtime_identity,
         "checks": checks,
         "failed": failed,

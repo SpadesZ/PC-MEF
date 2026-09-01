@@ -257,10 +257,21 @@ class ProviderResponse:
     request_id: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    #: reasoning/thinking token。**與 completion 分開存但一律照 output 計費**
+    #: （Google 明訂 thinking tokens 併入 output pricing）。分開存是因為
+    #: 它是成本估算誤差最大的一項：prompt 大小可以從 payload 推得，
+    #: thinking 只能實測。
+    thoughts_tokens: int = 0
     latency_ms: int = 0
+
+    def billable_output_tokens(self) -> int:
+        """計費用的 output token = completion + thinking。"""
+        return self.completion_tokens + self.thoughts_tokens
 
     def usage(self) -> dict[str, int]:
         return {
+            "thoughts_tokens": self.thoughts_tokens,
+            "billable_output_tokens": self.billable_output_tokens(),
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "latency_ms": self.latency_ms,
@@ -338,6 +349,47 @@ def _dig(node: Any, path: tuple[Any, ...]) -> Any:
         else:
             return None
     return node
+
+
+def _google_usage(body: dict[str, Any]) -> dict[str, int]:
+    """從 Google 的 usageMetadata 取出計費用的 token 數。
+
+    `thoughtsTokenCount` 必須單獨取出：Google 把 thinking token 併入
+    **output** 計費，但不把它算進 `candidatesTokenCount`，因此只看
+    candidates 會系統性低估成本。取不到就回 0 —— 少記一筆用量不該讓
+    一次 formal run 中止。
+    """
+    usage = body.get("usageMetadata") or {}
+
+    def count(key: str) -> int:
+        value = usage.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    return {
+        "prompt_tokens": count("promptTokenCount"),
+        "completion_tokens": count("candidatesTokenCount"),
+        "thoughts_tokens": count("thoughtsTokenCount"),
+    }
+
+
+def _openai_usage(body: dict[str, Any]) -> dict[str, int]:
+    """OpenAI 相容端點的用量。reasoning token 藏在 completion_tokens_details。"""
+    usage = body.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+
+    def count(node: dict[str, Any], key: str) -> int:
+        value = node.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    reasoning = count(details, "reasoning_tokens")
+    completion = count(usage, "completion_tokens")
+    # OpenAI 的 completion_tokens **已含** reasoning，Google 的沒有。
+    # 兩邊都要讓 completion + thoughts 等於實際計費 output，因此這裡扣掉。
+    return {
+        "prompt_tokens": count(usage, "prompt_tokens"),
+        "completion_tokens": max(completion - reasoning, 0),
+        "thoughts_tokens": reasoning,
+    }
 
 
 def _error_facts(response: Any) -> str:
@@ -519,7 +571,7 @@ class GoogleAdapter(HTTPProviderAdapter):
         parts: list[dict[str, Any]],
         response_schema: dict[str, Any] | None = None,
         temperature: float | None = None,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, dict[str, int]]:
         payload: dict[str, Any] = {"contents": [{"parts": parts}]}
         config: dict[str, Any] = {}
         if response_schema is not None:
@@ -542,11 +594,11 @@ class GoogleAdapter(HTTPProviderAdapter):
             str(part.get("text", ""))
             for part in candidates[0].get("content", {}).get("parts", [])
         )
-        return text, latency
+        return text, latency, _google_usage(body)
 
     def verify_chat(self, connection, model) -> ProbeResult:
         def run() -> str:
-            text, _ = self._generate(connection, model, [{"text": PROBE_CHAT_PROMPT}])
+            text, _, _ = self._generate(connection, model, [{"text": PROBE_CHAT_PROMPT}])
             if not text.strip():
                 raise ProviderError(f"{self.provider}: chat probe returned empty text")
             return f"non-empty response ({len(text)} chars)"
@@ -557,7 +609,7 @@ class GoogleAdapter(HTTPProviderAdapter):
         import base64
 
         def run() -> str:
-            text, _ = self._generate(
+            text, _, _ = self._generate(
                 connection, model,
                 [
                     {"text": PROBE_VISION_PROMPT},
@@ -577,7 +629,7 @@ class GoogleAdapter(HTTPProviderAdapter):
 
     def verify_structured_output(self, connection, model, schema) -> ProbeResult:
         def run() -> str:
-            text, _ = self._generate(
+            text, _, _ = self._generate(
                 connection, model, [{"text": PROBE_STRUCTURED_PROMPT}],
                 response_schema=_to_google_schema(schema),
             )
@@ -600,13 +652,13 @@ class GoogleAdapter(HTTPProviderAdapter):
     def invoke(self, connection, model, task_code, payload, runtime_cfg) -> ProviderResponse:
         parts = _payload_to_parts(payload)
         schema = runtime_cfg.get("response_schema")
-        text, latency = self._generate(
+        text, latency, usage = self._generate(
             connection, model, parts,
             response_schema=_to_google_schema(schema) if schema else None,
             temperature=runtime_cfg.get("temperature"),
         )
         return ProviderResponse(
-            text=text, model_id=model.model_id, provider=self.provider,
+            text=text, model_id=model.model_id, provider=self.provider, **usage,
             provider_revision=model.provider_revision, latency_ms=latency,
         )
 
@@ -648,7 +700,7 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
         content: Any,
         response_format: dict[str, Any] | None = None,
         temperature: float | None = None,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, dict[str, int]]:
         payload: dict[str, Any] = {
             "model": model.model_id,
             "messages": [{"role": "user", "content": content}],
@@ -663,11 +715,15 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
         choices = body.get("choices") or []
         if not choices:
             raise ProviderError(f"{self.provider}: response carried no choices")
-        return str(choices[0].get("message", {}).get("content", "")), latency
+        return (
+            str(choices[0].get("message", {}).get("content", "")),
+            latency,
+            _openai_usage(body),
+        )
 
     def verify_chat(self, connection, model) -> ProbeResult:
         def run() -> str:
-            text, _ = self._chat(connection, model, PROBE_CHAT_PROMPT)
+            text, _, _ = self._chat(connection, model, PROBE_CHAT_PROMPT)
             if not text.strip():
                 raise ProviderError(f"{self.provider}: chat probe returned empty text")
             return f"non-empty response ({len(text)} chars)"
@@ -679,7 +735,7 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
 
         def run() -> str:
             encoded = base64.b64encode(image).decode("ascii")
-            text, _ = self._chat(
+            text, _, _ = self._chat(
                 connection, model,
                 [
                     {"type": "text", "text": PROBE_VISION_PROMPT},
@@ -697,7 +753,7 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
 
     def verify_structured_output(self, connection, model, schema) -> ProbeResult:
         def run() -> str:
-            text, _ = self._chat(
+            text, _, _ = self._chat(
                 connection, model, PROBE_STRUCTURED_PROMPT,
                 response_format={
                     "type": "json_schema",
@@ -744,13 +800,13 @@ class OpenAICompatibleAdapter(HTTPProviderAdapter):
             if schema
             else None
         )
-        text, latency = self._chat(
+        text, latency, usage = self._chat(
             connection, model, _payload_to_openai_content(payload), response_format,
             temperature=runtime_cfg.get("temperature"),
         )
         return ProviderResponse(
             text=text, model_id=model.model_id, provider=self.provider,
-            provider_revision=model.provider_revision, latency_ms=latency,
+            provider_revision=model.provider_revision, latency_ms=latency, **usage,
         )
 
 
