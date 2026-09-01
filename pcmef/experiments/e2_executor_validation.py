@@ -401,7 +401,9 @@ def run_executor_validation(
                 agent_runner=runner, formal=True,
             )
             finals.append(decision)
-        real_calls = counting.calls
+            # 每 case 結束就更新，不等整個迴圈跑完 —— 中途失敗時
+            # 「已經打了幾通」是判斷失敗性質（配額 vs 程式）的關鍵資訊。
+            real_calls = counting.calls
         checks.append(
             _check(
                 "real_llm_path_executes_all_four_agents",
@@ -435,10 +437,14 @@ def run_executor_validation(
             )
         )
     except Exception as error:  # noqa: BLE001
+        # 供應商配額與程式缺陷必須分得出來：前者重跑就好，後者不能重跑。
+        text = str(error)
+        quota = "429" in text or "quota" in text.lower() or "RESOURCE_EXHAUSTED" in text
         checks.append(
             _check(
                 "real_llm_path_executes_all_four_agents", False,
-                f"{type(error).__name__}: {str(error)[:200]}",
+                f"{'PROVIDER_QUOTA' if quota else 'DEFECT'} "
+                f"{type(error).__name__} after {real_calls} call(s): {text[:200]}",
             )
         )
 
