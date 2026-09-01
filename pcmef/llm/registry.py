@@ -447,6 +447,26 @@ class LLMRegistry:
                 (status, connection_id),
             )
 
+    def set_connection_timeout(self, connection_id: str, timeout_sec: int) -> None:
+        """更新 HTTP 讀取逾時。
+
+        逾時是**營運**設定，不是研究設定：它決定「願意等多久」，不決定
+        送出什麼、也不決定怎麼判斷。但它會進 llm_runtime.lock 的
+        runtime_config_hash（snapshot 會逐 connection 記下 timeout_sec），
+        因此改它等同改 runtime identity —— 已凍結的 run 必須另開新的。
+
+        先前沒有這個方法，唯一的改法是直接改 SQLite，而那條路繞過了
+        add_connection() 的驗證，也不會留下任何痕跡。
+        """
+        if timeout_sec <= 0:
+            raise RegistryError(f"timeout_sec must be positive, got {timeout_sec!r}")
+        self.get_connection(connection_id)  # 不存在就在這裡失敗
+        with self.connect() as db:
+            db.execute(
+                "UPDATE llm_connections SET timeout_sec = ? WHERE connection_id = ?",
+                (int(timeout_sec), connection_id),
+            )
+
     def set_connection_enabled(self, connection_id: str, enabled: bool) -> None:
         with self.connect() as db:
             db.execute(
