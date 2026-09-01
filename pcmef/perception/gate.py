@@ -6,7 +6,7 @@
 #         **不讀真實資料、不碰 FORMAL_E1_FINAL、不重訓任何模型。**
 # 檔案路徑: pcmef/perception/gate.py
 # 產生時間: 2026-08-31 14:10 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 溫度校準、可觀測的品質訊號、D/U/Q 門檻與路由規則，以及
 #           baseline 與 PC-MEF 的一次性 Formal E2 比較。
 # 模組定位: gate 的決策層。門檻與規則**只能**由 gate-validation 決定；
@@ -26,6 +26,9 @@
 #     報告必須逐筆驗證這一點。
 #   - 不得在 LLM 未設定時假裝 PC-MEF 的 LLM 仲裁跑過了。仲裁器是可替換的，
 #     實際用了哪一個必須寫在報告最上面。
+#   - v0.2.0 新增：RELIABILITY_MODEL_VERSION / RELIABILITY_ROUTING_VERSION
+#     兩個版本識別常數，供 reliability_final.lock 與 gate.lock 指名（NOTE-050）。
+#     行為未變動，兩者只是把既有實作命名成可被 lock 引用的識別。
 #   - v0.1.0 新增：首版 D/U/Q gate 與 Formal E2。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_perception_gate.py -v
@@ -52,6 +55,8 @@ __all__ = [
     "fit_gate_rule",
     "apply_gate",
     "run_formal_e2",
+    "RELIABILITY_MODEL_VERSION",
+    "RELIABILITY_ROUTING_VERSION",
 ]
 
 ECE_BINS = 15
@@ -839,6 +844,15 @@ RELIABILITY_EVIDENCE: tuple[str, ...] = (
     "degradation_margin",   # Q 相對於 gate-validation 門檻的裕度
     "cross_modal_support",  # D：另一個模態是否支持（同意時互相加分）
 )
+
+#: 可靠度映射的版本識別。名稱定義在**程式碼**而不是 lock 檔裡 ——
+#: reliability_final.lock 會記下這個字串，若它只存在於 lock，那個版本號
+#: 就沒有任何東西可以對照（NOTE-050，與 SELECTIVE_ESCALATION_BRIDGE_VERSION 同一做法）。
+RELIABILITY_MODEL_VERSION = "reliability_margin_support_v1"
+
+#: 可靠度路由的版本識別。與上面同一個理由；它指的是 reliability_route()，
+#: **不是** apply_gate() 的品質門檻路由（後者是 pilot 用的那一條）。
+RELIABILITY_ROUTING_VERSION = "reliability_routing_v1"
 
 
 @dataclass(frozen=True)

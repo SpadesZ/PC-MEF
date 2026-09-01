@@ -2914,6 +2914,208 @@ def cmd_locks_status(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _print_preflight(document: dict[str, Any]) -> None:
+    scenarios = document["final_e2_scenarios"]
+    print()
+    for name, payload in document["payloads"].items():
+        print(f"  {name}: {len(payload)} field(s)")
+    print(
+        f"\n  final E2 identity: {scenarios['n_families']} families / "
+        f"{scenarios['n_scenarios']} scenarios, rendered={scenarios['rendered']}"
+    )
+    print(f"  scenario_set_hash: {scenarios['scenario_set_hash']}")
+    print(f"  FINAL_E2_36_43_GENERATED = {document['FINAL_E2_36_43_GENERATED']}")
+    print(f"  FINAL_E2_36_43_READ     = {document['FINAL_E2_36_43_READ']}")
+    if document["gaps"]:
+        print("\n  gaps:")
+        for name, items in document["gaps"].items():
+            for item in items:
+                print(f"    [{name}] {item}")
+    print(f"\n  SAFE_TO_FREEZE = {document['SAFE_TO_FREEZE']}")
+
+
+def cmd_locks_preflight(args: argparse.Namespace) -> int:
+    """Final E2 前的 pre-flight 推導。**dry run，不寫任何 lock。**"""
+    from pcmef.experiments.final_preflight import build_preflight
+
+    document = build_preflight(
+        out_dir=args.out, freeze_dir=args.freeze_dir,
+        progress=lambda message: print(message, flush=True),
+    )
+    _print_preflight(document)
+    print(f"\n  proposal: {Path(args.out) / 'final_preflight.json'}")
+    return 0 if document["SAFE_TO_FREEZE"] == "YES" else 2
+
+
+def cmd_locks_freeze_preflight(args: argparse.Namespace) -> int:
+    """把 pre-flight 推導的十個 lock 寫入 freeze/。
+
+    寫入順序即相依順序；LockStore 會再驗一次前置條件，因此順序錯了會被擋下
+    而不是寫出一個跳步的狀態。formal_config 最後寫，它引用其餘全部的
+    payload_hash。
+    """
+    import subprocess
+
+    from pcmef.core.amendments import amendment_provenance
+    from pcmef.core.hash import hash_file
+    from pcmef.core.locks import LockStore
+    from pcmef.experiments.final_preflight import build_preflight
+
+    document = build_preflight(
+        out_dir=args.out, freeze_dir=args.freeze_dir,
+        progress=lambda message: print(message, flush=True),
+    )
+    _print_preflight(document)
+    if document["gaps"]:
+        print(
+            "\nerror: refusing to freeze while the derivation reports gaps; "
+            "every field must come from code or artifact, never from a guess.",
+            file=sys.stderr,
+        )
+        return 2
+    if document["FINAL_E2_36_43_GENERATED"] != "NO":
+        print(
+            "\nerror: families 36-43 already have artifacts; the reserved final "
+            "partition is no longer unopened.",
+            file=sys.stderr,
+        )
+        return 2
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if dirty and not args.allow_dirty:
+        print(
+            "\nerror: the working tree has uncommitted changes; formal_config.lock "
+            "names a commit and must be produced from it. Commit first, or pass "
+            "--allow-dirty.",
+            file=sys.stderr,
+        )
+        return 2
+
+    store = LockStore(args.freeze_dir)
+    order = (
+        "perception_condition_policy",
+        "training_seed_pairs",
+        "validation_pool",
+        "reliability_final",
+        "gate",
+        "inference_firewall",
+        "conflict_operational",
+        "e2_sample_size",
+        "statistics_config",
+    )
+    print()
+    try:
+        for name in order:
+            path = store.write(name, document["payloads"][name])
+            print(f"  frozen {name}  {store.load_hash(name)[:16]}  -> {path}")
+
+        scenarios = document["final_e2_scenarios"]
+        formal = {
+            "resolved_config_sha256": hash_file(Path(args.repo_root) / "configs/base.yaml"),
+            "resolved_config_path": "configs/base.yaml",
+            "code_revision": commit,
+            "code_revision_dirty": bool(dirty),
+            "split_hashes": {
+                "synthetic_split_policy": store.load_hash("synthetic_split_policy"),
+                "real_split_policy": store.load_hash("real_split_policy"),
+                "heldout_partition": (
+                    hash_file(Path(args.freeze_dir) / "heldout_partition.lock.json")
+                    if (Path(args.freeze_dir) / "heldout_partition.lock.json").exists()
+                    else None
+                ),
+            },
+            "e1_candidates_lock_hash": store.load_hash("e1_candidates"),
+            "e1_evaluation_design_hash": store.load_hash("e1_evaluation_design"),
+            "inference_firewall_hash": store.load_hash("inference_firewall"),
+            "e2_sample_size_lock_hash": store.load_hash("e2_sample_size"),
+            "scenario_set_hash": scenarios["scenario_set_hash"],
+            "scenario_set": {
+                "n_families": scenarios["n_families"],
+                "n_scenarios": scenarios["n_scenarios"],
+                "family_domain": scenarios["family_domain"],
+                "family_descriptors_hash": scenarios["family_descriptors_hash"],
+                "scenario_ids": scenarios["scenario_ids"],
+                "scenario_seeds": scenarios["scenario_seeds"],
+                "seed_rule": scenarios["seed_rule"],
+                "rendered": False,
+                "observations_read": False,
+            },
+            "model_checkpoint_hashes": {
+                pair["checkpoint_pair_id"]: {
+                    "vision": pair["vision_checkpoint_sha256"],
+                    "tof": pair["tof_checkpoint_sha256"],
+                }
+                for pair in document["payloads"]["training_seed_pairs"]["pairs"]
+            },
+            "preprocessing_hash": document["payloads"]["training_seed_pairs"]["pairs"][0][
+                "preprocessing_hash"
+            ],
+            "training_seed_pairs_hash": store.load_hash("training_seed_pairs"),
+            "calibrated_simulator_identity": {
+                "identity_hash": scenarios["simulator_identity_hash"],
+                "calibrated_simulation_lock_hash": store.load_hash("calibrated_simulation"),
+            },
+            "reliability_hash": store.load_hash("reliability_final"),
+            "validation_pool_hash": store.load_hash("validation_pool"),
+            "gate": {
+                "lock_hash": store.load_hash("gate"),
+                "decision_bridge_version": document["payloads"]["gate"][
+                    "decision_bridge_version"
+                ],
+                "routing_policy_version": document["payloads"]["gate"][
+                    "routing_policy_version"
+                ],
+            },
+            "conflict_operational_hash": store.load_hash("conflict_operational"),
+            "perception_condition_policy_hash": store.load_hash(
+                "perception_condition_policy"
+            ),
+            "claim_boundary_hash": store.load_hash("claim_boundary"),
+            "agent": {
+                "agent_schema_hash": store.load_hash("agent_schema"),
+                "llm_runtime_hash": store.load_hash("llm_runtime"),
+                "inference_firewall_hash": store.load_hash("inference_firewall"),
+            },
+            "statistics_config_hash": store.load_hash("statistics_config"),
+            "stress_operators": {
+                "policy_hash": document["payloads"]["perception_condition_policy"][
+                    "operator_code_hash"
+                ],
+                "severity": document["payloads"]["e2_sample_size"]["severity_allocation"],
+                "denylist": document["payloads"]["perception_condition_policy"][
+                    "formal_stress_denylist"
+                ],
+            },
+            "metric_config_hash": store.load_hash("metric_config"),
+            "e1_outcome_hash": store.load_hash("e1_outcome"),
+            "FINAL_E2_36_43_GENERATED": "NO",
+            "FINAL_E2_36_43_READ": "NO",
+            **amendment_provenance(args.freeze_dir),
+        }
+        path = store.write("formal_config", formal)
+        print(f"  frozen formal_config  {store.load_hash('formal_config')[:16]}  -> {path}")
+
+        # 冪等驗證：同樣的 payload 再寫一次必須是 no-op 而不是新檔。
+        before = store.load_hash("formal_config")
+        store.write("formal_config", formal)
+        after = store.load_hash("formal_config")
+        if before != after:
+            print("error: formal_config is not idempotent", file=sys.stderr)
+            return 3
+        print(f"\n  idempotence verified: formal_config re-write is a no-op ({after[:16]})")
+    except LockError as error:
+        print(f"\nFAIL CLOSED: {error}", file=sys.stderr)
+        return 2
+
+    print("\n  all pre-final locks frozen.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -3640,6 +3842,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--field", default=None, help="另外印出某個欄位的原值與解析後的值"
     )
     locks_resolve.set_defaults(func=cmd_locks_resolve)
+
+    preflight = locks_sub.add_parser(
+        "preflight",
+        help="Final E2 前的 pre-flight 推導（dry run，不寫任何 lock）",
+    )
+    preflight.add_argument("--out", default="outputs/lock_proposals")
+    preflight.add_argument("--freeze-dir", default="freeze")
+    preflight.set_defaults(func=cmd_locks_preflight)
+
+    freeze_preflight = locks_sub.add_parser(
+        "freeze-preflight",
+        help="把 pre-flight 推導的十個 lock 寫入 freeze/（有 gap 即拒絕）",
+    )
+    freeze_preflight.add_argument("--out", default="outputs/lock_proposals")
+    freeze_preflight.add_argument("--freeze-dir", default="freeze")
+    freeze_preflight.add_argument("--repo-root", default=".")
+    freeze_preflight.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="允許在工作目錄有未提交變更時凍結（formal_config 會記下 commit）",
+    )
+    freeze_preflight.set_defaults(func=cmd_locks_freeze_preflight)
 
     return parser
 

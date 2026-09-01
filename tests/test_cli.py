@@ -71,10 +71,63 @@ def test_formal_mode_exits_non_zero_when_values_are_pending(capsys, tmp_path):
     assert main(["--config", str(config), "--formal", "config", "check"]) == 2
 
 
-def test_shipped_base_config_is_still_formal_blocking(capsys):
-    """repo 內的 base.yaml 目前必然有待裁決數值；若哪天變成 0 代表有人偷填了值。"""
+#: 2026-09-01（NOTE-050）Final Pre-Flight 之前為 !required 的最後五項。
+#: 它們現在有值，因此原本「base.yaml 必然 formal-blocking」的守衛換成
+#: 「每一項都必須帶得出裁決來源」—— 防的是同一件事（有人偷填一個數字），
+#: 但不會在合法裁決之後永遠失敗。
+ADJUDICATED_2026_09_01: tuple[tuple[str, str], ...] = (
+    ("conflict_operational", "delta"),
+    ("e2", "final_n_per_class"),
+    ("e2", "severity_allocation"),
+    ("perception", "training_seed_pairs"),
+    ("reliability", "crossfit_folds"),
+)
+
+#: 可接受的裁決來源標記。任一存在即算有出處。
+PROVENANCE_MARKERS: tuple[str, ...] = (
+    "decided_on", "decided_by", "superseded_from", "superseded_on",
+    "_source", "source", "_derivation", "scheme",
+)
+
+
+def test_shipped_base_config_is_fully_resolved():
+    """base.yaml 已無待裁決數值（NOTE-050）。"""
     assert BASE_CONFIG.exists()
-    assert main(["--config", str(BASE_CONFIG), "--formal", "config", "show"]) == 2
+    assert main(["--config", str(BASE_CONFIG), "--formal", "config", "show"]) == 0
+
+
+def test_every_adjudicated_value_carries_its_provenance():
+    """偷填一個裸數字仍然會失敗。
+
+    舊守衛靠「必然還有 !required」來偵測偷填；那在全部裁決完之後就永遠是紅的。
+    改為要求每一項裁決值的所在區塊帶得出來源標記 —— 偷填的人不會順手補上
+    decided_on 或 superseded_from，而合法裁決本來就會寫。
+    """
+    import yaml
+
+    raw = yaml.safe_load(
+        BASE_CONFIG.read_text(encoding="utf-8").replace("!required", "")
+    )
+    missing = []
+    for section, key in ADJUDICATED_2026_09_01:
+        block = raw.get(section) or {}
+        assert key in block, f"{section}.{key} disappeared from base.yaml"
+        value = block[key]
+        assert value not in (None, ""), f"{section}.{key} is empty, not adjudicated"
+        # 來源可以寫在該鍵自己的子欄位，或該區塊層級。
+        nested = value if isinstance(value, dict) else {}
+        candidates = {**{str(k): v for k, v in block.items()},
+                      **{str(k): v for k, v in nested.items()}}
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            candidates.update({str(k): v for k, v in value[0].items()})
+        if not any(
+            marker in name for name in candidates for marker in PROVENANCE_MARKERS
+        ):
+            missing.append(f"{section}.{key}")
+    assert not missing, (
+        "adjudicated config values without any provenance marker "
+        f"({PROVENANCE_MARKERS}): {missing}"
+    )
 
 
 def test_cli_override_is_rejected_in_formal_mode(tmp_path):

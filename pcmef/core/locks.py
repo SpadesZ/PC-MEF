@@ -4,7 +4,7 @@
 #         各 lock 的 payload_hash 互相交叉引用，最終匯入 formal_config.lock。
 # 檔案路徑: pcmef/core/locks.py
 # 產生時間: 2026-08-25 22:05 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 管理 22 個「凍結點」—— 每個實驗階段做完後把當時的決策與雜湊寫成一個
 #           不可再改的檔案。它同時檢查該階段的前置階段是否真的完成，
 #           讓「先鎖 split 再校準」這類順序不是靠人記得，而是跳步就會失敗。
@@ -23,6 +23,9 @@
 #   - 不得把 created_at 納入 payload_hash；否則相同輸入在不同時間 freeze 會被誤判
 #     為內容變更，破壞重跑的冪等性。
 #   - 新增 lock 必須同時登錄必要 key 與前置 lock，否則狀態機會出現無人把關的缺口。
+#   - v0.3.0 修訂：training_seed_pairs / validation_pool / reliability_final
+#     三個 LockSpec 改為對齊實際 thesis execution path（NOTE-050）。
+#     修訂契約只有在該 lock **尚未凍結**時才允許；三者當時皆為 pending。
 #   - v0.1.0 新增：首版 22 個 lock 與相依圖。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_config_and_locks.py -k "lock"
@@ -211,28 +214,63 @@ LOCK_SPECS: dict[str, LockSpec] = {
         ),
         LockSpec(
             name="training_seed_pairs",
-            required_keys=("pairs", "train_core_hash", "train_dev_hash"),
+            # 2026-09-01（NOTE-050）：舊契約要求「至少 3 個 checkpoint pair」，
+            # 那是為了讓 statistics 能對 training seed 做 aggregation 並宣稱
+            # seed robustness。實際 thesis execution path 只訓練過**一組**
+            # Vision+ToF checkpoint（ds_v2, seed 20260831），gate、reliability、
+            # pilot、LLM validation 全部由它產出。要求補訓兩組等於為了滿足
+            # 一個從未執行的設計而重跑整條下游，且那兩組不會被任何已凍結的
+            # 結果使用。改為凍結唯一實際使用的 pair，並強制寫明
+            # training_seed_robustness_claim = false。
+            required_keys=(
+                "pairs",
+                "train_core_hash",
+                "train_dev_hash",
+                "training_seed_robustness_claim",
+            ),
             requires=("perception_condition_policy",),
-            description="至少 3 個 immutable checkpoint pair；pair mapping 在 formal 前固定。",
+            description=(
+                "凍結實際使用的 checkpoint pair（thesis path 為唯一一組）；"
+                "pair mapping 在 formal 前固定，且不得重訓。"
+                "少於 3 組時 training_seed_robustness_claim 必須為 false。"
+            ),
         ),
         # -- Reliability / gate ------------------------------------------------
         LockSpec(
             name="validation_pool",
+            # 2026-09-01（NOTE-050）：移除 group_fold_assignment_hash。
+            # 它預設 reliability 以 grouped cross-fit 擬合，而 production 的
+            # reliability mapping 沒有 fold（見下方 reliability_final）。
+            # 留著它只能靠捏造一組不存在的 fold 指派來填值。
+            # 改為記錄 original / effective 兩個 pool 與其間的具名 exclusion。
             required_keys=(
                 "checkpoint_pair_ids",
+                "original_pool_hash",
+                "effective_pool_hash",
                 "pooled_row_hash",
-                "group_fold_assignment_hash",
+                "exclusion",
                 "training_pair_id_excluded_from_features",
             ),
             requires=("training_seed_pairs",),
         ),
         LockSpec(
             name="reliability_final",
+            # 2026-09-01（NOTE-050）：舊契約寫的是 logistic regression +
+            # grouped cross-fit。稽核結果：程式庫裡沒有任何 logistic
+            # reliability 模型，也沒有 fold 產生器。實際 production 實作是
+            # perception.gate.fit_reliability_model / reliability_scores ——
+            # 由 gate-validation clean 分佈定出的 sigmoid margin 乘上
+            # cross-modal support，無擬合係數、無 fold。
+            # required_keys 因此改為描述那個實作。
             required_keys=(
+                "algorithm",
+                "algorithm_version",
                 "feature_schema",
-                "scaler_hash",
-                "logistic_coefficients",
-                "grouped_crossfit_config",
+                "fitted_statistics",
+                "parameters",
+                "effective_validation_pool_hash",
+                "code_hash",
+                "forbidden_predictive_features",
             ),
             requires=("validation_pool",),
         ),

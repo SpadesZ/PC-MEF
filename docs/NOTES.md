@@ -324,6 +324,149 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-050 Final pre-flight：三個 legacy lock 契約對齊實際 execution path
+
+**決策日期**：2026-09-01（教授裁決，Final Pre-Flight Freeze）
+
+**適用範圍**：`pcmef/core/locks.py` 的 `training_seed_pairs` /
+`validation_pool` / `reliability_final` 三個 LockSpec；
+`configs/base.yaml` 的 `perception.min_checkpoint_pairs`、
+`reliability.model_family` / `crossfit_folds`、`statistics.resample_unit` /
+`stratification`、`e2.severity_allocation`。
+
+**決策**：
+
+1. `training_seed_pairs` 由「至少 3 個 checkpoint pair」改為凍結唯一實際
+   使用的那一組，並強制 `training_seed_robustness_claim = false`。
+2. `validation_pool` 移除 `group_fold_assignment_hash`，改記 original /
+   effective 兩個 pool 與其間的具名 exclusion。
+3. `reliability_final` 由 logistic regression + grouped cross-fit 改為描述
+   實際實作（sigmoid margin x cross-modal support），並寫明禁止的預測性特徵。
+4. `statistics.resample_unit` 由 `scenario_id` 改為 `physical_scene_family`，
+   `stratification` 由 `condition` 改為 `class`，並補上符合該契約的
+   `pcmef.stats.bootstrap.cluster_bootstrap_delta`。
+5. 一併更正兩處與實作不符的 config：`perception.vision_backbone`
+   （mobilenetv2 → small_cnn_3block）與 `gate` 的搜尋空間／目標／tie-break
+   （simplex → D/U/Q quantile grid）。
+
+**原因**：
+
+裁決原則與 NOTE-049 同一條：**pending 的 legacy lock 對齊實際 thesis
+execution path，不得補做從未執行的 journal-grade 設計。**
+三個 lock 在本次修訂當下皆為 pending —— 已凍結的 lock 一律不動。
+逐項理由見下方各節。
+
+### 1. `training_seed_pairs`：3 pairs → 1 pair（正式 supersede）
+
+舊契約要求「至少 3 個 immutable checkpoint pair」，其目的是讓
+`statistics.pair_aggregation` 有東西可以 aggregate，並支撐 training-seed
+robustness 的宣稱。
+
+稽核結果：實際只訓練過**一組** Vision+ToF checkpoint
+（`outputs/perception/ds_v2`，`TRAIN_SEED = 20260831`）。
+`gate_rule.json` 的溫度與門檻、reliability anchors、deterministic-gate pilot、
+real-agent LLM validation **全部**由這一組權重產出。
+
+補訓兩組的代價與收益不對稱：那會讓整條下游（溫度校準 → severity →
+gate 門檻 → reliability → pilot）失去唯一對應的 checkpoint，而新的兩組
+不會被任何已凍結的結果使用。
+
+**因此**：凍結唯一實際使用的 pair，並在 lock 內強制寫明
+
+```
+training_seed_robustness_claim = false
+```
+
+論文不得宣稱結果對 training seed 穩健。`statistics.pair_aggregation`
+退化為 identity（單一 pair，無可 aggregate）。
+
+### 2. `validation_pool`：移除 `group_fold_assignment_hash`
+
+該 key 預設 reliability 以 grouped cross-fit 擬合。實作裡沒有 fold 產生器
+（見下一條），填它只能捏造一組不存在的指派。改為記錄實際的兩個 pool：
+
+| | families | samples | hash |
+|---|---|---|---|
+| original | 32 | 96 | `3d4765add41f6e3d…` |
+| effective | 31 | 93 | `bc2ec62a62b4f351…` |
+
+exclusion 為 `Empty f27`，理由是 physical_scene_family 與 ds_v2 的
+`Empty f15` 相同（NOTE-048）。**不建立 cross-fit fold。**
+
+### 3. `reliability_final`：logistic regression + grouped cross-fit → 實際實作
+
+舊契約的 required_keys 是 `feature_schema` / `scaler_hash` /
+`logistic_coefficients` / `grouped_crossfit_config`。
+
+稽核結果：程式庫內**沒有** logistic reliability 模型，也**沒有** fold
+產生器；`reliability.model_family: logistic_regression` 與
+`crossfit_folds: !required` 描述的是一個從未實作的設計。
+
+實際 production 實作是 `pcmef/perception/gate.py` 的
+`fit_reliability_model()` + `reliability_scores()`：
+
+```
+margin_m = sigmoid((Q_m - anchor_m) / scale_m)
+support  = 0.5 + 0.5 * (1 - clip(D, 0, 1))
+q_m      = clip(margin_m * support, 0, 1)
+```
+
+`anchor_m` 是 gate-validation clean 分佈的第 5 百分位，`scale_m` 是其 IQR。
+沒有擬合係數、沒有 fold、沒有 scaler —— 只有六個由 clean 分佈算出的
+reference statistic。required_keys 因此改為描述這個實作。
+
+**禁止的預測性特徵（寫進 lock）**：
+
+```
+max-softmax / entropy / calibrated confidence are NOT modality reliability inputs.
+```
+
+理由是 pilot 的 negative result：溫度校準把 ToF 壓到 T = 0.0498，於是劣化的
+ToF「高信心地錯」，信心加權仲裁被拉向錯的一邊（conflict 0.302 對
+vision-only 0.677）。把預測信心當感測可靠度這個假設本身就是錯的。
+
+### 4. reliability anchor 的 pool 邊界（**已知且不修**）
+
+實際執行的 `llm_real_validation._compute_cases()` 在
+**32 family / 96 sample 的 clean gate-validation** 上擬合 anchors，
+亦即**未**套用 NOTE-048 的 `Empty f27` 剔除。已實測若改在 93 samples 上重擬合：
+
+| | q_v_anchor | q_v_scale | q_t_anchor | q_t_scale | routes (93) |
+|---|---|---|---|---|---|
+| 96（實際執行） | 0.30071915 | 0.51111756 | 13.30154476 | 1.44501684 | esc 2 / fus 77 / t_tof 6 / t_vis 8 |
+| 93（假設重擬合） | 0.30038111 | 0.62924124 | 13.49939913 | 1.45468644 | esc 2 / fus 76 / t_tof 6 / t_vis 9 |
+
+兩者不同。依「只能 deterministic reproduce 現有結果，不准 refit 出新版本」，
+**凍結的是 96 那一組**，並在 lock 內具名記錄這個邊界，
+連同 effective pool hash（`bc2ec62a…`，evaluation 實際適用的 pool）一起保存。
+不得為了讓兩個數字一致而重擬合。
+
+### 5. `statistics.resample_unit`：`scenario_id` → `physical_scene_family`
+
+舊值以 scenario 為重抽單位。Final E2 每個 family 有 3 個 realization ×
+4 個 condition，它們是同一個物理場景的 12 列；以 scenario 重抽會把同一個
+family 的列當成獨立樣本而低估變異。改為 family cluster bootstrap，
+`stratification` 由 `condition` 改為 `class`。
+
+**已知實作缺口**：`pcmef/perception/gate.py:paired_bootstrap_delta()` 目前以
+`base_scenario_id` 重抽、seed 寫死 `20260831`，**不滿足**本次凍結的
+`statistics_config.lock`（family cluster / seed 20260827）。
+Final E2 執行前必須補上符合 lock 的 cluster bootstrap，否則
+`READY_FOR_ONE_SHOT_FINAL_E2 = NO`。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli config check      # unresolved 0
+py -3.10 -m pcmef.cli locks status      # 22/22 frozen
+```
+
+families 36-43 在本決策當下**尚未生成、尚未讀取**，
+`formal_config.lock` 只凍結它們的 identity（scenario id / seed / descriptor），
+不含任何 RGB/ToF 產物。
+
+---
+
 ## NOTE-049 連續 simplex gate 由 selective escalation 取代（未曾啟用）
 
 **決策日期**：2026-09-01（教授裁決）

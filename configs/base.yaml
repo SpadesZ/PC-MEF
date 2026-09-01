@@ -196,32 +196,91 @@ e1:
 # ---------------------------------------------------------------------------
 perception:
   tof_backbone: 1d_cnn
-  vision_backbone: mobilenetv2
+  # 2026-09-01（NOTE-050）：實際訓練的是 baselines.VisionCNN —— 三層
+  # Conv2d(3->16->32->64) + AdaptiveAvgPool + Linear(64,4)，23,956 參數。
+  # 不是 MobileNetV2，也不曾是。formal_config 會把本檔的雜湊凍進去，
+  # 留著錯的骨幹名等於凍結一個不實的 provenance。
+  vision_backbone: small_cnn_3block
+  vision_backbone_superseded_from: mobilenetv2
+  vision_backbone_source: "pcmef/perception/baselines.py VisionCNN"
   # SRC-SAI §14：train_core 只供 preprocessing/gradient-based fitting，
   # train_dev 只供 early stopping / checkpoint selection，兩者 family group-disjoint。
+  # 實際對應：train_core = ds_v2 train split（12 family/class、240 筆），
+  # train_dev = ds_v2 val split（4 family/class、80 筆）。
   internal_splits: [train_core, train_dev]
-  min_checkpoint_pairs: 3
-  training_seed_pairs: !required
-    source: "SRC-PLAN §3.4 / SRC-SAI §24"
-    reason: "training_pair_id -> tof/vision seed 的對應必須在 formal 前固定並核定"
+  # min_checkpoint_pairs 由 3 降為 1（NOTE-050）。舊值支撐的是 training-seed
+  # robustness 宣稱；實際 thesis path 只訓練過一組 checkpoint，且整條下游
+  # （溫度 / severity / gate 門檻 / reliability / pilot / LLM validation）
+  # 都綁在它身上。補訓兩組不會被任何已凍結的結果使用。
+  min_checkpoint_pairs: 1
+  min_checkpoint_pairs_superseded_from: 3
+  # 代價寫在明處：少於 3 組就不得宣稱 seed robustness。
+  training_seed_robustness_claim: false
+  training_seed_pairs:
+    # 唯一實際使用的 pair。seed 是權重初始化與批次順序的種子
+    # （pcmef.perception.baselines.TRAIN_SEED），與場景實現的種子無關，
+    # 因此 vision 與 tof 同值不代表兩個模型共用亂數流。
+    - checkpoint_pair_id: ds_v2_pair_20260831
+      vision_seed: 20260831
+      tof_seed: 20260831
+      run_dir: outputs/perception/ds_v2
+  training_seed_pairs_decided_by: advisor
+  training_seed_pairs_decided_on: "2026-09-01"
+  training_seed_pairs_source: "SRC-PLAN §3.4 / SRC-SAI §24；supersede 見 NOTE-050"
 
 # ---------------------------------------------------------------------------
 # Reliability / Gate
 # ---------------------------------------------------------------------------
 reliability:
-  model_family: logistic_regression
+  # 2026-09-01（NOTE-050）：logistic_regression + grouped cross-fit 是
+  # **從未實作**的設計 —— 程式庫裡沒有 logistic reliability 模型，也沒有
+  # fold 產生器。實際實作是 gate.fit_reliability_model / reliability_scores：
+  #   q_m = clip(sigmoid((Q_m - anchor_m)/scale_m) * support, 0, 1)
+  #   support = 0.5 + 0.5 * (1 - clip(D, 0, 1))
+  # anchor 為 gate-validation clean 的 5th percentile，scale 為其 IQR。
+  model_family: sensor_quality_sigmoid_with_cross_modal_support
+  model_family_superseded_from: logistic_regression
+  model_version: reliability_margin_support_v1
+  model_source: "pcmef/perception/gate.py fit_reliability_model + reliability_scores"
   crossfit_group_by: parent_scene_family
-  crossfit_folds: !required
-    source: "SRC-SAI §15 / §16"
-    reason: "K-fold 的 K 值需核定；folds 依 parent_scene_family group-disjoint"
+  # K-fold 沒有實作，也沒有任何 production caller。不得為了填一個數字而
+  # 捏造 fold 指派 —— 那會讓 lock 記載一份不存在的擬合程序。
+  crossfit_folds: NOT_APPLICABLE_NO_CROSSFIT_IN_PRODUCTION
+  crossfit_superseded_on: "2026-09-01"
+  # q_m 的來源白名單與禁止項，與 gate.RELIABILITY_EVIDENCE 同一份語意。
+  evidence_sources: [sensor_quality, degradation_margin, cross_modal_support]
+  forbidden_predictive_features:
+    - max_softmax_probability
+    - predictive_entropy_of_the_modality_being_scored
+    - calibrated_confidence
+    - anything_derived_from_p_m_given_x
+  forbidden_reason: >
+    pilot 的 negative result：溫度校準把 ToF 壓到 T = 0.0498，劣化的 ToF
+    因此「高信心地錯」，信心加權仲裁被拉向錯的一邊。把預測信心當成感測
+    可靠度這個假設本身錯誤，不是仲裁器實作問題。
+  decided_by: advisor
+  decided_on: "2026-09-01"
 
 gate:
-  # 搜尋空間與目標函數已由文件確定（SRC-SAI §16 Hyperparameter selection 表）。
-  search_space: simplex_grid
-  search_step: 0.1
-  objective: validation_worst_condition_macro_f1
-  tie_break: [overall_macro_f1, fewer_nonzero_weights]
-  cross_pair_aggregation: arithmetic_mean
+  # 2026-09-01（NOTE-050）：simplex_grid / worst-condition 目標描述的是
+  # NOTE-049 已判定「未曾啟用」的連續 gate。實際執行的搜尋是
+  # gate.fit_gate_rule()：對 Q_vision / Q_tof / D 各取 gate-validation 上的
+  # 分位數格點（19 x 19 x 12），目標為 arbiter 關閉時的 routed accuracy。
+  search_space: duq_quantile_grid
+  search_space_superseded_from: simplex_grid
+  q_vision_quantiles: {start: 0.05, stop: 0.95, points: 19}
+  q_tof_quantiles: {start: 0.05, stop: 0.95, points: 19}
+  disagreement_quantiles: {start: 0.5, stop: 0.99, points: 12}
+  objective: routed_accuracy_on_gate_validation_arbiter_disabled
+  objective_superseded_from: validation_worst_condition_macro_f1
+  # 實作是嚴格大於才取代（accuracy > best_accuracy），因此並列時保留
+  # 迴圈順序中**先出現**的那一組：q_vision 外層、q_tof 中層、D 內層。
+  tie_break: first_candidate_in_grid_order_strictly_improving
+  tie_break_superseded_from: [overall_macro_f1, fewer_nonzero_weights]
+  # 只有一組 checkpoint pair（NOTE-050），跨 pair 平均退化為 identity。
+  cross_pair_aggregation: identity_single_pair
+  cross_pair_aggregation_superseded_from: arithmetic_mean
+  decided_on: "2026-09-01"
   # alpha/beta/gamma：**legacy preregistration design，未曾在 production 啟用**
   # （NOTE-049）。早期規格的連續 gate g = clip(alpha*D + beta*U + gamma*Q)
   # 從未有 production caller；實際實作採離散 D/U/Q reliability routing，
@@ -281,30 +340,74 @@ e2:
   # final N 必須由 e2_pilot 依 frozen sizing rule 決定並鎖入 e2_sample_size.lock。
   initial_coverage_target_per_condition: 100
   initial_class_balance_per_condition: 25
-  final_n_per_class: !required
-    source: "SRC-PLAN §3.3 / SRC-SAI FR-023"
-    reason: "只能由 e2_pilot 依預註冊 sizing rule 決定，禁止查看 G5-G4 delta 後回填"
-  severity_allocation: !required
-    source: "SRC-PLAN §3.3"
-    reason: "Low/Mid/High 配額由 pilot 決定後凍結"
+  # 核定 2026-09-01。sizing 不是由 pilot 的相對表現決定，而是由**保留區間**
+  # 決定：families 36-43 是在看到任何 36-43 結果之前就固定的獨立保留分割，
+  # 8 family/class x 3 realization = 24 base scenario/class（SRC-SAI Appendix H3
+  # 禁止用 G5-G4 或 proposed-method 的相對表現做 sizing，本推導完全未使用）。
+  final_n_per_class: 24
+  final_n_per_class_derivation: "families_per_class 8 x realizations_per_family 3"
+  # Low/Mid/High 配額屬 legacy 設計：實際 stress 只有兩個由事前判準在
+  # gate-validation 上選定的固定 severity，沒有分級配額（NOTE-050）。
+  severity_allocation:
+    scheme: FIXED_TWO_SEVERITY_NO_LOW_MID_HIGH
+    superseded_from: low_mid_high_quota
+    vision: 2.0
+    tof: 0.05
+    source: "outputs/perception/gate/gate_rule.json stress.severity"
+    selected_by: "stress.select_severity() on gate-validation only"
+  decided_by: advisor
+  decided_on: "2026-09-01"
+  source: "SRC-PLAN §3.3 / SRC-SAI FR-023"
 
 conflict_operational:
   # 規則形式已定：OperationalConflict = [argmax(p_T) != argmax(p_V)] OR [D >= delta]。
   # Conflict-Stress 是 generation condition 名稱，不等於實際發生跨模態衝突。
   rule: "argmax_mismatch_or_d_ge_delta"
-  delta: !required
-    source: "SRC-PLAN §3.3 / SRC-SAI Appendix I4"
-    reason: "delta 只能由 model_gate_validation 凍結，且不得用於篩選 formal IDs"
+  # 核定 2026-09-01：取 gate-validation 凍結的 disagreement_threshold。
+  # 兩者是同一個量（D 的 total-variation 切點），分開給值只會產生兩個
+  # 必須永遠一致卻沒有機制保證一致的數字。
+  delta: 0.48965981236738715
+  delta_source: "outputs/perception/gate/gate_rule.json gate_rule.disagreement_threshold"
+  # 只作 reporting / subgroup analysis。**不得**用 Operational Conflict
+  # 篩選、重抽或排除任何 Formal E2 ID —— 那會讓分母隨方法而變。
+  usage: REPORTING_AND_SUBGROUP_ANALYSIS_ONLY
+  must_not_filter_formal_ids: true
+  decided_by: advisor
+  decided_on: "2026-09-01"
+  source: "SRC-PLAN §3.3 / SRC-SAI Appendix I4"
 
 # ---------------------------------------------------------------------------
 # 統計
 # ---------------------------------------------------------------------------
 statistics:
-  resample_unit: scenario_id
-  stratification: condition
+  # 2026-09-01（NOTE-050）：重抽單位由 scenario_id 改為 physical_scene_family。
+  # Final E2 每個 family 有 3 realization x 4 condition = 12 列，它們是同一個
+  # 物理場景的 12 個觀測；以 scenario 重抽會把它們當成獨立樣本而低估變異。
+  # 抽到一個 family 就要把該 family 的全部 12 列一起帶入。
+  resample_unit: physical_scene_family
+  resample_unit_superseded_from: scenario_id
+  cluster_carries: "all 3 realizations x 4 conditions of the drawn family"
+  # 同一個 replicate 對所有比較方法使用同一組 family cluster，
+  # 否則方法之間的 Delta 會混入「抽到不同樣本」的雜訊。
+  shared_clusters_across_methods: true
+  stratification: class
+  stratification_superseded_from: condition
   confidence_level: 0.95
-  pair_aggregation: mean_over_training_pairs
+  # 只有一組 checkpoint pair（NOTE-050），跨 pair 平均退化為 identity。
+  pair_aggregation: identity_single_pair
+  pair_aggregation_superseded_from: mean_over_training_pairs
+  paired_methods: true
+  primary_reporting:
+    - overall_accuracy
+    - overall_macro_f1
+    - per_condition_accuracy
+    - per_condition_macro_f1
+    - paired_effect_delta
+    - cluster_bootstrap_ci_95
+  # s_A 是 normalized Evidence-Support Score，不是 calibrated posterior，
+  # 因此以 F(x) 評估 Full PC-MEF 時不得宣稱 NLL / ECE calibration（NOTE-049）。
   ece_semantics: score_calibration_diagnostic_only
+  s_a_probability_calibration_claim: false
   # 教授核定 2026-08-26（NOTE-015）。B 與 E1 取同值；seed 刻意與 E1 不同，
   # 兩組凍結於不同 lock、不同時間點，分開才不會在重跑時互相糾纏。
   # 註：本組在 final_n_per_class 決定之前就核定是正確的 —— B 是蒙地卡羅
