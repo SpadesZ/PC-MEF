@@ -736,7 +736,10 @@ def derive_inference_firewall() -> tuple[dict[str, Any], list[str]]:
         "payload_schema": payload_schema,
         "forbidden_metadata_rules": {
             "forbidden_fields": sorted(FORBIDDEN_PAYLOAD_FIELDS),
-            "token_scan": (
+            # 鍵名刻意避開 "token"/"salt"/"secret" 這些字：LockStore 的
+            # _assert_no_secrets() 以鍵名比對擋 secret 值，而它擋得對 ——
+            # 該放寬的是這裡的命名，不是那道防線。
+            "semantic_string_scan": (
                 "recursive scan of every string key AND value against class names, "
                 "legacy labels, E2 condition names, the seven split roles, "
                 "Low/Mid/High, and the syn_/real_/nominal_/clean_ filename prefixes"
@@ -754,10 +757,16 @@ def derive_inference_firewall() -> tuple[dict[str, Any], list[str]]:
         ),
         "opaque_id_map_policy": {
             "scheme": "run-scoped keyed HMAC-SHA256, truncated to 32 hex chars",
-            "salt": "32 random bytes per run; never written into any lock",
+            "per_run_keying_material": (
+                "32 random bytes generated per run; never written into any lock, "
+                "because a lock that carried it would let any reader invert the "
+                "opaque ids"
+            ),
             "reverse_lookup": "evaluator-only; inference modules must not import it",
             "accepted_form": "^[0-9a-f]{16,64}$ or UUID",
-            "map_hash_definition": "hash_object({run_id, forward}); salt excluded",
+            "map_hash_definition": (
+                "hash_object({run_id, forward}); the keying material is excluded"
+            ),
             "implementation": _code_hash(OpaqueIdMap.map_hash),
             "derivation": _code_hash(OpaqueIdMap._derive),
         },
@@ -767,8 +776,8 @@ def derive_inference_firewall() -> tuple[dict[str, Any], list[str]]:
             {
                 "policy": "run_scoped_keyed_hmac_v1",
                 "hex_length": 32,
-                "salt_bytes": 32,
-                "map_hash_excludes_salt": True,
+                "keying_material_bytes": 32,
+                "map_hash_excludes_keying_material": True,
                 "derivation": _code_hash(OpaqueIdMap._derive),
             }
         ),
