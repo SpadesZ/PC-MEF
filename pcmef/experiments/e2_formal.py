@@ -357,7 +357,6 @@ def run_formal_e2_full(
                 q_vision=float(q["q_vision"][index]),
                 q_tof=float(q["q_tof"][index]),
                 duq={k: float(v[index]) for k, v in signals.items()},
-                route=route,
             )
         try:
             decision = decide_case(

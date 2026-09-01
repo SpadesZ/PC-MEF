@@ -50,8 +50,8 @@ from pcmef.agents.pcmef_agents import (
     RetryExhaustedError,
     build_case_evidence,
     case_cache_key,
+    project_for_role,
     run_pcmef_case,
-    withhold,
 )
 from pcmef.agents.provider import (
     EVIDENCE_IMAGES_KEY,
@@ -306,11 +306,23 @@ def _binding(store_dir: Path) -> tuple[ConnectionProfile, ModelDescriptor, Any, 
 
     bindings = {b.task_code: b for b in registry.list_bindings()}
     profiles = {code: b.model_profile_id for code, b in bindings.items()}
-    if len(set(profiles.values())) != 1:
+    # 2026-09-01（NOTE-052）：四個角色**可以**分散到多把 API key，那是
+    # 吞吐決策。但 model_id 與 provider_revision 必須完全相同 —— 換模型
+    # 是科學決策，會讓 llm_runtime.lock 記載的推論器對應不到執行的東西。
+    resolved = {
+        code: registry.get_model_profile(pid) for code, pid in profiles.items()
+    }
+    identities = {
+        code: (mp.model_id, mp.provider_revision or "")
+        for code, mp in resolved.items()
+    }
+    if len(set(identities.values())) != 1:
         raise AgentError(
-            f"the four roles must share one model profile, got {profiles}"
+            "the four roles must share one model identity (model_id and "
+            f"provider_revision); got {identities}. Multiple API keys are "
+            "allowed; multiple models are not."
         )
-    model_profile = registry.get_model_profile(next(iter(profiles.values())))
+    model_profile = resolved[sorted(resolved)[0]]
     connection = registry.get_connection(model_profile.connection_id)
 
     profile = ConnectionProfile(
@@ -336,7 +348,35 @@ def _binding(store_dir: Path) -> tuple[ConnectionProfile, ModelDescriptor, Any, 
         ),
         "connection_id": connection.connection_id,
         "bound_tasks": sorted(profiles),
+        # 多把 key 時，role -> connection 的對應必須記下來：
+        # 「哪個角色打了哪一把 key」是重跑與配額診斷的前提。
+        "role_connection_map": {
+            code: resolved[code].connection_id for code in sorted(resolved)
+        },
+        "distinct_connections": sorted(
+            {mp.connection_id for mp in resolved.values()}
+        ),
     }
+    role_bindings: dict[str, tuple[Any, Any, Any]] = {}
+    if len(identity["distinct_connections"]) > 1:
+        for code, mp in resolved.items():
+            conn = registry.get_connection(mp.connection_id)
+            role_bindings[code] = (
+                get_adapter(conn.provider, resolve_secret=vault.resolve),
+                ConnectionProfile(
+                    connection_id=conn.connection_id,
+                    provider=conn.provider,
+                    secret_ref=conn.secret_ref,
+                    base_url=conn.base_url or "",
+                    timeout_sec=conn.timeout_sec,
+                ),
+                ModelDescriptor(
+                    model_id=mp.model_id,
+                    provider=conn.provider,
+                    provider_revision=mp.provider_revision or "",
+                ),
+            )
+    identity["role_bindings"] = role_bindings
     return profile, descriptor, adapter, identity
 
 
@@ -420,27 +460,54 @@ def _check_wire(records: list[WireRecord], checks: list[CheckResult]) -> None:
 def _check_isolation(evidence: dict, checks: list[CheckResult]) -> None:
     """角色隔離必須發生在 payload，而不是只寫在 prompt 裡。"""
     body = {k: v for k, v in evidence.items() if k != EVIDENCE_IMAGES_KEY}
-    physics = withhold(AGENTS["physics_agent"], body)
-    visual = withhold(AGENTS["visual_semantic_agent"], body)
-    observation = withhold(AGENTS["observation_agent"], body)
+    physics = project_for_role("physics_agent", body)
+    visual = project_for_role("visual_semantic_agent", body)
+    observation = project_for_role("observation_agent", body)
+    arbitration = project_for_role("arbitration_agent", body)
+
+    def flat(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False)
 
     checks.append(CheckResult(
         "physics_receives_no_vision_evidence",
         physics["calibrated_class_probabilities"].get("vision") is None
-        and "q_vision" not in physics["modality_reliability"],
-        f"withheld={physics['withheld_from_this_role']}",
+        and "q_vision" not in flat(physics)
+        and "Q_vision" not in flat(physics)
+        and "U_vision" not in flat(physics),
+        f"sections={sorted(physics)}",
     ))
     checks.append(CheckResult(
         "visual_receives_no_tof_prediction",
         "tof_summary" not in visual
         and visual["calibrated_class_probabilities"].get("tof") is None
-        and "q_tof" not in visual["modality_reliability"],
-        f"withheld={visual['withheld_from_this_role']}",
+        and "q_tof" not in flat(visual)
+        and "Q_tof" not in flat(visual),
+        f"sections={sorted(visual)}",
     ))
     checks.append(CheckResult(
         "observation_receives_no_class_probabilities",
-        "calibrated_class_probabilities" not in observation,
-        f"withheld={observation['withheld_from_this_role']}",
+        "calibrated_class_probabilities" not in observation
+        and "modality_reliability" not in observation
+        and "cross_modal" not in observation
+        and "predictive_entropy" not in observation,
+        f"sections={sorted(observation)}",
+    ))
+    checks.append(CheckResult(
+        "no_role_receives_the_gate_route",
+        all("gate_route" not in flat(p)
+            for p in (observation, physics, visual, arbitration)),
+        "gate_route correlates with condition and is withheld from every role",
+    ))
+    checks.append(CheckResult(
+        "arbitration_gets_numerics_but_not_raw_evidence",
+        "cross_modal" in arbitration and "tof_summary" not in arbitration,
+        f"sections={sorted(arbitration)}",
+    ))
+    checks.append(CheckResult(
+        "specialists_only_disagree_on_independent_evidence",
+        not ({"vision", "q_vision", "Q_vision", "U_vision"} & set(flat(physics).split('"')))
+        and not ({"tof", "q_tof", "Q_tof", "U_tof"} & set(flat(visual).split('"'))),
+        "neither specialist sees any quantity from the other modality",
     ))
     checks.append(CheckResult(
         "reliability_is_not_derived_from_softmax_or_entropy",
@@ -560,7 +627,7 @@ def run_real_validation(
             image=case["image"], tof=case["tof"],
             p_vision=case["p_vision"], p_tof=case["p_tof"],
             q_vision=case["q_vision"], q_tof=case["q_tof"],
-            duq=case["duq"], route=case["route"],
+            duq=case["duq"],
         )
         say(f"case {case['index']} route={case['route']} -> four real calls")
         runner = AgentRunner(adapter=adapter, connection=profile, model=descriptor)

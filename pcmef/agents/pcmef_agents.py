@@ -57,6 +57,11 @@ from pcmef.agents.provider import (
     ProviderError,
     ProviderResponse,
 )
+# CLASS_ORDER 原本在本檔重新宣告一份字面值。那是漂移風險而不只是重複 ——
+# agent_schema.lock 記載的 class_order 取自 pcmef.core.constants.CLASS_ORDER，
+# 但 agent 實際用的是那一份；兩者若不一致，lock 會證明一個 agent 沒用過的
+# 順序，而且不會有任何症狀（NOTE-052）。
+from pcmef.core.constants import CLASS_ORDER, TOF_SCHEMA
 from pcmef.core.hash import hash_file, hash_object
 
 __all__ = [
@@ -94,8 +99,6 @@ REPRESENTATION_MODE = "FIXED_SUMMARY"
 #: 第一次 + 一次 retry。與 configs/base.yaml 的 agents.retry.max_attempts 一致。
 MAX_ATTEMPTS = 2
 
-#: 四個類別的固定順序，與 configs/base.yaml 的 agents.class_order 相同。
-CLASS_ORDER: tuple[str, ...] = ("Empty", "Water-filled", "Bubbly", "Misty")
 
 
 #: 每份 prompt 都必須逐字出現的一句話。
@@ -319,7 +322,14 @@ def encode_image_evidence(rgb: np.ndarray, mime_type: str = "image/png") -> dict
 
 
 def tof_fixed_summary(tof: np.ndarray) -> dict[str, float]:
-    """ToF 回波的固定欄位摘要。
+    """**已廢止（NOTE-052）。** 跨 channel 攤平的 ToF 摘要。
+
+    保留原因只有一個：v1 vs v2 的 regression 比較需要能重算 v1 的值。
+    **不得**在任何新的 payload 路徑使用；正式路徑一律用
+    `tof_fixed_summary_v2_channel_preserving()`。
+
+    廢止理由見 v2 的 docstring：攤平之後四個不同單位的 channel 被當成
+    同一個量的連續取樣，peak/centroid/spread 因此不對應任何可量測的東西。
 
     §18 FIXED_SUMMARY：欄位集合固定，因此每個 case 的 prompt 長度一致。
     長度一致本身是必要的 —— 長度隨 case 變動會讓 case 之間的條件不同，
@@ -355,6 +365,88 @@ def tof_fixed_summary(tof: np.ndarray) -> dict[str, float]:
     }
 
 
+#: v2 摘要的版本識別。它進 runtime_config_hash，因此改它等同改 runtime identity。
+TOF_SUMMARY_VERSION = "tof_fixed_summary_v2_channel_preserving"
+
+#: 每個 channel 固定回報的六個統計量。順序固定，長度固定。
+TOF_CHANNEL_STATISTICS: tuple[str, ...] = (
+    "mean", "std", "median", "p10", "p90", "temporal_diff_std",
+)
+
+
+def tof_fixed_summary_v2_channel_preserving(tof: np.ndarray) -> dict[str, Any]:
+    """(n, 4) ToF recording 的 **channel-preserving** 固定欄位摘要。
+
+    v1（`tof_fixed_summary`）把 500x4 攤平成一條 2000 點「波形」再取
+    peak / centroid / spread。那是錯的，而且錯得不明顯：攤平之後
+    `distance_mm`（毫米）、`ambient_rate_mcps` 與 `signal_rate_mcps`
+    （每秒百萬計數）、`sigma_like`（無因次寬度）被當成同一個量的連續取樣。
+    argmax 落在哪裡完全由**單位最大的那個 channel** 決定，質心則是四個
+    不同物理量的加權平均 —— 它不對應任何可量測的東西。v1 因此正式廢止。
+
+    v2 固定保留四個 channel 各自獨立摘要：欄位集合與順序固定
+    （§18 FIXED_SUMMARY 要求逐 case 等長），channel 名稱與單位語意原樣保留，
+    且**不含**任何 GT / condition / family metadata。
+    """
+    array = np.asarray(tof, dtype=np.float64)
+    if array.ndim != 2 or array.shape[1] != len(TOF_SCHEMA):
+        raise AgentError(
+            f"ToF evidence must be (n, {len(TOF_SCHEMA)}) with channels "
+            f"{list(TOF_SCHEMA)}, got shape {array.shape}. v2 refuses a flattened "
+            "waveform: mixing channels was exactly the v1 defect."
+        )
+    if array.shape[0] < 2:
+        raise AgentError(
+            f"ToF evidence has {array.shape[0]} sample(s); temporal statistics "
+            "need at least 2"
+        )
+
+    channels: dict[str, dict[str, float]] = {}
+    for index, name in enumerate(TOF_SCHEMA):
+        column = array[:, index]
+        # temporal_diff_std 是唯一對時間順序敏感的量。分開命名而不是混進
+        # std，讓「打亂時間順序只會動到它」成為可測試的性質。
+        channels[name] = {
+            "mean": round(float(np.mean(column)), 6),
+            "std": round(float(np.std(column)), 6),
+            "median": round(float(np.median(column)), 6),
+            "p10": round(float(np.percentile(column, 10.0)), 6),
+            "p90": round(float(np.percentile(column, 90.0)), 6),
+            "temporal_diff_std": round(float(np.std(np.diff(column))), 6),
+        }
+
+    signal = array[:, TOF_SCHEMA.index("signal_rate_mcps")]
+    ambient = array[:, TOF_SCHEMA.index("ambient_rate_mcps")]
+    distance = array[:, TOF_SCHEMA.index("distance_mm")]
+    # 以 median 相除而不是 mean：兩者都是重尾的計數率，median 對單一尖峰
+    # 不敏感，而 gate 的 Q_tof 也是用 median 定義的（同一個讀法）。
+    ratio = float(np.median(signal)) / max(float(np.median(ambient)), 1e-12)
+    valid = np.isfinite(array).all(axis=1) & (distance > 0.0)
+
+    return {
+        "summary_version": TOF_SUMMARY_VERSION,
+        "channel_order": list(TOF_SCHEMA),
+        "n_samples": int(array.shape[0]),
+        "channels": channels,
+        "derived": {
+            "signal_to_ambient_ratio": round(ratio, 6),
+            "valid_sample_ratio": round(float(valid.mean()), 6),
+            "_meaning": (
+                "signal_to_ambient_ratio is median(signal_rate_mcps) / "
+                "median(ambient_rate_mcps); valid_sample_ratio is the fraction "
+                "of samples whose four channels are all finite and whose "
+                "distance_mm is positive."
+            ),
+        },
+        "_meaning": (
+            "Per-channel statistics of a multi-channel ToF recording. The four "
+            "channels are different physical quantities in different units and "
+            "are never combined: there is no cross-channel peak, centroid or "
+            "spread. temporal_diff_std is the only order-sensitive statistic."
+        ),
+    }
+
+
 def _class_distribution(proba: Sequence[float]) -> dict[str, float]:
     values = [float(v) for v in proba]
     if len(values) != len(CLASS_ORDER):
@@ -374,7 +466,6 @@ def build_case_evidence(
     q_vision: float,
     q_tof: float,
     duq: Mapping[str, float],
-    route: str,
 ) -> dict[str, Any]:
     """組成一個 case 的 FIXED_SUMMARY 證據包。
 
@@ -390,11 +481,31 @@ def build_case_evidence(
             "(an already-encoded entry); supplying both makes it ambiguous "
             "which one actually reached the provider"
         )
+    number = lambda v: round(float(v), 6)  # noqa: E731
+    cues = {k: number(v) for k, v in duq.items()}
     return {
         "schema_version": "1.0",
         "representation_mode": REPRESENTATION_MODE,
+        "evidence_contract_version": ROLE_EVIDENCE_CONTRACT_VERSION,
         "class_order": list(CLASS_ORDER),
-        "tof_summary": tof_fixed_summary(tof),
+        "tof_summary": tof_fixed_summary_v2_channel_preserving(tof),
+        # Q 與 D/U 拆開：Q 只由**輸入本身**算得出（銳利度 / SNR），
+        # 是 Observation Agent 可以看的原始感測品質；D/U 由模型輸出導出，
+        # 屬於已解讀的量，只給需要它們的角色。
+        "sensing_quality_cues": {
+            # _meaning 一律**不指名另一個模態**。它會跟著 modality_scoped 的
+            # 欄位一起送到 specialist 手上，若在這裡寫「Q_vision 是影像的
+            # 高頻能量」，physics agent 就從一句說明得知了 vision 側的存在與
+            # 讀法 —— 那是同一種 anchoring，只是換成散文形式。
+            # 各模態的具體讀法寫在該角色自己的 prompt 裡。
+            "_meaning": (
+                "raw observable sensing quality for the modality shown below, "
+                "computed from that sensor's input alone and independent of any "
+                "classifier output. Higher means a cleaner input."
+            ),
+            "Q_vision": cues.get("Q_vision"),
+            "Q_tof": cues.get("Q_tof"),
+        },
         "calibrated_class_probabilities": {
             "_meaning": (
                 "temperature-calibrated p(y|x) from the frozen per-modality "
@@ -409,8 +520,8 @@ def build_case_evidence(
                 "evidence plus cross-modal support. Independent of p(y|x). "
                 "q >= 0.5 counts as reliable."
             ),
-            "q_vision": round(float(q_vision), 6),
-            "q_tof": round(float(q_tof), 6),
+            "q_vision": number(q_vision),
+            "q_tof": number(q_tof),
             "evidence_sources": [
                 "sensor_quality", "degradation_margin", "cross_modal_support",
             ],
@@ -420,14 +531,28 @@ def build_case_evidence(
                 "predictive entropy",
             ],
         },
-        "duq_signals": {
+        "predictive_entropy": {
             "_meaning": (
-                "D = total-variation disagreement between the two modalities, "
-                "U = normalised predictive entropy, Q = raw sensor quality."
+                "the normalised predictive entropy of the modality's own "
+                "classifier, shown below. It is a property of p(y|x) and is NOT "
+                "sensor reliability."
             ),
-            **{k: round(float(v), 6) for k, v in sorted(duq.items())},
+            "U_vision": cues.get("U_vision"),
+            "U_tof": cues.get("U_tof"),
         },
-        "gate_route": route,
+        "cross_modal": {
+            "_meaning": (
+                "D is the total-variation distance between the two modalities' "
+                "class probabilities. It is symmetric and belongs to neither "
+                "modality, so it goes only to the arbiter."
+            ),
+            "D": cues.get("D"),
+        },
+        # gate_route 刻意**不再**放進 evidence bundle（NOTE-052）。
+        # 它與 condition 高度相關（degraded 的 case 才會 trust_*），
+        # 等於把「這一筆被劣化過」告訴模型，而那是 benchmark metadata。
+        # 路由由系統決定，agent 不需要知道自己是怎麼被叫來的。
+        "route_withheld_from_all_roles": True,
         # image 允許傳入**已編碼**的影像：real validation 把 perception 放在
         # 主機（需要 torch）、把 provider 呼叫放在容器（需要 vault），兩段之間
         # 傳的是 PNG bytes 而不是 EXR 路徑。編碼結果與 encode_image_evidence
@@ -491,6 +616,43 @@ class AgentRunner:
     max_attempts: int = MAX_ATTEMPTS
     temperature: float = FORMAL_TEMPERATURE
     attempts: list[AttemptLog] = field(default_factory=list)
+    #: 逐角色的 (adapter, connection, model)。用於把四個角色分散到多把
+    #: API key —— 同一個 model_id + provider_revision，不同 connection。
+    #: 空的時候四個角色共用上面那一組。
+    #:
+    #: 這**不是**多模型：模型與版本必須相同，否則四個角色就不是同一個
+    #: 推論器，而 llm_runtime.lock 記的 model identity 會對應不到執行的東西。
+    #: 一致性由 assert_single_model_identity() 檢查，不靠呼叫端自律。
+    role_bindings: dict[str, tuple[Any, Any, Any]] = field(default_factory=dict)
+
+    def binding_for(self, task_code: str) -> tuple[Any, Any, Any]:
+        """回傳這個角色實際使用的 (adapter, connection, model)。"""
+        if task_code in self.role_bindings:
+            return self.role_bindings[task_code]
+        return self.adapter, self.connection, self.model
+
+    def assert_single_model_identity(self) -> None:
+        """四個角色的 model_id 與 provider_revision 必須完全相同。
+
+        分散到多把 key 是**吞吐**決策；換模型是**科學**決策。
+        這道檢查讓前者不會悄悄變成後者。
+        """
+        identities = {
+            code: (
+                getattr(self.binding_for(code)[2], "model_id", None),
+                getattr(self.binding_for(code)[2], "provider_revision", None),
+            )
+            for code in AGENTS
+        }
+        distinct = set(identities.values())
+        if len(distinct) > 1:
+            raise AgentError(
+                "the four roles must share one model identity (model_id and "
+                f"provider_revision); got {identities}. Splitting roles across "
+                "API keys is allowed for throughput, but splitting them across "
+                "models would mean llm_runtime.lock names an inference engine "
+                "that never ran."
+            )
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -545,8 +707,9 @@ class AgentRunner:
             if correction:
                 outgoing["format_correction"] = correction
             try:
-                response = self.adapter.invoke(
-                    self.connection, self.model, spec.task_code, outgoing, runtime_cfg
+                adapter, connection, model = self.binding_for(spec.task_code)
+                response = adapter.invoke(
+                    connection, model, spec.task_code, outgoing, runtime_cfg
                 )
                 parsed = _extract_json(response.text)
                 jsonschema.validate(parsed, schema)
@@ -614,12 +777,15 @@ _MODALITY_FIELDS: dict[str, tuple[tuple[str, ...], ...]] = {
 
 
 def withhold(spec: AgentSpec, payload: Mapping[str, Any]) -> dict[str, Any]:
-    """把這個角色不該看到的模態證據從 payload 中移除。
+    """**已由 `project_for_role()` 取代（NOTE-052）。**
 
-    角色隔離必須是**結構上的**。prompt 說「不准看 RGB」但 payload 裡放著
-    p_vision，就跟叫 vision agent 別把路徑當影像一樣不可靠 —— 講了不算數，
-    沒送到才算數。這也讓兩位專家的一致度仍然是獨立證據：他們看的東西
-    真的不重疊。
+    保留為 v1 相容路徑，供 regression 比較重建舊 payload 之用；
+    正式路徑不得再呼叫。
+
+    舊做法是**減法**：從完整 payload 移除該角色不該看的欄位。減法的問題
+    在於它對「新增的欄位」預設放行 —— 之後任何人往 evidence bundle 加一個
+    欄位，四個角色全部自動看得到，而且不會有任何測試失敗。
+    v2 改為加法（正向白名單），新欄位預設不送。
     """
     if not spec.withheld_keys:
         return dict(payload)
@@ -638,6 +804,131 @@ def withhold(spec: AgentSpec, payload: Mapping[str, Any]) -> dict[str, Any]:
                 removed.append(".".join(path))
     result["withheld_from_this_role"] = sorted(removed)
     return result
+
+
+#: 角色證據契約的版本識別。進 runtime_config_hash。
+ROLE_EVIDENCE_CONTRACT_VERSION = "role_evidence_contract_v2"
+
+#: 每個角色**可以收到**的欄位。正向白名單，不是黑名單。
+#:
+#: 設計原則不是「每個 agent 資訊越少越好」，而是只移除兩件事：
+#:   1. 角色重複 —— specialists 已經解讀過的 raw evidence 不再送給 arbiter
+#:   2. 跨模態 anchoring —— 專家不看另一個模態的任何量，兩份意見才是獨立證據
+#:
+#: `predictive confidence is NOT sensor reliability` 由結構維持：
+#: p_m 與 q_m 永遠分屬不同區塊且各自帶 _meaning，任何角色拿到其中一個
+#: 都同時拿到另一個的語意說明。
+#:
+#: `gate_route` 不在任何角色的白名單內：它與 condition 高度相關，
+#: 送出去等於洩漏 benchmark metadata。
+ROLE_EVIDENCE_CONTRACT_V2: dict[str, dict[str, Any]] = {
+    "observation_agent": {
+        "receives_image": True,
+        "common": ("schema_version", "representation_mode",
+                   "evidence_contract_version", "class_order"),
+        "sections": ("tof_summary", "sensing_quality_cues"),
+        "modality_scoped": (),
+        "rationale": (
+            "factual observation only. It does not classify, so it receives no "
+            "classifier output at all: no p_m, no q_m, no D, no U. Q_* is raw "
+            "sensing quality computed from the input itself, which is an "
+            "observation rather than an interpretation."
+        ),
+    },
+    "physics_agent": {
+        "receives_image": False,
+        "common": ("schema_version", "representation_mode",
+                   "evidence_contract_version", "class_order"),
+        "sections": ("tof_summary", "observation_brief"),
+        # (section, key) 只保留該模態那一側。
+        "modality_scoped": (
+            ("calibrated_class_probabilities", "tof"),
+            ("modality_reliability", "q_tof"),
+            ("sensing_quality_cues", "Q_tof"),
+            ("predictive_entropy", "U_tof"),
+        ),
+        "rationale": (
+            "the ToF specialist. It sees its own modality's evidence and its own "
+            "numerics, and nothing from vision -- otherwise its agreement with "
+            "the visual specialist stops being independent evidence. D is "
+            "withheld because D is a cross-modal quantity and belongs to the "
+            "arbiter."
+        ),
+    },
+    "visual_semantic_agent": {
+        "receives_image": True,
+        "common": ("schema_version", "representation_mode",
+                   "evidence_contract_version", "class_order"),
+        "sections": ("observation_brief",),
+        "modality_scoped": (
+            ("calibrated_class_probabilities", "vision"),
+            ("modality_reliability", "q_vision"),
+            ("sensing_quality_cues", "Q_vision"),
+            ("predictive_entropy", "U_vision"),
+        ),
+        "rationale": (
+            "the vision specialist, mirror image of the physics role. It gets "
+            "the image and its own numerics; no ToF summary, no ToF numerics, "
+            "no D."
+        ),
+    },
+    "arbitration_agent": {
+        "receives_image": False,
+        "common": ("schema_version", "representation_mode",
+                   "evidence_contract_version", "class_order"),
+        "sections": ("observation_brief", "anonymous_proposals",
+                     "calibrated_class_probabilities", "modality_reliability",
+                     "predictive_entropy", "cross_modal", "sensing_quality_cues"),
+        "modality_scoped": (),
+        "rationale": (
+            "final evidence arbitration. It keeps the full numerical picture "
+            "including D, because deciding between two proposals is exactly what "
+            "those numbers are for. It does NOT get the raw image or the raw ToF "
+            "summary: both specialists have already read them, and re-sending "
+            "raw evidence would duplicate their role rather than arbitrate it."
+        ),
+    },
+}
+
+
+def project_for_role(
+    task_code: str, evidence: Mapping[str, Any], extras: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """依 `role_evidence_contract_v2` 組出一個角色實際收到的 payload。
+
+    正向選取（加法），不是移除（減法）。未列在白名單的欄位一律不送，
+    因此之後往 evidence bundle 加欄位不會自動洩漏給四個角色。
+    """
+    contract = ROLE_EVIDENCE_CONTRACT_V2.get(task_code)
+    if contract is None:
+        raise AgentError(
+            f"no evidence contract for role {task_code!r}; "
+            f"known roles: {sorted(ROLE_EVIDENCE_CONTRACT_V2)}"
+        )
+    source: dict[str, Any] = {**evidence, **(extras or {})}
+    payload: dict[str, Any] = {}
+
+    for key in contract["common"]:
+        if key in source:
+            payload[key] = source[key]
+    for key in contract["sections"]:
+        if key in source:
+            payload[key] = source[key]
+
+    for section, field_name in contract["modality_scoped"]:
+        block = source.get(section)
+        if not isinstance(block, dict) or field_name not in block:
+            continue
+        kept = payload.setdefault(section, {})
+        # _meaning 一併帶上：那是 p_m 與 q_m 語意區分的載體，
+        # 少了它角色就只拿到一個沒有說明的數字。
+        if "_meaning" in block:
+            kept["_meaning"] = block["_meaning"]
+        kept[field_name] = block[field_name]
+
+    payload["evidence_contract_version"] = ROLE_EVIDENCE_CONTRACT_VERSION
+    payload["role"] = task_code
+    return payload
 
 
 def _image_digests(payload: Mapping[str, Any]) -> list[str]:
@@ -689,14 +980,16 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
 
     observation, response = runner.run(
         AGENTS["observation_agent"],
-        withhold(AGENTS["observation_agent"], body),
+        project_for_role("observation_agent", body),
         images=images,
     )
     track(response)
 
     physics, response = runner.run(
         AGENTS["physics_agent"],
-        withhold(AGENTS["physics_agent"], {**body, "observation_brief": observation}),
+        project_for_role(
+            "physics_agent", body, {"observation_brief": observation}
+        ),
         images=[],
     )
     track(response)
@@ -708,9 +1001,8 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
 
     visual, response = runner.run(
         AGENTS["visual_semantic_agent"],
-        withhold(
-            AGENTS["visual_semantic_agent"],
-            {**body, "observation_brief": observation},
+        project_for_role(
+            "visual_semantic_agent", body, {"observation_brief": observation}
         ),
         images=images,
     )
@@ -723,13 +1015,15 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
 
     arbitration, response = runner.run(
         AGENTS["arbitration_agent"],
-        {
-            **body,
-            "observation_brief": observation,
-            # 匿名化：仲裁者看得到是哪個模態（schema 要求），但看不到
-            # 任何 agent 身分或呼叫順序以外的線索。
-            "anonymous_proposals": [physics, visual],
-        },
+        project_for_role(
+            "arbitration_agent", body,
+            {
+                "observation_brief": observation,
+                # 匿名化：仲裁者看得到是哪個模態（schema 要求），但看不到
+                # 任何 agent 身分或呼叫順序以外的線索。
+                "anonymous_proposals": [physics, visual],
+            },
+        ),
         images=[],
     )
     track(response)

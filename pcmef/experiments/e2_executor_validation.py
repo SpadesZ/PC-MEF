@@ -346,7 +346,6 @@ def run_executor_validation(
         q_vision=float(prepared["q"]["q_vision"][probe]),
         q_tof=float(prepared["q"]["q_tof"][probe]),
         duq={k: float(v[probe]) for k, v in prepared["signals"].items()},
-        route=str(routes[probe]),
     )
     checks.append(check_no_leakage(evidence))
 
@@ -394,7 +393,6 @@ def run_executor_validation(
                 q_vision=float(prepared["q"]["q_vision"][index]),
                 q_tof=float(prepared["q"]["q_tof"][index]),
                 duq={k: float(v[index]) for k, v in prepared["signals"].items()},
-                route=str(routes[index]),
             )
             decision = decide_case(
                 "escalated", prepared["p_vision"][index], prepared["p_tof"][index],

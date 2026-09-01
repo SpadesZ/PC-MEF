@@ -55,7 +55,7 @@ from pcmef.agents.pcmef_agents import (
     case_cache_key,
     encode_image_evidence,
     run_pcmef_case,
-    tof_fixed_summary,
+    tof_fixed_summary_v2_channel_preserving,
 )
 
 SCHEMA_DIR = Path("schemas")
@@ -106,13 +106,19 @@ def evidence() -> dict:
     rng = np.random.default_rng(7)
     return build_case_evidence(
         rgb=rng.random((64, 64, 3)),
-        tof=np.abs(rng.normal(size=500)) + 0.1,
+        # v2 需要 (n, 4) 的 channel-preserving 錄製，不再接受攤平波形。
+        tof=np.column_stack([
+            rng.normal(90.0, 2.0, 500),
+            rng.gamma(2.0, 0.03, 500),
+            rng.gamma(4.0, 3.0, 500),
+            rng.gamma(3.0, 0.4, 500),
+        ]),
         p_vision=[0.7, 0.1, 0.1, 0.1],
         p_tof=[0.1, 0.6, 0.2, 0.1],
         q_vision=0.82,
         q_tof=0.31,
-        duq={"D": 0.55, "U": 0.42, "Q_vision": 120.0, "Q_tof": 15.3},
-        route="escalated",
+        duq={"D": 0.55, "U_vision": 0.42, "U_tof": 0.61,
+             "Q_vision": 120.0, "Q_tof": 15.3},
     )
 
 
@@ -431,7 +437,7 @@ def test_cache_key_is_stable_and_evidence_sensitive(evidence):
     first = case_cache_key(evidence, **kwargs)
     assert first.digest() == case_cache_key(evidence, **kwargs).digest()
 
-    changed = {**evidence, "gate_route": "trust_vision"}
+    changed = {**evidence, "sensing_quality_cues": {"Q_vision": 9.9, "Q_tof": 1.1}}
     assert case_cache_key(changed, **kwargs).digest() != first.digest()
 
     rng = np.random.default_rng(99)
@@ -454,10 +460,21 @@ def test_reliability_and_confidence_are_separately_labelled(evidence):
 
 
 def test_fixed_summary_length_is_constant_across_cases():
-    """FIXED_SUMMARY 的欄位集合必須逐 case 相同，否則 prompt 長度變成變因。"""
+    """FIXED_SUMMARY 的欄位集合必須逐 case 相同，否則 prompt 長度變成變因。
+
+    v1 的 tof_fixed_summary 已廢止（NOTE-052），這裡改測 v2；
+    逐 channel 的欄位比對在 tests/agents/test_evidence_contract_v2.py。
+    """
     rng = np.random.default_rng(3)
-    a = tof_fixed_summary(np.abs(rng.normal(size=500)))
-    b = tof_fixed_summary(np.abs(rng.normal(size=500)) * 100.0)
+    def recording(scale):
+        return np.column_stack([
+            rng.normal(90.0, 2.0, 500) * scale,
+            rng.gamma(2.0, 0.03, 500),
+            rng.gamma(4.0, 3.0, 500),
+            rng.gamma(3.0, 0.4, 500),
+        ])
+    a = tof_fixed_summary_v2_channel_preserving(recording(1.0))
+    b = tof_fixed_summary_v2_channel_preserving(recording(100.0))
     assert set(a) == set(b)
 
 
@@ -481,29 +498,28 @@ def test_physics_never_receives_vision_evidence(runner, stub, evidence):
     sent = _sent_payload(stub, "physics_agent")
     # withheld_from_this_role 是稽核用的欄位**名稱**清單，不含任何值，
     # 因此檢查洩漏時要把它排除，否則會把稽核紀錄本身誤判為洩漏。
-    text = json.dumps(
-        {k: v for k, v in sent.items() if k != "withheld_from_this_role"},
-        ensure_ascii=False,
-    )
+    text = json.dumps(sent, ensure_ascii=False)
 
     assert "q_vision" not in text
     assert "Q_vision" not in text
+    assert "U_vision" not in text
+    # D 是跨模態量，只給仲裁者。
+    assert '"D"' not in text
     assert sent["calibrated_class_probabilities"].get("vision") is None
     # ToF 側必須完整保留，否則它沒東西可推理。
-    assert sent["tof_summary"]["peak_bin"] is not None
+    assert sent["tof_summary"]["channels"]["signal_rate_mcps"]["median"] is not None
     assert sent["modality_reliability"]["q_tof"] == 0.31
 
 
 def test_visual_never_receives_tof_evidence(runner, stub, evidence):
     run_pcmef_case(runner, evidence)
     sent = _sent_payload(stub, "visual_semantic_agent")
-    text = json.dumps(
-        {k: v for k, v in sent.items() if k != "withheld_from_this_role"},
-        ensure_ascii=False,
-    )
+    text = json.dumps(sent, ensure_ascii=False)
 
     assert "tof_summary" not in sent
     assert "q_tof" not in text
+    assert "U_tof" not in text
+    assert '"D"' not in text
     assert sent["calibrated_class_probabilities"].get("tof") is None
     assert sent["modality_reliability"]["q_vision"] == 0.82
 
@@ -514,9 +530,12 @@ def test_observation_never_receives_class_probabilities(runner, stub, evidence):
     sent = _sent_payload(stub, "observation_agent")
 
     assert "calibrated_class_probabilities" not in sent
-    # 但可靠度與品質證據要留著 —— 那正是它要評估的東西。
-    assert sent["modality_reliability"]["q_vision"] == 0.82
-    assert sent["duq_signals"]["Q_tof"] == 15.3
+    # v2：它也不再收到 q_m / D / U —— 那些全是分類器輸出的函數。
+    # 留下的是**由輸入本身算得出**的原始感測品質，那才是它要觀察的東西。
+    assert "modality_reliability" not in sent
+    assert "cross_modal" not in sent
+    assert "predictive_entropy" not in sent
+    assert sent["sensing_quality_cues"]["Q_tof"] == 15.3
 
 
 def test_arbitration_sees_both_sides(runner, stub, evidence):
@@ -528,15 +547,24 @@ def test_arbitration_sees_both_sides(runner, stub, evidence):
     assert sent["calibrated_class_probabilities"]["tof"]
     assert sent["modality_reliability"]["q_vision"] == 0.82
     assert sent["modality_reliability"]["q_tof"] == 0.31
+    assert sent["cross_modal"]["D"] == 0.55
     assert len(sent["anonymous_proposals"]) == 2
+    # 但 raw evidence 不重複送：兩位專家已經讀過了。
+    assert "tof_summary" not in sent
 
 
-def test_withholding_is_recorded_so_it_is_auditable(runner, stub, evidence):
-    """拿掉了什麼要留下痕跡，否則沒有人查得出隔離有沒有真的發生。"""
+def test_every_payload_names_its_role_and_contract(runner, stub, evidence):
+    """每個 payload 都要說得出自己是哪個角色、依哪一版契約組出來的。
+
+    v1 靠 withheld_from_this_role 記「拿掉了什麼」；v2 是正向白名單，
+    該記的是「依哪一份契約選了什麼」—— 契約版本才是可稽核的錨點。
+    """
     run_pcmef_case(runner, evidence)
-    withheld = _sent_payload(stub, "physics_agent")["withheld_from_this_role"]
-    assert "calibrated_class_probabilities.vision" in withheld
-    assert "modality_reliability.q_vision" in withheld
+    for role in ("observation_agent", "physics_agent",
+                 "visual_semantic_agent", "arbitration_agent"):
+        sent = _sent_payload(stub, role)
+        assert sent["role"] == role
+        assert sent["evidence_contract_version"] == "role_evidence_contract_v2"
 
 
 # ---------------------------------------------------------------------------
