@@ -32,6 +32,21 @@ registry/*.db
 !freeze/amendments/
 !freeze/amendments/*.amendment.json
 
+# corrective run（freeze/runs/<id>/）的 lock 與延用的證據副本同理：
+# 兩者都由 `corrective open-run` 重產得出。上面第一條只比對單層路徑，
+# 因此 runs/ 底下必須另寫；少了它，更正 run 的 lock 會進版控而 parent 的
+# 不會 —— 同一種東西兩種待遇，還會讓人以為版控裡那一份才是權威。
+# 權威一律是 freeze/ 下的檔案本身，版控留的是產生它的程式與決策記錄。
+freeze/runs/*/*.lock.json
+freeze/runs/*/amendments/
+freeze/runs/*/errata/
+freeze/runs/*/preregistrations/
+freeze/runs/*/stages/
+freeze/runs/*/calibration/
+# 但 lineage 記錄要留：它記的是「哪一個 identity 被 supersede、理由是什麼」，
+# 與 amendment 同一類 —— 檔案重產得出來，當時的決策脈絡重產不出來。
+!freeze/runs/*/corrective_lineage.json
+
 # 本機開發工具設定。launch.json 寫死了直譯器名稱與埠號，是個別機器的東西；
 # 用 Docker 接手的人拿到它只會困惑。刻意只忽略這一個檔而不是整個 .claude/，
 # 將來若要共用 settings 或 agent 定義，那些仍然進得了版控。
