@@ -3037,6 +3037,36 @@ def cmd_corrective_freeze_formal_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_corrective_throughput_ladder(args: argparse.Namespace) -> int:
+    """免費層吞吐量測。operational test，不產生任何研究結論。"""
+    from pcmef.experiments.throughput_ladder import run_ladder
+
+    document = run_ladder(
+        freeze_dir=args.freeze_dir, registry_dir=args.registry_dir,
+        out_dir=args.out, max_level=args.max_level,
+        progress=lambda message: print(message, flush=True),
+    )
+    print(f"\n  {'level':>6}{'outcome':>10}{'cases':>8}{'requests':>10}"
+          f"{'429 at':>8}{'retries':>9}{'wall s':>9}")
+    for level in document["levels"]:
+        print(f"  {level['level_cases']:>6}{level['outcome']:>10}"
+              f"{level['successful_cases']:>8}{level['total_api_requests']:>10}"
+              f"{str(level['first_429_request_index'] or '-'):>8}"
+              f"{level['retries']:>9}{level['wall_time_sec']:>9.1f}")
+    usage = document["cumulative_usage"]
+    print(f"\n  FREE_TIER_MAX_SUCCESSFUL_ESCALATED_CASES = "
+          f"{document['max_successful_escalated_cases']}")
+    print(f"  FREE_TIER_MAX_SUCCESSFUL_REQUESTS        = "
+          f"{document['max_successful_requests']}")
+    print(f"  FIRST_429_REQUEST_INDEX                  = "
+          f"{document['first_429_request_index']}")
+    print(f"  cumulative tokens: {usage['prompt_tokens']:,} prompt / "
+          f"{usage['billable_output_tokens']:,} billable output "
+          f"({usage['thoughts_tokens']:,} thinking) over {usage['calls']} call(s)")
+    print(f"  FINAL_E2_36_43_TOUCHED = {document['FINAL_E2_36_43_TOUCHED']}")
+    return 0
+
+
 def cmd_corrective_estimate_cost(args: argparse.Namespace) -> int:
     """以實測 token 用量外推 Final E2 成本。沒有實測值就拒絕估。"""
     from pcmef.experiments.e2_cost import estimate
@@ -4047,6 +4077,18 @@ def build_parser() -> argparse.ArgumentParser:
     corrective_cost.add_argument("--out", default="outputs/corrective")
     corrective_cost.add_argument("--twd-per-usd", type=float, default=31.67)
     corrective_cost.set_defaults(func=cmd_corrective_estimate_cost)
+
+    corrective_ladder = corrective_sub.add_parser(
+        "throughput-ladder", help="逐級量測免費層在配額用完前能跑幾個 escalated case"
+    )
+    corrective_ladder.add_argument("--freeze-dir", default="freeze/runs/PFC-001")
+    corrective_ladder.add_argument("--registry-dir", default="registry")
+    corrective_ladder.add_argument("--out", default="outputs/corrective")
+    corrective_ladder.add_argument(
+        "--max-level", type=int, default=None,
+        help="只跑 LADDER 的前 N 級（不給就跑到第一次 429）",
+    )
+    corrective_ladder.set_defaults(func=cmd_corrective_throughput_ladder)
 
     locks_parser = subparsers.add_parser("locks", help="formal freeze 狀態")
     locks_sub = locks_parser.add_subparsers(dest="locks_command", required=True)
