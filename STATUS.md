@@ -7,6 +7,91 @@
 
 ---
 
+## PRE-FINAL CORRECTIVE PASS 完成（2026-09-01，PFC-001）
+
+**更正 run：`freeze/runs/PFC-001/`，22/22 FROZEN。
+原 `freeze/` 的 22 個 lock 一個位元都沒動，兩份 lineage 並存。**
+
+```
+corrective_amendment = AMD-006  (d616e38cc78d95be1c2fb79a28994b409281356e2a8dcff6266834a0ca599342)
+run_id               = PFC-001
+code_revision        = 90a99505fb5b9c07dddfb1c1982765e7727b74a7  (clean tree)
+
+superseded (3):
+  reliability_final  ebf4529a3d411ece… -> 6e54e11b9800ccb6…
+  gate               1ff2d66745da30a7… -> 4f04333517f9884e…
+  formal_config      cefb453a80daa976… -> aec8e88a51bb2c9e…
+
+carried forward byte-identically (19)：雜湊全部不變，包含
+  validation_pool / agent_schema / llm_runtime / inference_firewall /
+  conflict_operational / e2_sample_size / statistics_config
+```
+
+更正內容與理由見 NOTE-051 與 AMD-006。三個要點：
+
+- **reliability anchors 改在 effective 93 上重擬合**（原本擬合在 96，含
+  已判定重複的 `Empty f27`）。一個 case 的路由改變：
+  `fusion 77/trust_vision 8` → `fusion 76/trust_vision 9`，escalated 維持 2。
+- **gate 數值一個都沒動。** 在 effective-93 stress set 上重跑同一套搜尋
+  逐位元重現四個門檻 —— gate search 從不使用 reliability anchors。
+  `gate.lock` 取得新 identity **只**因為它交叉引用 `reliability_config_hash`。
+- **`delta` 未變 ⇒ `conflict_operational` 未 supersede**，逐位元延用。
+
+### Full PC-MEF executor 已實作並驗證
+
+`pcmef/experiments/e2_formal.py:run_formal_e2_full()` 完整實作已凍結架構。
+**`gate.run_formal_e2()` 不得用於 Full PC-MEF**（決定性替身仲裁，
+自報 `llm_arm_evaluated: false`）。
+
+執行驗證 **15/15 PASS**（`corrective validate-executor`，容器內、真實 LLM）：
+escalated `F == s_A`、non-escalated `F == p_trad` 且 **0 次** provider 呼叫、
+formal 拒絕決定性替身、retry 耗盡即 `ABORT_FORMAL_RUN` 不 drop case、
+無 GT/condition 洩漏、family cluster 12 列、跨方法共用 cluster（CI 恰為 0）、
+輸出全部有限且和為 1。實際 8 次 provider 呼叫 = 2 case × 4 agent。
+
+### `READY_FOR_ONE_SHOT_FINAL_E2 = NO` —— 供應商配額，不是程式
+
+formal state 與 executor 都就緒，卡的是**吞吐量**：
+
+| 量 | 值 |
+|---|---|
+| 實測 escalation rate（effective-93 stress，372 列） | 142/372 = **38.2%** |
+| Final E2 推估 escalated case | ~147 / 384 列 |
+| 推估 provider 呼叫 | **~586 次**（4 agent/case），retry 前 |
+| `agents.retry.max_attempts` | 2，且 `ProviderError` 後**沒有 backoff**（原封不動立即重送） |
+
+實測 gemini-3.6-flash 免費層在連續約 9 次呼叫後回 429（per-minute，
+非 per-day —— 稍候即恢復）。兩次無間隔的重試會落在**同一個** rate-limit
+視窗內，兩次都失敗 → `ABORT_FORMAL_RUN` → 一次性的 Final E2 中途死亡。
+
+**這需要裁決，不該由實作端自行決定**：加 backoff 會改動
+`agents.retry` 的行為語意（NOTE-046 已核定 `max_attempts = 2`），
+而 retry 政策屬 `llm_runtime` 的 runtime identity 範圍。
+可能的方向（擇一，須核定後才動）：升級付費層／加入指數退避並重新評估
+runtime identity／降低 escalation 以外的方式提高單位時間吞吐。
+
+> 診斷可用性已修：provider 的 429 現在會帶出 `quota_id` / `retry_after` /
+> `status`，先前 200 字元截斷讓「等 30 秒」與「等 24 小時」長得一模一樣。
+
+### 容器已重建且與主機逐位元一致
+
+`pcmef/` 與 `configs/` 是 **COPY 進映像**（不是掛載），改碼後必須
+`docker compose build`，否則 `docker compose exec` 讀到的是舊版。
+
+本次順帶修掉三個**宣告與實作不符**的相依：
+
+| 項目 | 宣告 | 事實 |
+|---|---|---|
+| `perception` extra | `tensorflow` + `scikit-learn` | 兩者**從未被 import**；真正需要的是 `torch` |
+| 容器 | 不含 perception 組 | Full PC-MEF 需在**同一行程**內同時做 torch 推論與 provider 呼叫 |
+| `agents` extra | 無 Pillow | `encode_image_evidence()` 靠 PIL 編 PNG，是 vision 角色送圖的唯一路徑 |
+
+**torch 必須在 extras 之前安裝**（CPU wheel index）：順序顛倒會讓 pip 解出
+CUDA build，映像由 1.63 GB 漲到 **8.5 GB**，事後 force-reinstall 也拿不回來。
+目前映像 **609 MB**，torch 2.10.0+cpu，四個關鍵檔案的 SHA-256 與主機相同。
+
+---
+
 ## FINAL PRE-FLIGHT FREEZE 完成（2026-09-01）
 
 **22/22 formal lock 全部 FROZEN；`config check` 待裁決數 0；

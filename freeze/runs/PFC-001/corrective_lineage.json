@@ -22,12 +22,14 @@
     "validation_pool": "38699e754b32223c614483662651ccab5b495d83c9fb6568ea9916dfb3e21515"
   },
   "carried_forward_semantics": "byte-identical copies of the parent lock files. Their hashes are unchanged, which is the machine-checkable form of 'not re-decided'.",
+  "code_revision": "90a99505fb5b9c07dddfb1c1982765e7727b74a7",
   "correction_did_not_use_final_e2": true,
   "created_at": "2026-09-01T04:04:52.298277+00:00",
   "final_e2_36_43_generated": "NO",
   "final_e2_36_43_read": "NO",
-  "formal_config_status": "DEFERRED_UNTIL_EXECUTOR_VALIDATED",
+  "formal_config_status": "FROZEN",
   "new_lock_hashes": {
+    "formal_config": "aec8e88a51bb2c9e1535921b283e1e41d99e932a4bfa893191b98fb637618293",
     "gate": "4f04333517f9884ea72e6488210bb45479fc2986e5c4a320eb9975296cb9dc14",
     "reliability_final": "6e54e11b9800ccb62f19431fa0700d942c538121334515129a1747ec7b7a15b9"
   },
