@@ -49,29 +49,62 @@ formal 拒絕決定性替身、retry 耗盡即 `ABORT_FORMAL_RUN` 不 drop case�
 無 GT/condition 洩漏、family cluster 12 列、跨方法共用 cluster（CI 恰為 0）、
 輸出全部有限且和為 1。實際 8 次 provider 呼叫 = 2 case × 4 agent。
 
-### `READY_FOR_ONE_SHOT_FINAL_E2 = NO` —— 供應商配額，不是程式
+### `READY_FOR_ONE_SHOT_FINAL_E2 = NO` —— 免費層**每日**配額，不是成本也不是程式
 
-formal state 與 executor 都就緒，卡的是**吞吐量**：
+formal state 與 executor 都就緒。卡的是 provider 配額類型：
+
+```
+quota_id   = GenerateRequestsPerDayPerProjectPerModel-FreeTier
+status     = RESOURCE_EXHAUSTED
+retry_after = 18s        ← 這是建議重試間隔，不是配額重置時間
+```
+
+**是 per-DAY 不是 per-minute。** 先前一度誤判為 per-minute（因為隔幾分鐘
+再試會通），實際上那只是當日殘額還夠；`quota_id` 明寫 `PerDay`。
+診斷能力是這次補上的：provider 的 429 現在帶出 `quota_id` / `retry_after` /
+`status`，先前 200 字元截斷讓「等 18 秒」與「等到明天」長得一模一樣。
 
 | 量 | 值 |
 |---|---|
 | 實測 escalation rate（effective-93 stress，372 列） | 142/372 = **38.2%** |
 | Final E2 推估 escalated case | ~147 / 384 列 |
 | 推估 provider 呼叫 | **~586 次**（4 agent/case），retry 前 |
-| `agents.retry.max_attempts` | 2，且 `ProviderError` 後**沒有 backoff**（原封不動立即重送） |
+| `agents.retry.max_attempts` | 2，且 `ProviderError` 後**沒有 backoff** |
 
-實測 gemini-3.6-flash 免費層在連續約 9 次呼叫後回 429（per-minute，
-非 per-day —— 稍候即恢復）。兩次無間隔的重試會落在**同一個** rate-limit
-視窗內，兩次都失敗 → `ABORT_FORMAL_RUN` → 一次性的 Final E2 中途死亡。
+一次性的 Final E2 需要 586 次呼叫**在同一個 run 內連續完成**
+（retry 耗盡即 `ABORT_FORMAL_RUN`，不得 drop case）。免費層的每日上限
+遠低於此，因此**必須升級付費層**才可能跑完。
 
-**這需要裁決，不該由實作端自行決定**：加 backoff 會改動
-`agents.retry` 的行為語意（NOTE-046 已核定 `max_attempts = 2`），
-而 retry 政策屬 `llm_runtime` 的 runtime identity 範圍。
-可能的方向（擇一，須核定後才動）：升級付費層／加入指數退避並重新評估
-runtime identity／降低 escalation 以外的方式提高單位時間吞吐。
+### Final E2 provider 成本：實測外推 US$4.05 ≈ NT$128
 
-> 診斷可用性已修：provider 的 429 現在會帶出 `quota_id` / `retry_after` /
-> `status`，先前 200 字元截斷讓「等 30 秒」與「等 24 小時」長得一模一樣。
+以**真實 token 用量**外推，不是猜的（`corrective estimate-cost`）：
+
+| 每個 escalated case | tokens |
+|---|---|
+| prompt | 9,702 |
+| billable output | 5,431 |
+| 其中 thinking | **3,918（占 output 的 72.1%）** |
+
+```
+586 calls -> 1,422,052 prompt / 796,079 billable output
+input  US$1.07 + output US$2.99 = US$4.05  (~NT$128)
+不確定性帶： x1.5 NT$192 / x2.0 NT$257 / x3.0 NT$385
+```
+
+**成本不是阻塞。** 準備 NT$300～400 綽綽有餘。
+
+兩個值得記的觀察：
+
+- **thinking token 占 output 的 72%。** 只讀 `candidatesTokenCount` 會把
+  output 帳低估 **3.59 倍**。Google 把 thinking 併入 output 計費卻不算進
+  candidates，因此 `thoughtsTokenCount` 必須單獨取。
+- 每次呼叫實測 2,426 input / 1,358 output。input 與事前假設（2,500）幾乎
+  一致（0.97x），**output 是假設（600）的 2.26 倍** —— 差距全部來自 thinking。
+
+> **先前所有 token 計數都是 0。** 兩個 adapter 建 `ProviderResponse` 時都沒填
+> `prompt_tokens` / `completion_tokens`，Google 的 `usageMetadata` 被整個丟棄；
+> `run_pcmef_case` 一直在累加 0，而 §49 說 `llm_cache_index` 支援 cost audit ——
+> 那張表沒有東西可稽核。**最早那 8 次呼叫的用量無法還原**，從來沒被記錄過。
 
 ### 容器已重建且與主機逐位元一致
 
