@@ -315,6 +315,62 @@ class LLMProviderAdapter(Protocol):
 
 _ERROR_BODY_CHARS = 200
 
+#: 從錯誤回應裡額外抽出的**結構化**欄位。
+#:
+#: body 截在 200 字元是為了 LLM-SEC-01：provider 可能原樣回吐我們送出的內容，
+#: 包含憑證。但那個上限也把 429 最有用的兩件事切掉了 —— 是哪一個配額爆了、
+#: 該等多久。實測結果是「等 30 秒重跑」與「等 24 小時」在訊息上長得一模一樣。
+#: 因此改為額外抽出少數具名欄位，且**一樣過 redact()**：
+#: 上限保護的是自由文字，這些是 provider 定義的狀態欄位。
+_ERROR_FACT_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("status", ("error", "status")),
+    ("reason", ("error", "details", 0, "reason")),
+    ("retry_after", ("error", "details", 0, "retryDelay")),
+)
+
+
+def _dig(node: Any, path: tuple[Any, ...]) -> Any:
+    for key in path:
+        if isinstance(node, dict):
+            node = node.get(key)
+        elif isinstance(node, list) and isinstance(key, int) and key < len(node):
+            node = node[key]
+        else:
+            return None
+    return node
+
+
+def _error_facts(response: Any) -> str:
+    """抽出可判斷「重跑會不會有用」的結構化欄位。抽不到就回空字串。
+
+    另外掃過 details 陣列找 RetryInfo / QuotaFailure —— Google 的錯誤把它們
+    放在不固定的索引，只看 details[0] 會漏掉。
+    """
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - 錯誤路徑不得再拋錯
+        return ""
+    facts: dict[str, str] = {}
+    for name, path in _ERROR_FACT_PATHS:
+        value = _dig(body, path)
+        if value is not None:
+            facts[name] = redact(str(value))[:80]
+    for detail in (_dig(body, ("error", "details")) or []):
+        if not isinstance(detail, dict):
+            continue
+        kind = str(detail.get("@type", "")).rsplit(".", 1)[-1]
+        if kind == "RetryInfo" and detail.get("retryDelay"):
+            facts["retry_after"] = redact(str(detail["retryDelay"]))[:80]
+        if kind == "QuotaFailure":
+            violations = detail.get("violations") or []
+            if violations and isinstance(violations[0], dict):
+                quota_id = violations[0].get("quotaId") or violations[0].get("subject")
+                if quota_id:
+                    facts["quota_id"] = redact(str(quota_id))[:80]
+    if not facts:
+        return ""
+    return " ".join(f"{k}={v}" for k, v in sorted(facts.items())) + "; "
+
 
 class HTTPProviderAdapter:
     """以 httpx 呼叫 REST 端點的 adapter 基底。
@@ -382,6 +438,7 @@ class HTTPProviderAdapter:
         if response.status_code >= 400:
             raise ProviderError(
                 f"{self.provider}: HTTP {response.status_code}; "
+                f"{_error_facts(response)}"
                 f"body[:{_ERROR_BODY_CHARS}]={excerpt!r}"
             )
         try:
