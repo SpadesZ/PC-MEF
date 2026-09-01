@@ -3,7 +3,60 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-08-30
+最後更新：2026-09-01
+
+---
+
+## FINAL PRE-FLIGHT FREEZE 完成（2026-09-01）
+
+**22/22 formal lock 全部 FROZEN；`config check` 待裁決數 0；
+families 36-43 未生成、未讀取。**
+
+```
+llm_runtime.lock                 = 969c45695d70fffe528ded33886a2f5852f0e5d529ace0aa75462a1da973773a
+perception_condition_policy.lock = 9fe097e90467f5e15160619cd511ec23090992e45ba62d1c76fc3409cfb02a75
+training_seed_pairs.lock         = 67df08fbfe3e182105f472acfe8bafe20e6d83ca06b28e13c1b76dbf28821dfe
+validation_pool.lock             = 38699e754b32223c614483662651ccab5b495d83c9fb6568ea9916dfb3e21515
+reliability_final.lock           = ebf4529a3d411eceaf425d6464f8f7f8f7242cf41859b11aee92dddda5371e1d
+gate.lock                        = 1ff2d66745da30a73c3b977de1d34d94c67094ee4b70a49b653d492e931ac0d3
+inference_firewall.lock          = c4fa72dfc978f0305c5afb32d35183431803f2fca0a67c24df957db9099b82c6
+conflict_operational.lock        = 6cdfab0fba51c5c37c82981bb35719a08244e52c55629741c15099ddd6e01c26
+e2_sample_size.lock              = 38f836a87fe4be9633c26edbf9a49357c85ea804540ddb44c2c61df95c24a7ba
+statistics_config.lock           = 117b3663d1de41e9aa1ff3a136e07792afaa021efab6adddec239753dd9f8c08
+formal_config.lock               = cefb453a80daa9766254dbfd549f5b7642b4be688561d5e8cb9dc80765742ed8
+
+scenario_set_hash (36-43 identity only) = 34fd823df21ce525cbcaedcbc4dc3b7ed05df482756c8b4a379f8f25a1178e1d
+code_revision = f5e6463b976f239849a3e0909d8c7e10a8452cb8（clean tree）
+```
+
+三個 legacy lock 契約已 supersede 為實際 execution path（NOTE-050）。重點三條：
+
+- **只有一組 checkpoint pair**，`training_seed_robustness_claim = false`。
+- **reliability anchors 擬合在 96 筆**（NOTE-048 剔除前）；重擬合在 93 筆會得到
+  不同 anchors 與一個不同路由 —— **刻意不重擬合**，邊界寫進 lock。
+- **`s_A` 不做 NLL/ECE probability-calibration claim**。
+
+指令：`locks preflight`（dry run，不寫 lock）/ `locks freeze-preflight`（寫入）。
+已驗證：10 個 lock 冪等重寫為 no-op、改內容重寫被拒、竄改 lock 檔會被
+`load()` 的完整性檢查抓到。
+
+### `READY_FOR_ONE_SHOT_FINAL_E2 = NO` —— 缺的是執行器，不是 formal state
+
+formal state 已收斂完畢，但**沒有任何 runner 實作已凍結的那條決策路徑**：
+
+| 缺口 | 現況 | 需要 |
+|---|---|---|
+| Full PC-MEF E2 runner | `gate.run_formal_e2()` 走 `apply_gate` + `confidence_weighted_arbiter`（決定性替身），且自報 `llm_arm_evaluated: False` | 走 `reliability_route` + `decide_case` + 四個真 agent，即 `gate.lock` 記載的 `reliability_routing_v1` / `selective_escalation_bridge_v1` |
+| 統計 | `run_formal_e2` 仍呼叫 `paired_bootstrap_delta`（scenario 重抽、seed 20260831） | 改呼叫 `stats.bootstrap.cluster_bootstrap_delta`（family cluster、class 分層、seed 20260827） |
+| 資料生成 | 尚未呼叫 | `build_flat_dataset(family_indices=36..43, family_domain=44, realizations_per_family=3)` |
+
+**不得**因為 gate-validation 只有 2/93 escalated 就調門檻讓 LLM 多被叫；
+Formal E2 的實際 escalation rate 本身就是研究結果。
+
+> 容器映像**不掛** `pcmef/` 與 `configs/`（只掛 data/outputs/freeze/…），
+> 因此改碼後 `docker compose exec console` 讀到的仍是舊版。
+> 本次全部指令在主機以 `PYTHONPATH="$PWD" py -3.10 -m pcmef.cli` 執行；
+> 要用容器驗證請先 `docker compose build`。
 
 ---
 
