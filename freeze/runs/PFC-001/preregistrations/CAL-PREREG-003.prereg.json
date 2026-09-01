@@ -1,0 +1,393 @@
+{
+  "created_at": "2026-08-30T07:23:38.769218+00:00",
+  "payload": {
+    "amendments": {
+      "AMD-003": "612dabf1b323a730a0ce279c5d2b5785e1de4bd7bf2d8adf7364b4527562348f",
+      "AMD-004": "f298816d97e88b3fc3d7c92aaf2f5750f9278fd4f2da1098d804a1463ecfd3e0"
+    },
+    "bounds_resolution_hash": "de9ce5a2f009e08afc916208f6dd9ee4880a84bed0919dd5d9fb290f1dea9aeb",
+    "claim_boundary": "This record freezes the calibration PROTOCOL only. No calibration has been run, no calibration partition value has been read, and held-out remains sealed (access_count = 0). Freezing it does not authorise freezing calibrated_simulation.lock, which requires its own audit.",
+    "code_dirty_at_freeze": false,
+    "code_version": "b7b08629bdcab337aac886de342a9aac091a6b97",
+    "errata": {
+      "ERR-001": "363b06c1de6ec9613178074689dc23d2da443ac9657b62740023b141cbed4c15"
+    },
+    "evaluation_budget": {
+      "MAPPING_AMBIENT": {
+        "dimensions": 2,
+        "evaluations_per_restart": 3232,
+        "evaluations_per_stage": 9696,
+        "maxiter": 100,
+        "parameters": 2,
+        "population": 32,
+        "restarts": 3
+      },
+      "MAPPING_SIGMA": {
+        "dimensions": 3,
+        "evaluations_per_restart": 6464,
+        "evaluations_per_stage": 19392,
+        "maxiter": 100,
+        "parameters": 3,
+        "population": 64,
+        "restarts": 3
+      },
+      "MAPPING_SIGNAL": {
+        "dimensions": 2,
+        "evaluations_per_restart": 3232,
+        "evaluations_per_stage": 9696,
+        "maxiter": 100,
+        "parameters": 2,
+        "population": 32,
+        "restarts": 3
+      },
+      "SCENE_GEOMETRY_SURFACE_FOIL": {
+        "dimensions": 5,
+        "evaluations_per_restart": 12928,
+        "evaluations_per_stage": 38784,
+        "maxiter": 100,
+        "parameters": 5,
+        "population": 128,
+        "restarts": 3
+      },
+      "SCENE_PARTICIPATING_MEDIA": {
+        "dimensions": 3,
+        "evaluations_per_restart": 6464,
+        "evaluations_per_stage": 19392,
+        "maxiter": 100,
+        "parameters": 3,
+        "population": 64,
+        "restarts": 3
+      }
+    },
+    "initial_simulation": {
+      "errata": [
+        {
+          "corrected_value": "1.3.0",
+          "erratum_id": "ERR-001",
+          "erratum_payload_hash": "363b06c1de6ec9613178074689dc23d2da443ac9657b62740023b141cbed4c15",
+          "evidence": [
+            {
+              "path": "outputs/repro_a/simulation_smoke_manifest.json",
+              "sha256": "9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec"
+            },
+            {
+              "path": "outputs/repro_b/simulation_smoke_manifest.json",
+              "sha256": "f8df2a0431c6eaa645af4316fd72750fbee811945c9262a0b2c9d7d841ff23bf"
+            },
+            {
+              "path": "outputs/repro_a/simulation_smoke_manifest.json",
+              "sha256": "9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec"
+            },
+            {
+              "path": "outputs/repro_a/simulation_smoke_manifest.json",
+              "sha256": "9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec"
+            }
+          ],
+          "field_path": "environment.mitransient",
+          "recorded_value": "unavailable"
+        }
+      ],
+      "lock_hash": "dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335"
+    },
+    "not_fitted": [
+      "spp",
+      "resolution",
+      "temporal_bins",
+      "max_depth",
+      "bounce_budget",
+      "_LEADING_MARGIN_BINS",
+      "foil_orientation",
+      "distance_offset_mm",
+      "_ALBEDO_BY_PRESET",
+      "_BOTTLE_SURFACE_ALPHA",
+      "light.cutoff_angle_deg"
+    ],
+    "objective": {
+      "form": "J = sum over (class c, feature f) of w[c,f] * NW(real[c,f], sim[c,f])",
+      "id": "NW_DISTRIBUTION_DISCREPANCY",
+      "level": "distribution",
+      "normalization": "s_f",
+      "statistic": "wasserstein_w1",
+      "weights": {
+        "applies_to": "全部 4 classes x 4 features = 16 項",
+        "fixed_before_seeing_data": true,
+        "maintenance_bound": "變更權重必須開 amendment，不得在執行期以參數傳入。",
+        "rationale": "NW 已經是無單位量，等權是唯一不需要額外辯護的選擇。任何非均勻權重 都會需要「為什麼這一類/這個特徵更重要」的理由，而在看過資料之後 才給得出的理由與挑一組讓結果好看的權重無法區分。\n",
+        "scheme": "UNIFORM",
+        "value": 1.0
+      }
+    },
+    "optimizer": {
+      "common_random_number_seeds": {
+        "Bubbly": 1042,
+        "Empty": 1001,
+        "Misty": 1004,
+        "Water-filled": 1002
+      },
+      "convergence": {
+        "additional_requirement": "收斂當下的目標值必須優於該階段**起始**目標值；若最佳點就是起點， 該階段結論為 NO_IMPROVEMENT_REQUIRED，參數維持 initial 值。 這是合法且應該被記錄的結局，不是失敗。\n",
+        "criterion": "differential_evolution 的標準收斂條件 （std(population energies) <= tol * |mean(population energies)|）， 或 scalar 階段的 xatol。\n",
+        "non_convergence": {
+          "is_legal_terminal_state": true,
+          "outcome": "NOT_CONVERGED",
+          "rule": "評估上限用盡而未達收斂條件時，記錄 best-so-far 但階段標記 NOT_CONVERGED，**且 calibrated_simulation 不得凍結**。 不得改用 best-so-far 並宣稱收斂，也不得為了收斂而放寬 tol 或邊界。\n"
+        }
+      },
+      "failure_handling": {
+        "failed_evaluation_budget": {
+          "rule": "單一階段內失敗評估比例超過 20% 時，該階段標記 UNSTABLE_LANDSCAPE 並停止。 在一個五分之一都算不出來的地形上找到的最小值，不是最小值。\n",
+          "threshold": 0.2
+        },
+        "forbidden_recovery": [
+          "放寬邊界",
+          "放寬 tol 或提高 max_evaluations 後重跑並只保留後者",
+          "改變權重或 s_f",
+          "改用「差不多就好」的收斂判定"
+        ],
+        "non_finite_objective": {
+          "rule": "模擬崩潰、NaN、Inf 或非有限目標值一律回傳 +inf 並完整記錄該次評估的參數"
+        },
+        "simulator_crash": {
+          "rule": "沿用 NOTE-012 的子行程隔離：崩潰只讓該次評估失敗，不讓整個階段中止， 但子行程的 exit code 必須完整記錄，不得吞掉。\n"
+        }
+      },
+      "method_rule": "每個階段一律使用 scipy.optimize.differential_evolution，在該階段展開後的 全部維度上同時求解。不存在逐參數的純量搜尋路徑。\n",
+      "multivariate": {
+        "initialization": "Sobol 序列覆蓋整個邊界盒，另**強制**把 initial_simulation.lock 的 initial 值放進初始族群第 0 個個體 —— 這保證優化結果不會比凍結的起點更差, 且讓「資料沒有要求任何改變」是一個可達成的結局。\n",
+        "maxiter": 100,
+        "method": "scipy.optimize.differential_evolution",
+        "options": {
+          "init": "sobol",
+          "mutation": [
+            0.5,
+            1.0
+          ],
+          "polish": false,
+          "popsize": 15,
+          "recombination": 0.7,
+          "strategy": "best1bin",
+          "tol": 0.01,
+          "updating": "deferred"
+        },
+        "parallelism": "允許以 workers 平行化。`updating: deferred` 下平行與序列產生**相同**的 評估序列與相同的結果，因此平行化只影響時間，不影響科學。 若某次平行執行的 nfev 或最終參數與序列不同，該次執行作廢並必須查明原因。\n",
+        "seed": 20260829
+      },
+      "optimizer_seed": 20260829,
+      "restart": {
+        "count": 3,
+        "divergence_report": "三次重啟的最佳目標值若相對全距超過 0.05，必須在 artifact 中標記 MULTIMODAL 並記錄三組參數；這代表目標函數有多個近似等價的解， 是可辨識性的警訊而不是可以取平均的雜訊。\n",
+        "policy": "FIXED_COUNT",
+        "rule": "每階段以 seed_derivation 給定的三個種子各跑一次，取目標值最小者。 重啟次數事前固定，不得因為「再試一次可能更好」而追加。\n"
+      },
+      "seed_derivation": "重啟第 k 次使用 optimizer_seed + 1000*k，k 由 0 起算。 種子由公式決定而非逐次挑選，因此「換個種子直到結果好看」留得下痕跡。\n",
+      "tie_break": {
+        "epsilon": 0.001,
+        "rationale": "資料分不出來的時候就不要動。initial model 是已凍結的參考點， 「最小位移」是唯一不需要引入新偏好的平手規則 —— 任何其他規則 （取較大值、取中點、取讓某一類好看的）都是在無資訊處注入選擇。\n",
+        "rule": "兩組候選的目標值相對差小於 epsilon 時，取在**正規化邊界空間**中 離 initial 值 L2 距離較小的那一組。\n"
+      },
+      "verification_seeds": {
+        "Bubbly": 2042,
+        "Empty": 2001,
+        "Misty": 2004,
+        "Water-filled": 2002
+      }
+    },
+    "preregistration_id": "CAL-PREREG-003",
+    "preregistration_version": "v0.3.0",
+    "protocol_hash": "51796b777fda308f8aca6d60e99634faf258d1bd1720d729a23d972b5af8a807",
+    "protocol_path": "configs/calibration_preregistration.yaml",
+    "readiness": {
+      "CP-01": "PASS",
+      "CP-02": "PASS",
+      "CP-03": "PASS",
+      "CP-04": "PASS",
+      "CP-05": "PASS",
+      "CP-06": "PASS",
+      "CP-07": "PASS",
+      "CP-08": "PASS",
+      "CP-09": "PASS",
+      "CP-10": "PASS",
+      "CP-11": "PASS",
+      "CP-12": "PASS",
+      "CP-13": "PASS",
+      "CP-14": "PASS",
+      "CP-15": "PASS",
+      "CP-16": "PASS"
+    },
+    "registry": {
+      "calibration_only_count": 26,
+      "parameter_set_hash": "3bd65b50264413e6249d1d19cc900a8487673f073a4e531b3c456b760a39ff69",
+      "version": "v0.3.0"
+    },
+    "resolved_bounds": {
+      "_FOIL_GAP_TO_BOTTLE_RATIO": [
+        0.1,
+        6.0
+      ],
+      "_FOIL_REFLECTANCE_940NM": [
+        0.3,
+        0.98
+      ],
+      "_FOIL_SIZE_TO_DIAMETER_RATIO": [
+        2.0,
+        10.0
+      ],
+      "_FOIL_SURFACE_ALPHA": [
+        0.01,
+        0.6
+      ],
+      "ambient_energy_to_mcps": [
+        1e-06,
+        1000000.0
+      ],
+      "ambient_jitter_relative": [
+        0.0,
+        0.5
+      ],
+      "medium.bubble_density": [
+        0.0,
+        2.0
+      ],
+      "medium.mist_density": [
+        0.0,
+        2.0
+      ],
+      "medium.turbidity": [
+        0.0,
+        2.0
+      ],
+      "noise_relative_sigma": [
+        0.0,
+        0.5
+      ],
+      "sensor.fov_deg": [
+        10.0,
+        60.0
+      ],
+      "sigma_multipath_weight": [
+        0.0,
+        100.0
+      ],
+      "sigma_snr_weight": [
+        0.0,
+        100.0
+      ],
+      "sigma_width_to_mm": [
+        1e-06,
+        1000000.0
+      ],
+      "signal_energy_to_mcps": [
+        1e-06,
+        1000000.0
+      ]
+    },
+    "split": {
+      "calibration_access_count": 0,
+      "calibration_access_ledger": "data/splits/calibration_access_ledger.json",
+      "calibration_set_hash": "4bda77f6412afbaa225f75646f39b683e37de7d82f80ab94c7cb325648e0c22d",
+      "eligible_set_hash": "f76776e4ddd8ad14ade97c2517731963b8bfa6ec5317fd0b248ecf30273d0ac7",
+      "heldout_access_count": 0,
+      "heldout_opened": false,
+      "lock": "real_split_policy",
+      "lock_hash": "186d307571b39ce37a7532346302c5cf6a842b0d617b0d90abd81db6b4048f40"
+    },
+    "stage_0": {
+      "borderline_band": [
+        5.0,
+        20.0
+      ],
+      "normaliser": "sigma_MC",
+      "reads_calibration_partition": false,
+      "replicates": 8,
+      "seed_set": [
+        3001,
+        3002,
+        3003,
+        3004,
+        3005,
+        3006,
+        3007,
+        3008
+      ],
+      "threshold": 10.0
+    },
+    "stagewise": [
+      {
+        "id": "SCENE_GEOMETRY_SURFACE_FOIL",
+        "observables": [
+          "**Empty 類**的 distance_mm 分佈位置與離散度",
+          "**Empty 類**的 signal_rate_mcps 分佈形狀",
+          "Empty 的 sigma_like 分佈（波形寬度的間接觀測）"
+        ],
+        "parameters": [
+          "_FOIL_GAP_TO_BOTTLE_RATIO",
+          "_FOIL_REFLECTANCE_940NM",
+          "_FOIL_SURFACE_ALPHA",
+          "_FOIL_SIZE_TO_DIAMETER_RATIO",
+          "sensor.fov_deg"
+        ],
+        "stage": 1
+      },
+      {
+        "id": "SCENE_PARTICIPATING_MEDIA",
+        "observables": [
+          "Water-filled / Bubbly / Misty 三類**相對 Empty** 的 distance 位移",
+          "三類的 signal_rate_mcps 分佈",
+          "三類的 sigma_like 分佈"
+        ],
+        "parameters": [
+          "medium.turbidity",
+          "medium.bubble_density",
+          "medium.mist_density"
+        ],
+        "stage": 2
+      },
+      {
+        "id": "MAPPING_AMBIENT",
+        "observables": [
+          "ambient_rate_mcps 的分佈**位置**（median）",
+          "ambient_rate_mcps 的分佈**離散度**（IQR）"
+        ],
+        "parameters": [
+          "ambient_energy_to_mcps",
+          "ambient_jitter_relative"
+        ],
+        "stage": 3
+      },
+      {
+        "id": "MAPPING_SIGNAL",
+        "observables": [
+          "signal_rate_mcps 的分佈位置（**四類池化**）",
+          "signal_rate_mcps 的分佈離散度"
+        ],
+        "parameters": [
+          "signal_energy_to_mcps",
+          "noise_relative_sigma"
+        ],
+        "stage": 4
+      },
+      {
+        "id": "MAPPING_SIGMA",
+        "observables": [
+          "四類的 sigma_like 分佈位置",
+          "四類的 sigma_like 分佈離散度"
+        ],
+        "parameters": [
+          "sigma_width_to_mm",
+          "sigma_snr_weight",
+          "sigma_multipath_weight"
+        ],
+        "stage": 5
+      }
+    ],
+    "supersedes": {
+      "note": "CAL-PREREG-001 與 CAL-PREREG-002 均保留不刪除（append-only）， 兩者都**不得**用於執行。001 帶有 AMD-003 所列的三項缺陷； 002 的 stage 順序、入場範圍與共線性範圍已由 AMD-004 推翻。 操作版本是本檔。\n",
+      "preregistration_id": "CAL-PREREG-002",
+      "protocol_hash": "c6a0de86e866cc0dbd426e77fe407d9659f46fc8888f2955e02820abd6a2316d",
+      "record_hash": "e7e2a298cfa364eb210ac56a414d72183e33a7f4b6974867fe06cb20482db99e"
+    }
+  },
+  "payload_hash": "fb9638d78df974ca90f16546c9aa5367371fe2d82e8284190f5f6c8ad63b70fa",
+  "preregistration_id": "CAL-PREREG-003",
+  "version": 1
+}

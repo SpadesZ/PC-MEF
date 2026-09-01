@@ -1,0 +1,24 @@
+{
+  "created_at": "2026-09-01T02:20:53.540435+00:00",
+  "lock_type": "conflict_operational",
+  "payload": {
+    "attainment_reporting": {
+      "must_not_filter_formal_ids": true,
+      "prohibition": "Operational Conflict must NOT be used to select, resample, or exclude Formal E2 IDs. Every one of the 384 condition rows enters the primary analysis regardless of its conflict status; otherwise the denominator would change with the method being evaluated.",
+      "reported": [
+        "operational conflict rate overall",
+        "operational conflict rate per generation condition",
+        "accuracy and macro-F1 within the operational-conflict subgroup",
+        "accuracy and macro-F1 within its complement"
+      ],
+      "usage": "REPORTING_AND_SUBGROUP_ANALYSIS_ONLY"
+    },
+    "delta": 0.48965981236738715,
+    "delta_source": "outputs/perception/gate/gate_rule.json gate_rule.disagreement_threshold; the same quantity as the gate's D cut, not a second independent number",
+    "distinction_from_condition_name": "Conflict-Stress is a GENERATION condition: both modalities were degraded. Operational Conflict is a MEASURED property of one case. A Conflict-Stress row need not be an operational conflict, and a clean row can be one.",
+    "operational_conflict_rule": "argmax(p_V) != argmax(p_T) OR D >= delta",
+    "rule_id": "argmax_mismatch_or_d_ge_delta"
+  },
+  "payload_hash": "6cdfab0fba51c5c37c82981bb35719a08244e52c55629741c15099ddd6e01c26",
+  "version": 1
+}

@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-08-30T14:57:01.497909+00:00",
+  "lock_type": "e1_candidates",
+  "payload": {
+    "calibrated_simulation_hash": "079b248980eaff85068be1988a50ecf56a6ae783b425c05c0147e37d3ef515d9",
+    "heldout_partition_hash": "a78961302a7784aeaa8ab62ecef6fc389e26b56efb43034ccb4cc26d8dbdcc8c",
+    "heldout_partition_id": "HELDOUT-PART-001",
+    "heldout_set_hash": "2c9b82bb7b95c4d8564bc031ca0c56f71082a61245654ebe45a5eae223b48b17",
+    "heldout_subset": "FORMAL_E1_FINAL",
+    "initial_simulation_hash": "dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335",
+    "metric_config_hash": "d9042ce3da5d957fb5eff2c954748862c45695eb6d14205c5ab0c96ffc2f3727",
+    "recordings_per_class": {
+      "Bubbly": 28,
+      "Empty": 28,
+      "Misty": 28,
+      "Water-filled": 28
+    }
+  },
+  "payload_hash": "c4afdd1ca123d2ead32d26a809d610d0a543ed1f758d7fb26f7dd6632dfffaf3",
+  "version": 1
+}

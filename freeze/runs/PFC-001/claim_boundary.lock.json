@@ -1,0 +1,15 @@
+{
+  "created_at": "2026-08-30T14:57:01.532901+00:00",
+  "lock_type": "claim_boundary",
+  "payload": {
+    "e1_fidelity_scope": "E1 measures the distributional distance between the calibrated simulator's four ToF features and the FORMAL_E1_FINAL real recordings, per class and feature. It says nothing about downstream classification accuracy, nothing about conditions outside the frozen scene family, and nothing about any sensor other than the one these recordings came from.",
+    "effective_parameter_boundaries": {
+      "medium densities": "CG-5: effective-medium extinction parameters of the calibrated simulator, not absolute turbidity / bubble / mist concentrations",
+      "sensor.fov_deg": "CG-6: an effective collection-angle parameter of the square perspective-film receiver surrogate, not a measured VL53L0X system FoV"
+    },
+    "inhibitory_control": "UPDATE_INHIBITED is a functionally inspired engineering control rule. It is not evidence for any biological neural inhibition mechanism and must not be described as such.",
+    "synthetic_rgb_statement": "No RGB or vision modality was calibrated or evaluated here. Synthetic RGB remains uncalibrated and must not be described as physics-validated on the strength of this ToF result."
+  },
+  "payload_hash": "d31b879fdc9a269caf8d2b0c03e9992c6a1c413d81be29894410a76075894814",
+  "version": 1
+}

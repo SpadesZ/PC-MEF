@@ -15,13 +15,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 分組安裝：M1 之前不需要 mitsuba，M4 之前不需要 tensorflow。
+# 分組安裝：M1 之前不需要 mitsuba，M4 之前不需要 torch。
 # 這讓 core/adapters/E1 統計層能在沒有重依賴的機器上完整測試。
 # mitsuba/drjit 刻意不釘上界：開發期跟隨上游即可。但 transient 的數值輸出會
 # 餵進 E1，因此**容器內釘死在與本機相同的版本**（見 Dockerfile）——
 # 兩邊跑出不同版本的話結果不可比，而 NOTE-012 / NOTE-013 是在 3.8.0 上驗證的。
 simulation = ["mitsuba>=3.5", "drjit>=0.4", "mitransient>=1.3"]
-perception = ["tensorflow>=2.13", "scikit-learn>=1.3"]
+# 2026-09-01（NOTE-051）：本組原本宣告 tensorflow + scikit-learn，
+# 而這兩個套件**在整個程式庫裡一次都沒有被 import**。實際的 perception
+# 相依是 torch（baselines.VisionCNN / ToFCNN、gate.load_frozen_models）；
+# EXR 讀取走 mitsuba，其餘數值走已在核心相依的 numpy/scipy。
+# 宣告錯的相依比沒宣告更糟：乾淨機器會裝兩個用不到的重套件，然後仍然缺 torch。
+perception = ["torch>=2.0"]
 agents = ["httpx>=0.27", "jsonschema>=4.20"]
 # cryptography 是 secrets vault 的加密後端。缺它時系統 fail-closed
 # （只能用 env: 形式的 secret_ref，不能在 UI 直接貼 key，見 NOTE-016），
@@ -43,6 +48,6 @@ addopts = "-q --strict-markers"
 markers = [
     "requires_real_data: 需要前研究原始 ToF/RGB 資料才能執行（見 NOTES.md NOTE-008）",
     "requires_simulation: 需要 mitsuba/drjit",
-    "requires_perception: 需要 tensorflow/scikit-learn",
+    "requires_perception: 需要 torch",
     "requires_provider: 需要外部 LLM provider 憑證",
 ]

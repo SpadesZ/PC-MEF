@@ -1,0 +1,31 @@
+{
+  "created_at": "2026-08-30T14:57:01.531906+00:00",
+  "lock_type": "e1_scientific_rule",
+  "payload": {
+    "aggregation": {
+      "distance_trend_consistency": "non_degraded",
+      "macro_mean_delta_ci_lower_bound_gt": 0.0,
+      "per_feature_class_macro_delta_gte": 0.0
+    },
+    "amendment_id": "AMD-001",
+    "amendment_payload_hash": "553e2dfa2eb1fcc560f4fd530ea5e8b4234fe3628f9f0703087aa6767891209a",
+    "bootstrap_replicates": 10000,
+    "bootstrap_seed": 20260826,
+    "code_hash": "92c6793c5a89a79d16f922ae7ccf5dbc669f6c426d450bd29b6fcf66128d870c",
+    "decided_by": "advisor",
+    "decided_on": "2026-08-26",
+    "frozen_before_heldout_opened": true,
+    "g08_contract_version": "v2",
+    "improvement_threshold": 0.0,
+    "normalization_scales": {
+      "ambient_rate_mcps": 0.015600000000000003,
+      "distance_mm": 15.75,
+      "sigma_like": 0.1506,
+      "signal_rate_mcps": 1.2344000000000008
+    },
+    "regression_tolerance": 0.0,
+    "trend_rule": "non_degraded"
+  },
+  "payload_hash": "0cc14311861c21cd51d48231162c9dd8b7cf0162c6088cb8d4fdc6dc1762a69b",
+  "version": 1
+}

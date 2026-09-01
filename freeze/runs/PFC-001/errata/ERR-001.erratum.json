@@ -1,0 +1,58 @@
+{
+  "erratum_id": "ERR-001",
+  "payload": {
+    "authority": "researcher decision under the project's \"locks are immutable\" red line: the defective lock is neither deleted nor re-frozen; the correction is recorded as an append-only layer above it.\n",
+    "corrected_value": "1.3.0",
+    "created_at": "2026-08-29T14:55:05.987917+00:00",
+    "defect_class": "FREEZE_METADATA_CAPTURE_BUG",
+    "erratum_id": "ERR-001",
+    "evidence": [
+      {
+        "binds": {
+          "content_hash": "scene_hash",
+          "run_identity_hash": "scene_topology.run_identity_hash"
+        },
+        "description": "被凍結那次 run 自己的 manifest。dependencies 由執行 run 的行程記錄， 該行程有 set_variant，因此看得到真正載入的 mitransient。\n",
+        "json_pointer": "dependencies.mitransient",
+        "path": "outputs/repro_a/simulation_smoke_manifest.json",
+        "sha256": "9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec"
+      },
+      {
+        "binds": {
+          "content_hash": "scene_hash",
+          "run_identity_hash": "scene_topology.run_identity_hash"
+        },
+        "description": "可重現性比對的第二次獨立執行（RP-01..04 的另一半）。 檔案位元組不同（runtime_s 與 outputs 路徑，見 NOTE-038）， 但 content_hash 與 run_identity_hash 與 run A 相同。\n",
+        "json_pointer": "dependencies.mitransient",
+        "path": "outputs/repro_b/simulation_smoke_manifest.json",
+        "sha256": "f8df2a0431c6eaa645af4316fd72750fbee811945c9262a0b2c9d7d841ff23bf"
+      },
+      {
+        "binds": {
+          "scenarios.0.scenario_hash": "scene_topology.scenarios.smoke_empty_1001.scenario_hash"
+        },
+        "description": "scenario 層級的獨立記錄（smoke_empty_1001）。與 dependencies 區塊 分開寫入，因此它不是同一個探測結果的複本。四個 scenario 皆記 1.3.0。\n",
+        "json_pointer": "scenarios.0.transient.mitransient_version",
+        "path": "outputs/repro_a/simulation_smoke_manifest.json",
+        "sha256": "9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec"
+      },
+      {
+        "binds": {
+          "scenarios.3.scenario_hash": "scene_topology.scenarios.smoke_misty_1004.scenario_hash"
+        },
+        "description": "scenario 層級的獨立記錄（smoke_misty_1004），確認四類的最後一個 也記著同一版本。\n",
+        "json_pointer": "scenarios.3.transient.mitransient_version",
+        "path": "outputs/repro_a/simulation_smoke_manifest.json",
+        "sha256": "9e3555c02ad516a78bce5aced104c816fe277700cfb08221fa0bb560f32f41ec"
+      }
+    ],
+    "field_path": "environment.mitransient",
+    "rationale": "首版 freeze initial-simulation 在 **freeze 行程內**重新探測相依版本， 而該行程沒有呼叫 set_variant；mitransient 在未設 variant 時 import 會拋 例外，因此被記成 \"unavailable\"。這是 freeze 指令的 metadata 擷取缺陷， 不是被凍結那次 run 的性質：該次 run 的 manifest 與四個 scenario 全部 記著 mitransient 1.3.0。\n處置選擇：刪除該 lock 重新凍結會拿到正確的 environment，但刪除 lock 本身違反「lock 不可覆寫、不可刪除」這條紅線，且會讓「凍結過的東西 可以在不方便時消失」成為先例。因此保留原 lock 一個位元不動， 另以 append-only 勘誤層記錄更正。\nscientific_state_changed=false 的依據：environment 欄位不參與任何計算。 它既不進 scene_hash、不進 parameter_set_hash、不進 surrogate_hash， 也不影響 IS-01..06 或 RP-01..04 的任何一項判定。它的用途是讓後人 **重建環境**；記錯使重建指示失效，改正它不會使任何已算出的數字改變。 RP-03 的 12/12 bitwise 相同、readiness 六項全 PASS，在更正前後完全一樣。\n本勘誤**不**宣稱 lock 的其他欄位皆屬正確，只宣稱這一個欄位的更正有 一手證據支持。\n",
+    "recorded_value": "unavailable",
+    "scientific_state_changed": false,
+    "target_lock": "initial_simulation",
+    "target_payload_hash": "dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335"
+  },
+  "payload_hash": "363b06c1de6ec9613178074689dc23d2da443ac9657b62740023b141cbed4c15",
+  "version": 1
+}

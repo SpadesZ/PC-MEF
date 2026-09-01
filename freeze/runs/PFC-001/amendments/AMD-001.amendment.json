@@ -1,0 +1,39 @@
+{
+  "amendment_id": "AMD-001",
+  "payload": {
+    "amendment_id": "AMD-001",
+    "authority": "researcher decision; no professor approval gate required",
+    "changed_contracts": {
+      "E1-G08": {
+        "after": "facets.channel_semantics == CONFIRMED AND facets.numeric_scale == CONFIRMED；facets.register_address 允許 CONFLICT/UNKNOWN，不影響判定",
+        "before": "sigma_resolution.status == RESOLVED；該 RESOLVED 要求 resolved_divisor 與 resolved_register 皆非 None",
+        "contract_version": "v2"
+      }
+    },
+    "created_at": "2026-08-27T15:50:25.398418+00:00",
+    "invariants_preserved": {
+      "canonical_recordings": 560,
+      "e1_eligible_recordings": 560,
+      "forbidden": [
+        "不得因 register_address 為 CONFLICT/UNKNOWN 而判定 dataset 無效",
+        "不得將任一 register 位址宣告為 CONFIRMED，除非取得 rank-2 採集程式碼",
+        "不得讓 RECONSTRUCTED 滿足 gate 要求"
+      ],
+      "sigma_numeric_scale": 65536.0,
+      "valid_recordings": 560
+    },
+    "precondition_evidence": {
+      "e1_outcome_lock_exists": false,
+      "heldout_access_count": 0,
+      "heldout_firewall_FW02": "PASS",
+      "heldout_firewall_FW02_detail": "access_count = 0",
+      "note": "held-out 未開啟、E1 尚未產出任何結果，故本修訂為預註冊修訂而非事後改判準",
+      "real_split_policy_payload_hash": "186d307571b39ce37a7532346302c5cf6a842b0d617b0d90abd81db6b4048f40"
+    },
+    "rationale": "新取得的 rank-1 raw dataset evidence（560 筆 Edge Impulse export，280,000 列）證明三件事：(1) Sigma channel 存在且可驗證為「非測距值」；(2) numeric scale /65536 可由量化關係驗證；(3) exact historical register address 原理上無法由匯出的浮點數反推。原 G08 把 (1)(2) 與 (3) 綁成同一個 RESOLVED 條件，使可驗證的資料事實被不可觀測的事實擋死。這不是 numeric choice，也不是看到結果後改 PASS rule，而是新證據揭露原契約存在範疇錯誤。0x18 與 0x1E 分別來自不同時期的 legacy code，且產生本 dataset 的 acquisition script 未取得，因此不得將任一位址宣告為 CONFIRMED。",
+    "supersedes": "E1-G08 v1（單一 RESOLVED 旗標，要求 register 位址一併解出）",
+    "title": "E1-G08 拆分：Sigma channel/scale 與 historical register address 分離判定"
+  },
+  "payload_hash": "553e2dfa2eb1fcc560f4fd530ea5e8b4234fe3628f9f0703087aa6767891209a",
+  "version": 1
+}

@@ -1,0 +1,102 @@
+{
+  "created_at": "2026-08-30T14:57:01.425034+00:00",
+  "lock_type": "calibrated_simulation",
+  "payload": {
+    "calibrated_parameter_values": {
+      "SPEED_OF_LIGHT_M_PER_S": 299792458.0,
+      "TOF_RECORDING_POINTS": 500,
+      "_ALBEDO_BY_PRESET": {
+        "bubbly": 0.92,
+        "misty": 0.88,
+        "water": 0.6
+      },
+      "_BOTTLE_SURFACE_ALPHA": 0.02,
+      "_FOIL_GAP_TO_BOTTLE_RATIO": 1.0,
+      "_FOIL_REFLECTANCE_940NM": 0.85,
+      "_FOIL_SIZE_TO_DIAMETER_RATIO": 4.0,
+      "_FOIL_SURFACE_ALPHA": 0.15,
+      "_INTERIOR_BASE_IOR": {
+        "bubbly": "water",
+        "empty": "air",
+        "misty": "air",
+        "water": "water"
+      },
+      "_LEADING_MARGIN_BINS": 8,
+      "_ROOM_LIGHT_RADIANCE": 0.02,
+      "_SIGMA_T_REFERENCE_PER_M": 100.0,
+      "ambient_energy_to_mcps": 0.005579529388342053,
+      "ambient_jitter_relative": 0.06368230901182123,
+      "bounce_budget": 3.0,
+      "distance_offset_mm": 0.0,
+      "foil_orientation": "facing_camera",
+      "geometry.bottle_diameter_mm": 57.0,
+      "geometry.lateral_offset_mm": 0.0,
+      "geometry.sensor_to_bottle_mm": 50.0,
+      "geometry.wall_thickness_mm": 2.0,
+      "light.cutoff_angle_deg": 25.0,
+      "lighting.irradiance": 1.0,
+      "max_depth": 12,
+      "medium.bubble_density": 0.3,
+      "medium.mist_density": 0.15,
+      "medium.turbidity": 0.05,
+      "noise_relative_sigma": 0.01,
+      "optical_path_to_distance": 0.5,
+      "resolution": [
+        64,
+        64
+      ],
+      "sample_interval_s": 0.08200001312,
+      "sensor.fov_deg": 45.0,
+      "sigma_multipath_weight": 1.0,
+      "sigma_snr_weight": 1.0,
+      "sigma_width_to_mm": 1.0,
+      "signal_energy_to_mcps": 1.0,
+      "spp": 16,
+      "temporal_bins": 128
+    },
+    "calibrated_scene_hash": "c816f5dc54adcfa04fb2424f2de2e9e4e4bbac33446f4bc5fee05ce8376842d6",
+    "calibrated_surrogate_hash": "7ddbc3bfbbc8995a603c9e52b4b6559e29bfec71ab6eeef623f6b2634a1df8bb",
+    "calibration_source_hashes": {
+      "amendments": {
+        "AMD-001": "553e2dfa2eb1fcc560f4fd530ea5e8b4234fe3628f9f0703087aa6767891209a",
+        "AMD-002": "9742eab8baafe2b91786a17fe20df7853afe6939d098de47d301fdcc92b44237",
+        "AMD-003": "612dabf1b323a730a0ce279c5d2b5785e1de4bd7bf2d8adf7364b4527562348f",
+        "AMD-004": "f298816d97e88b3fc3d7c92aaf2f5750f9278fd4f2da1098d804a1463ecfd3e0",
+        "AMD-005": "da55038cd17299233b2ac48d3434b9199d880a9010beb584fc41e94c6bfb1761"
+      },
+      "bounds_resolution": "de9ce5a2f009e08afc916208f6dd9ee4880a84bed0919dd5d9fb290f1dea9aeb",
+      "initial_simulation": "dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335",
+      "parameter_set": "3bd65b50264413e6249d1d19cc900a8487673f073a4e531b3c456b760a39ff69",
+      "preregistration": "fb9638d78df974ca90f16546c9aa5367371fe2d82e8284190f5f6c8ad63b70fa",
+      "protocol": "51796b777fda308f8aca6d60e99634faf258d1bd1720d729a23d972b5af8a807",
+      "raw_calibration_data": "926eef729eb3b5b4762fe7a77c139f5ca89375a57367de432508dfa8a8ca1ed8",
+      "s_f": "8e71171c7ae851c1e575627a78ac107b626f7c228895125b07b864454ee0096e",
+      "stage0": "810222803e6555e376e1256d6e77fa59cfd8004948af3b77657a69e99d48a0c6"
+    },
+    "code_version": "86bdb2d225e368a5af7d9f06fecc8ab811509e3e",
+    "fitted_parameters": {
+      "ambient_energy_to_mcps": 0.005579529388342053,
+      "ambient_jitter_relative": 0.06368230901182123,
+      "noise_relative_sigma": 0.01,
+      "sensor.fov_deg": 45.0,
+      "sigma_multipath_weight": 1.0,
+      "sigma_width_to_mm": 1.0,
+      "signal_energy_to_mcps": 1.0
+    },
+    "inhibited_stages": [
+      "SCENE_GEOMETRY_SURFACE_FOIL",
+      "MAPPING_SIGNAL",
+      "MAPPING_SIGMA"
+    ],
+    "inhibitory_control_claim_boundary": "Functionally inspired only. A proposed parameter update is suppressed when independent evidence (verification seeds or the regression guard) indicates it harms system-level stability. This is an engineering control rule and is NOT evidence for any biological neural inhibition mechanism.",
+    "stage_outcomes": {
+      "MAPPING_AMBIENT": "CONVERGED",
+      "MAPPING_SIGMA": "UPDATE_INHIBITED",
+      "MAPPING_SIGNAL": "UPDATE_INHIBITED",
+      "SCENE_GEOMETRY_SURFACE_FOIL": "UPDATE_INHIBITED",
+      "SCENE_PARTICIPATING_MEDIA": "NO_FREE_PARAMETERS"
+    }
+  },
+  "payload_hash": "079b248980eaff85068be1988a50ecf56a6ae783b425c05c0147e37d3ef515d9",
+  "version": 1
+}

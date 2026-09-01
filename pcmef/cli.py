@@ -2914,6 +2914,129 @@ def cmd_locks_status(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_corrective_reliability_gate(args: argparse.Namespace) -> int:
+    """P0-1：effective-93 reliability refit + 同程序 gate 重搜。"""
+    from pcmef.experiments.corrective_pass import build_corrective_report
+
+    document = build_corrective_report(
+        out_dir=args.out, progress=lambda message: print(message, flush=True)
+    )
+    reliability, gate = document["reliability"], document["gate"]
+    print("\n  reliability anchors")
+    for label, key in (("before (96)", "before_original_96"),
+                       ("after  (93)", "after_effective_93")):
+        entry = reliability[key]
+        print(f"    {label}: {json.dumps(entry['anchors'], sort_keys=True)}")
+        print(f"      routes over effective 93: {entry['route_counts_over_effective_93']}")
+    print(f"    cases whose route changed: {reliability['cases_whose_route_changed']}")
+
+    print("\n  gate search re-run on the effective 93")
+    print(f"    pool: {gate['pool']['n_rows']} rows / {gate['pool']['n_families']} families")
+    print(f"    reproduces frozen gate: {gate['reproduces_frozen_gate']}")
+    if gate["differences"]:
+        for field, values in gate["differences"].items():
+            print(f"      {field}: frozen {values['frozen']} -> {values['recomputed']}")
+
+    delta = document["conflict_operational_delta"]
+    print(f"\n  conflict_operational.delta changed: {delta['changed']}  ({delta['action']})")
+    print(f"  FINAL_E2_36_43_TOUCHED = {document['FINAL_E2_36_43_TOUCHED']}")
+    print(f"\n  report: {Path(args.out) / 'pre_final_corrective.json'}")
+    return 0
+
+
+def cmd_corrective_open_run(args: argparse.Namespace) -> int:
+    """建立 pre-final corrective run。原 lineage 一個位元都不動。"""
+    from pcmef.experiments.corrective_run import (
+        CorrectiveRunError, open_corrective_run,
+    )
+    from pcmef.core.locks import LockError
+
+    try:
+        lineage = open_corrective_run(
+            parent_freeze_dir=args.freeze_dir, run_id=args.run_id,
+            corrective_report=args.report,
+            progress=lambda message: print(message, flush=True),
+        )
+    except (CorrectiveRunError, LockError) as error:
+        print(f"FAIL CLOSED: {error}", file=sys.stderr)
+        return 2
+
+    print(f"\ncorrective run {lineage['run_id']} opened")
+    print(f"  parent          : {lineage['parent_freeze_dir']}")
+    print(f"  amendment       : {lineage['amendment']}")
+    print(f"  carried forward : {len(lineage['carried_forward_lock_hashes'])} lock(s)")
+    for name, value in sorted(lineage["new_lock_hashes"].items()):
+        print(f"  superseded {name}: {lineage['superseded_lock_hashes'][name][:16]}"
+              f" -> {value[:16]}")
+    print(f"  formal_config   : {lineage['formal_config_status']}")
+    return 0
+
+
+def cmd_corrective_validate_executor(args: argparse.Namespace) -> int:
+    """Full PC-MEF executor 的執行驗證。任一條 CHECK 失敗即 exit 2。"""
+    from pcmef.experiments.e2_executor_validation import run_executor_validation
+
+    document = run_executor_validation(
+        freeze_dir=args.freeze_dir, out_dir=args.out,
+        registry_dir=args.registry_dir, max_real_cases=args.cases,
+        base_manifest_dir=args.base,
+        progress=lambda message: print(message, flush=True),
+    )
+    print()
+    for check in document["checks"]:
+        mark = "PASS" if check["passed"] else "FAIL"
+        print(f"  [{mark}] {check['check']}: {check['detail']}")
+    print(f"\n  rows {document['n_rows']}  escalated {document['n_escalated_rows']}"
+          f"  real provider calls {document['real_provider_calls']}")
+    print(f"  ALL_PASSED = {document['all_passed']}")
+    print(f"  FINAL_E2_36_43_TOUCHED = {document['FINAL_E2_36_43_TOUCHED']}")
+    return 0 if document["all_passed"] else 2
+
+
+def cmd_corrective_freeze_formal_config(args: argparse.Namespace) -> int:
+    """最後一步：凍結更正後的 formal_config。"""
+    import subprocess
+
+    from pcmef.core.locks import LockError
+    from pcmef.experiments.corrective_run import (
+        CorrectiveRunError, freeze_corrected_formal_config,
+    )
+
+    validation = json.loads(Path(args.validation).read_text(encoding="utf-8"))
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if dirty and not args.allow_dirty:
+        print(
+            "error: the working tree has uncommitted changes; formal_config names a "
+            "commit and must be produced from it. Commit first.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = freeze_corrected_formal_config(
+            freeze_dir=args.freeze_dir, code_revision=commit,
+            executor_validation={
+                "all_passed": validation["all_passed"],
+                "failed": validation["failed"],
+                "checks_total": len(validation["checks"]),
+                "real_provider_calls": validation["real_provider_calls"],
+                "artifact": Path(args.validation).as_posix(),
+            },
+            progress=lambda message: print(message, flush=True),
+        )
+    except (CorrectiveRunError, LockError) as error:
+        print(f"FAIL CLOSED: {error}", file=sys.stderr)
+        return 2
+
+    print(f"\n  formal_config = {result['formal_config_hash']}")
+    print(f"  code_revision = {commit}")
+    return 0
+
+
 def _print_preflight(document: dict[str, Any]) -> None:
     scenarios = document["final_e2_scenarios"]
     print()
@@ -3824,6 +3947,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_llm_store_arguments(serve_cmd)
     serve_cmd.set_defaults(func=cmd_admin_serve)
+
+    corrective_parser = subparsers.add_parser(
+        "corrective", help="Final E2 前的更正層"
+    )
+    corrective_sub = corrective_parser.add_subparsers(
+        dest="corrective_command", required=True
+    )
+    corrective_rg = corrective_sub.add_parser(
+        "reliability-gate",
+        help="把 NOTE-048 的 effective-93 exclusion 補套到 reliability anchors",
+    )
+    corrective_rg.add_argument("--out", default="outputs/corrective")
+    corrective_rg.set_defaults(func=cmd_corrective_reliability_gate)
+
+    corrective_open = corrective_sub.add_parser(
+        "open-run", help="建立更正 run：延用未變動的 lock，寫入更正後的 reliability/gate"
+    )
+    corrective_open.add_argument("--freeze-dir", default="freeze")
+    corrective_open.add_argument("--run-id", default="PFC-001")
+    corrective_open.add_argument(
+        "--report", default="outputs/corrective/pre_final_corrective.json"
+    )
+    corrective_open.set_defaults(func=cmd_corrective_open_run)
+
+    corrective_validate = corrective_sub.add_parser(
+        "validate-executor", help="Full PC-MEF executor 的執行驗證（不看準確率）"
+    )
+    corrective_validate.add_argument("--freeze-dir", default="freeze/runs/PFC-001")
+    corrective_validate.add_argument("--out", default="outputs/corrective")
+    corrective_validate.add_argument("--registry-dir", default="registry")
+    corrective_validate.add_argument("--cases", type=int, default=2)
+    corrective_validate.add_argument(
+        "--base", default="outputs/perception/gate_validation"
+    )
+    corrective_validate.set_defaults(func=cmd_corrective_validate_executor)
+
+    corrective_freeze = corrective_sub.add_parser(
+        "freeze-formal-config",
+        help="executor 驗證通過後，最後凍結更正後的 formal_config",
+    )
+    corrective_freeze.add_argument("--freeze-dir", default="freeze/runs/PFC-001")
+    corrective_freeze.add_argument(
+        "--validation", default="outputs/corrective/executor_validation.json"
+    )
+    corrective_freeze.add_argument("--allow-dirty", action="store_true")
+    corrective_freeze.set_defaults(func=cmd_corrective_freeze_formal_config)
 
     locks_parser = subparsers.add_parser("locks", help="formal freeze 狀態")
     locks_sub = locks_parser.add_subparsers(dest="locks_command", required=True)

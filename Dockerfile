@@ -12,7 +12,9 @@
 # 主要責任:
 #   1. 以 python:3.10-slim 為基底，與本機 py -3.10 對齊
 #   2. 安裝 llvm 執行期，讓 drjit 的 llvm_ad_rgb variant 可用
-#   3. 以 pip install -e ".[dev,simulation,admin,agents]" 安裝全部相依
+#   3. 以 pip install -e ".[dev,simulation,admin,agents,perception]" 安裝全部相依
+#      （perception 於 2026-09-01 加入：Full PC-MEF 的 Formal E2 同時需要
+#       torch 推論與容器 volume 內的 registry/vault，必須在同一個行程內）
 #   4. 建立非 root 使用者，避免 volume 內的產物變成 root 所有
 #   5. HEALTHCHECK 以 pcmef version 確認容器內的套件真的能匯入
 # 維護提醒:
@@ -63,7 +65,14 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY pcmef/__init__.py ./pcmef/__init__.py
 RUN pip install --upgrade pip && \
-    pip install -e ".[dev,simulation,admin,agents]" && \
+    # torch 必須**先**由 CPU wheel index 裝好，順序不能顛倒。
+    # 先跑 extras 的話 pip 會從 PyPI 解出 CUDA build，連帶拉進
+    # cuda-toolkit 與整組 nvidia-* —— 實測映像從 1.6 GB 漲到 8.5 GB，
+    # 事後再 --force-reinstall 成 CPU 版也拿不回那些層。
+    # 版本釘死的理由與 mitsuba 同一條：Full PC-MEF 的 Formal E2 在容器內
+    # 執行，逐 case 的 argmax 直接決定路由與最終分數，換版即換 run。
+    pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0" && \
+    pip install -e ".[dev,simulation,admin,agents,perception]" && \
     # 把模擬器釘到與本機完全相同的版本。pyproject 的 mitsuba>=3.5 / drjit>=0.4
     # 對開發夠用，但 transient 的數值輸出會餵進 E1 —— 容器與本機跑出不同版本，
     # 兩邊的結果就不可比，而 NOTE-012（DLL detach 崩潰）與 NOTE-013（時間窗截斷）

@@ -324,6 +324,108 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-051 Pre-final corrective pass：補完 NOTE-048 的 exclusion，並實作真正的 Formal E2 executor
+
+**決策日期**：2026-09-01（教授裁決，Pre-Final Corrective Pass）
+
+**適用範圍**：`freeze/runs/PFC-001/`（新的 corrective formal run）；
+`freeze/amendments/AMD-006`；`pcmef/experiments/{corrective_pass,corrective_run,
+e2_formal,e2_executor_validation}.py`；`pcmef/perception/gate.py` 的兩個版本常數；
+`Dockerfile` 與 `pyproject.toml` 的 perception 相依。
+
+**決策**：
+
+1. reliability anchors 改在**已核定的 effective 93** 上重擬合，
+   演算法、feature、anchor rule 一律不動。
+2. 以相同既定程序在 effective-93 stress set 上重跑一次 gate search 作為驗證。
+3. 新增 `experiments.e2_formal.run_formal_e2_full()` —— 完整實作已凍結架構的
+   Full PC-MEF executor。
+4. 更正以**新的 run 目錄**存在（`freeze/runs/PFC-001/`），
+   原 `freeze/` 的 22 個 lock 一個位元都不動。
+5. 只有 `reliability_final`、`gate`、`formal_config` 三個 identity 被 supersede；
+   其餘 19 個逐位元延用，雜湊不變。
+
+**原因**：
+
+### reason A —— NOTE-048 的 exclusion 只套了一半
+
+稽核結果精確如下：`gate.run_gate_validation()` 在做任何事之前就呼叫了
+`exclude_duplicate_identity_families()`，因此**溫度校準、severity ladder、
+stress set、gate 門檻搜尋全部跑在 effective 31 family / 93 sample 上**。
+
+但 `llm_real_validation._compute_cases()` 直接讀 gate-validation manifest，
+**沒有套用 exclusion**，於是 reliability anchors 擬合在原始 32 family /
+96 sample 上 —— 包含 `Empty f27`，而那正是因為與 ds_v2 的 `Empty f15`
+共用 physical_scene_family 才被剔除的 family。
+
+NOTE-050 誠實記下了這個邊界，但**記錄一個缺陷不等於修好它**。
+同一條規則、同一個 pool：pipeline 不該對「自己可以看過哪些場景」有兩種說法。
+
+這是**已核准規則的套用不完整**，不是新的 tuning 決策。
+
+### reason B —— formal_config 凍結在 executor 之前
+
+`gate.lock` 記載 `reliability_routing_v1` 與 `selective_escalation_bridge_v1`，
+但當時唯一可用的 runner 是 `gate.run_formal_e2()`，它走 `apply_gate()` 加
+決定性的 `confidence_weighted_arbiter`，並自報 `llm_arm_evaluated: false`。
+
+一份認證了「沒有任何程式實作的決策路徑」的 formal_config，
+不能是 one-shot Final E2 的執行依據。
+
+**更正的實測結果（變好變差都接受，未再調整）**：
+
+| | anchors (q_v / q_t) | scale (q_v / q_t) | routes over 93 |
+|---|---|---|---|
+| before（96，有缺陷） | 0.30071915 / 13.30154476 | 0.51111756 / 1.44501684 | esc 2 / fus 77 / t_tof 6 / t_vis 8 |
+| after（93，更正後） | 0.30038111 / 13.49939913 | 0.62924124 / 1.45468644 | esc 2 / fus 76 / t_tof 6 / t_vis 9 |
+
+**一個 case 的路由改變**（trust_vision 多一筆、fusion 少一筆）。
+
+**gate 數值一個都沒有動。** 在 effective-93 stress set 上重跑同一套搜尋
+逐位元重現了四個門檻 —— 因為 gate search 從來沒有使用 reliability anchors，
+缺陷傳不到它。`gate.lock` 之所以仍取得新 identity，**只**因為它
+交叉引用了 `reliability_config_hash`。
+
+`disagreement_threshold` 未變 ⇒ `delta` 未變 ⇒
+**`conflict_operational` 不 supersede，逐位元延用。**
+
+### 為什麼是 amendment + 新 run，不是 erratum
+
+`core/errata.py` 的 `FORBIDDEN_PATH_PREFIXES` 硬性拒絕 parameter / estimator /
+seed / scene / config 的更正，且 `scientific_state_changed=True` 不得凍成 erratum。
+本次更正確實改動了一組 fitted parameter，因此**不符合勘誤層的資格**，
+只能走 amendment（AMD-006）加開新 run。
+
+延用的 19 個 lock 採**逐位元複製**而非重算。複製後雜湊與 parent 相同，
+那是「沒有被重新裁決」唯一的機器證據；重算即使得到同樣的值，
+也證明不了沒有人在中間動過手腳。
+
+### 順帶修掉的兩個相依不實
+
+| 項目 | 宣告 | 事實 | 處置 |
+|---|---|---|---|
+| `perception` extra | `tensorflow>=2.13` + `scikit-learn>=1.3` | 兩者在整個程式庫**一次都沒有被 import** | 改為 `torch>=2.0` |
+| 容器相依 | 不含 perception 組 | Full PC-MEF 的 Formal E2 同時需要 torch 推論與容器 volume 內的 registry/vault，**必須同一行程** | Dockerfile 加裝，torch 由 CPU wheel index 釘 2.10.0 |
+
+torch 的安裝順序**必須在 extras 之前**：先跑 extras 會讓 pip 從 PyPI 解出
+CUDA build，連帶拉進 `cuda-toolkit` 與整組 `nvidia-*`。
+實測映像由 1.63 GB 漲到 8.5 GB，事後 `--force-reinstall` 成 CPU 版也拿不回那些層。
+
+**驗證**：
+
+```
+py -3.10 -m pcmef.cli corrective reliability-gate
+py -3.10 -m pcmef.cli corrective open-run
+py -3.10 -m pytest tests/e2 -v
+docker compose build
+docker compose run --rm pcmef corrective validate-executor
+```
+
+families 36-43 在本次更正的每一個步驟中**皆未生成、未讀取、未推論**；
+`precondition_evidence` 的三個 false 是這件事唯一可被檢驗的形式。
+
+---
+
 ## NOTE-050 Final pre-flight：三個 legacy lock 契約對齊實際 execution path
 
 **決策日期**：2026-09-01（教授裁決，Final Pre-Flight Freeze）

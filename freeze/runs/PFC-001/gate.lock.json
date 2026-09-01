@@ -1,0 +1,62 @@
+{
+  "created_at": "2026-09-01T04:04:52.255942+00:00",
+  "lock_type": "gate",
+  "payload": {
+    "code_version": "0d252a78be93edf9df2fa8e946f150d7547fac3a",
+    "corrective_lineage": {
+      "amendment": "AMD-006",
+      "reason": "no gate value changed. Re-running the same search procedure on the effective-93 stress set reproduced every threshold exactly, because the gate search never consumed the reliability anchors. This lock takes a new identity only because it cross-references reliability_config_hash, which did change.",
+      "run_id": "PFC-001",
+      "search_reproduced_frozen_gate": true,
+      "supersedes_hash": "1ff2d66745da30a73c3b977de1d34d94c67094ee4b70a49b653d492e931ac0d3",
+      "values_unchanged": true
+    },
+    "decision_bridge_formula": "F(x) = (1 - e) * p_trad + e * s_A, with e = 1 iff route == 'escalated'",
+    "decision_bridge_version": "selective_escalation_bridge_v1",
+    "disagreement_threshold": 0.48965981236738715,
+    "effective_gate_validation_hash": "bc2ec62a62b4f351f63ce1247e58c2ed4e07a436d7efdde355de1eb18fe3b7a2",
+    "escalation_rate_is_a_result": "The Formal E2 escalation rate is itself a research finding. Thresholds must not be adjusted to make the LLM arm fire more often.",
+    "fitted_on": "gate_validation",
+    "fusion_weight": 0.5,
+    "gate_validation_accuracy": 0.7795698924731183,
+    "legacy_continuous_gate": {
+      "note": "the continuous simplex gate g = clip(alpha*D + beta*U + gamma*Q) had no production caller and must not be revived (NOTE-049)",
+      "parameters": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "status": "SUPERSEDED_NEVER_ACTIVATED"
+    },
+    "objective": "routed accuracy on gate-validation, arbiter disabled",
+    "q_tof_threshold": 17.01321693530837,
+    "q_vision_threshold": 1.3157833714234424,
+    "re_search_forbidden": true,
+    "reliability_config_hash": "6e54e11b9800ccb62f19431fa0700d942c538121334515129a1747ec7b7a15b9",
+    "routing_policy": "1) exactly one modality reliable -> that modality dominates; 2) both reliable and they agree -> traditional fixed fusion; 3) both weak, or both reliable but disagreeing -> escalate to the arbiter.",
+    "routing_policy_source": "pcmef.perception.gate.reliability_route",
+    "routing_policy_version": "reliability_routing_v1",
+    "search_escalation_rate": 0.3064516129032258,
+    "search_grid": {
+      "construction": "quantiles of the gate-validation signal distributions: Q_vision and Q_tof at linspace(0.05, 0.95, 19), D at linspace(0.5, 0.99, 12)",
+      "disagreement_grid_points": 12,
+      "q_tof_grid_points": 19,
+      "q_vision_grid_points": 19
+    },
+    "search_grid_hash": "1a9a587d2e3bedf921c9178d1440e3b153964d4dfd3c1f5f985087fc5264e1e2",
+    "temperature_predictions_unchanged": {
+      "tof": true,
+      "vision": true
+    },
+    "temperature_tof": 0.04978728827972712,
+    "temperature_vision": 0.16915522430955235,
+    "tie_break": "strict `>` on routed accuracy, so the first candidate in grid order wins ties; iteration order is q_vision outer, q_tof middle, D inner",
+    "tie_break_implementation": {
+      "code_sha256": "ba220df85a7693f93afcd6a6fc728f3eab5db4a84ea99d58b1a6a12457f3ed57",
+      "function": "fit_gate_rule",
+      "source_file": "pcmef/perception/gate.py"
+    }
+  },
+  "payload_hash": "4f04333517f9884ea72e6488210bb45479fc2986e5c4a320eb9975296cb9dc14",
+  "version": 1
+}

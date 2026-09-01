@@ -1,0 +1,27 @@
+{
+  "created_at": "2026-08-30T14:57:01.429035+00:00",
+  "lock_type": "metric_config",
+  "payload": {
+    "code_hash": "ededc2971688ad9fe40438e80d722db9822c4cf09dcd13225b42036f374229ce",
+    "metric_definitions": {
+      "delta": "NW_initial - NW_calibrated; positive means calibration moved the simulator closer to the real sensor",
+      "inference_unit": "base scenario (paired bootstrap), not measurement point",
+      "normalization": "s_f frozen in CAL-SF-001, calibration-only pooled IQR",
+      "primary": "wasserstein_w1 per class x feature on the pooled distribution, reported raw and as NW = W1 / s_f",
+      "secondary": [
+        "mean_sd_error",
+        "class_distance_ordering"
+      ]
+    },
+    "s_f": {
+      "ambient_rate_mcps": 0.015600000000000003,
+      "distance_mm": 15.75,
+      "sigma_like": 0.1506,
+      "signal_rate_mcps": 1.2344000000000008
+    },
+    "s_f_hash": "8e71171c7ae851c1e575627a78ac107b626f7c228895125b07b864454ee0096e",
+    "s_f_record": "CAL-SF-001"
+  },
+  "payload_hash": "d9042ce3da5d957fb5eff2c954748862c45695eb6d14205c5ab0c96ffc2f3727",
+  "version": 1
+}

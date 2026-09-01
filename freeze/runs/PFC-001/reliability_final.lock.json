@@ -1,0 +1,143 @@
+{
+  "created_at": "2026-09-01T04:04:52.207370+00:00",
+  "lock_type": "reliability_final",
+  "payload": {
+    "algorithm": "sensor_quality_sigmoid_with_cross_modal_support",
+    "algorithm_version": "reliability_margin_support_v1",
+    "anchor_fit_pool": {
+      "boundary": "the anchors are now fitted on the same effective pool that the temperature scaling, the severity ladder, the stress set and the gate threshold search already used. The previous lineage fitted them on all 96 samples including Empty f27; that defect is superseded by AMD-006, not hidden.",
+      "effective_pool_hash": "bc2ec62a62b4f351f63ce1247e58c2ed4e07a436d7efdde355de1eb18fe3b7a2",
+      "excluded_families": [
+        "Empty f27"
+      ],
+      "n_families": 31,
+      "n_samples": 93,
+      "pool": "effective clean gate-validation, AFTER the NOTE-048 exclusion",
+      "refit_forbidden": true
+    },
+    "anchor_rule": "the sigmoid is centred on the clean 5th percentile and scaled by the clean IQR, both from the gate-validation CLEAN subset only. It deliberately does NOT reuse the gate's q thresholds: those were fitted as routing cuts on the full stress set, and the ToF one (17.008) sits ABOVE the clean median (15.341), so using it as a reliability centre would score even clean ToF as unreliable.",
+    "code_components": {
+      "duq_signals": {
+        "code_sha256": "1a65a2d968ce55ae22d371ba7415849ea25d8996fb1fde85cf1c48b016eff76b",
+        "function": "duq_signals",
+        "source_file": "pcmef/perception/gate.py"
+      },
+      "fit_reliability_model": {
+        "code_sha256": "1d3e6c5148920318ad4f3a7518fdd42e6cd6884aaf61720d06d17eb3627701bd",
+        "function": "fit_reliability_model",
+        "source_file": "pcmef/perception/gate.py"
+      },
+      "quality_signals": {
+        "code_sha256": "94cafa592ae6933bf89140898d82435820dbf91b21aecd6cd69efa78a12a715c",
+        "function": "quality_signals",
+        "source_file": "pcmef/perception/gate.py"
+      },
+      "reliability_route": {
+        "code_sha256": "4f8f6dab7ee110f857b87e001a221fc1530624cb5ef3f185eeeef752d502ea0b",
+        "function": "reliability_route",
+        "source_file": "pcmef/perception/gate.py"
+      },
+      "reliability_scores": {
+        "code_sha256": "c7541f04e38dd4184b9f81b62e4c8f07744af38ba846a87f9d461d7f1dde7e75",
+        "function": "reliability_scores",
+        "source_file": "pcmef/perception/gate.py"
+      }
+    },
+    "code_hash": "5014320972ac9cde1fddaaf5b539e56683133b7ec87ad2305b1eed33b9c8381a",
+    "corrective_lineage": {
+      "amendment": "AMD-006",
+      "cases_whose_route_changed": 1,
+      "previous_anchor_fit_pool_n_samples": 96,
+      "previous_anchors": {
+        "q_tof_clean_median": 15.340806782941156,
+        "q_tof_degraded_anchor": 13.301544761468188,
+        "q_tof_scale": 1.4450168379822053,
+        "q_vision_clean_median": 0.8570526590295242,
+        "q_vision_degraded_anchor": 0.30071915032810825,
+        "q_vision_scale": 0.5111175604602404
+      },
+      "previous_route_counts": {
+        "escalated": 2,
+        "fusion": 77,
+        "trust_tof": 6,
+        "trust_vision": 8
+      },
+      "reason": "NOTE-048's duplicate-identity exclusion was not applied to the reliability fit (AMD-006 reason A). Same algorithm, same features, same anchor rule, different pool.",
+      "run_id": "PFC-001",
+      "supersedes_hash": "ebf4529a3d411eceaf425d6464f8f7f8f7242cf41859b11aee92dddda5371e1d"
+    },
+    "deterministic_reproduction": {
+      "method": "recomputed from the frozen ds_v2 checkpoints and the frozen gate rule; only the fitting pool changed",
+      "routes_over_effective_pool": {
+        "escalated": 2,
+        "fusion": 76,
+        "trust_tof": 6,
+        "trust_vision": 9
+      }
+    },
+    "effective_validation_pool_hash": "bc2ec62a62b4f351f63ce1247e58c2ed4e07a436d7efdde355de1eb18fe3b7a2",
+    "evidence_sources": [
+      "sensor_quality",
+      "degradation_margin",
+      "cross_modal_support"
+    ],
+    "feature_schema": {
+      "D": {
+        "computed_by": "pcmef.perception.gate.duq_signals",
+        "definition": "0.5 * sum(|p_vision - p_tof|) (total variation distance)",
+        "source": "the two calibrated class-probability vectors. D is a cross-modal AGREEMENT signal, not either modality's own confidence: it is symmetric and invariant to how sharp either distribution is."
+      },
+      "Q_tof": {
+        "computed_by": "pcmef.perception.gate.quality_signals",
+        "definition": "log1p(median(signal_rate_mcps) / median(ambient_rate_mcps))",
+        "source": "raw ToF recording only"
+      },
+      "Q_vision": {
+        "computed_by": "pcmef.perception.gate.quality_signals",
+        "definition": "log1p(var(Laplacian(grey(rgb)) / mean(|grey|)))",
+        "source": "raw RGB evidence only"
+      },
+      "ordered_features": [
+        "Q_vision",
+        "Q_tof",
+        "D"
+      ]
+    },
+    "fitted_statistics": {
+      "q_tof_clean_median": 15.391133522833938,
+      "q_tof_degraded_anchor": 13.499399129444784,
+      "q_tof_scale": 1.4546864443216325,
+      "q_vision_clean_median": 0.8526553020834183,
+      "q_vision_degraded_anchor": 0.30038111405117257,
+      "q_vision_scale": 0.6292412402504894
+    },
+    "fitted_statistics_source": "5th percentile (anchor) and IQR (scale) of the CLEAN gate-validation distribution of each Q; medians recorded for reference",
+    "forbidden_predictive_features": [
+      "max softmax probability",
+      "predictive entropy of the modality being scored",
+      "calibrated confidence",
+      "anything derived from p_m(y|x)"
+    ],
+    "forbidden_rationale": "The pilot established that classifier confidence is not modality reliability: temperature scaling made ToF sharp (T=0.0498), so a degraded ToF is confidently wrong and a confidence-weighted arbiter is pulled towards the wrong modality. q_m therefore reads only sensor-side degradation evidence and cross-modal support.",
+    "forbidden_statement": "max-softmax / entropy / calibrated confidence are NOT modality reliability inputs.",
+    "formula": "margin_m = sigmoid((Q_m - anchor_m) / scale_m); support = 0.5 + 0.5 * (1 - clip(D, 0, 1)); q_m = clip(margin_m * support, 0, 1)",
+    "parameters": {
+      "clip_range": [
+        0.0,
+        1.0
+      ],
+      "reliable_margin": 0.5,
+      "routing_rule": "1) exactly one modality reliable -> that modality dominates; 2) both reliable and they agree -> traditional fixed fusion; 3) both weak, or both reliable but disagreeing -> escalate to the arbiter.",
+      "routing_version": "reliability_routing_v1",
+      "sigmoid_scale_floor": 1e-09,
+      "support_floor": 0.5,
+      "support_floor_rationale": "on disagreement the cross-modal term degrades to a neutral 0.5 rather than 0, so that a conflict does not crush both q values at once and leave the router with no discrimination"
+    },
+    "scalers": {
+      "kind": "none",
+      "note": "there is no fitted scaler. anchor/scale are reference statistics of the clean distribution, used directly in the sigmoid."
+    }
+  },
+  "payload_hash": "6e54e11b9800ccb62f19431fa0700d942c538121334515129a1747ec7b7a15b9",
+  "version": 1
+}

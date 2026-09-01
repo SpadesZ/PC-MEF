@@ -1,0 +1,417 @@
+{
+  "created_at": "2026-08-28T06:59:11.969932+00:00",
+  "lock_type": "initial_simulation",
+  "payload": {
+    "amendments": {
+      "AMD-001": "553e2dfa2eb1fcc560f4fd530ea5e8b4234fe3628f9f0703087aa6767891209a",
+      "AMD-002": "9742eab8baafe2b91786a17fe20df7853afe6939d098de47d301fdcc92b44237"
+    },
+    "claim_boundary": "This lock freezes the PRE-CALIBRATION model. 26 registry values remain uncalibrated placeholders/nuisance parameters; the simulation is NOT claimed to be close to the real sensor's distributions. Its purpose is to fix the starting point so that calibration cannot silently move it.",
+    "code_dirty_at_freeze": false,
+    "code_version": "56c54dd7abe907a72fd4b1c57d3fcbca8ce28c9e",
+    "environment": {
+      "drjit": "1.3.1",
+      "mitransient": "unavailable",
+      "mitsuba": "3.8.0",
+      "platform": "Windows-10-10.0.26200-SP0",
+      "python": "3.10.11",
+      "variant": "llvm_ad_rgb"
+    },
+    "estimator": {
+      "detection_threshold_sigma": 5.0,
+      "min_return_bins": 2,
+      "preregistration_hash": "172b82058460bdb07f024fb78adc2315d2b682397b1aae6b6d1173771f50db6c",
+      "selected": "leading_edge",
+      "selection_artifact": "outputs/estimator_select/estimator_selection.json"
+    },
+    "initial_parameter_values": {
+      "SPEED_OF_LIGHT_M_PER_S": 299792458.0,
+      "TOF_RECORDING_POINTS": 500,
+      "_ALBEDO_BY_PRESET": {
+        "bubbly": 0.92,
+        "misty": 0.88,
+        "water": 0.6
+      },
+      "_BOTTLE_SURFACE_ALPHA": 0.02,
+      "_FOIL_GAP_TO_BOTTLE_RATIO": 1.0,
+      "_FOIL_REFLECTANCE_940NM": 0.85,
+      "_FOIL_SIZE_TO_DIAMETER_RATIO": 4.0,
+      "_FOIL_SURFACE_ALPHA": 0.15,
+      "_INTERIOR_BASE_IOR": {
+        "bubbly": "water",
+        "empty": "air",
+        "misty": "air",
+        "water": "water"
+      },
+      "_LEADING_MARGIN_BINS": 8,
+      "_ROOM_LIGHT_RADIANCE": 0.02,
+      "_SIGMA_T_REFERENCE_PER_M": 100.0,
+      "ambient_energy_to_mcps": 1.0,
+      "ambient_jitter_relative": 0.05,
+      "bounce_budget": 3.0,
+      "distance_offset_mm": 0.0,
+      "foil_orientation": "facing_camera",
+      "geometry.bottle_diameter_mm": 57.0,
+      "geometry.lateral_offset_mm": 0.0,
+      "geometry.sensor_to_bottle_mm": 50.0,
+      "geometry.wall_thickness_mm": 2.0,
+      "light.cutoff_angle_deg": 25.0,
+      "lighting.irradiance": 1.0,
+      "max_depth": 12,
+      "medium.bubble_density": 0.3,
+      "medium.mist_density": 0.15,
+      "medium.turbidity": 0.05,
+      "noise_relative_sigma": 0.01,
+      "optical_path_to_distance": 0.5,
+      "resolution": [
+        64,
+        64
+      ],
+      "sample_interval_s": 0.08200001312,
+      "sensor.fov_deg": 45.0,
+      "sigma_multipath_weight": 1.0,
+      "sigma_snr_weight": 1.0,
+      "sigma_width_to_mm": 1.0,
+      "signal_energy_to_mcps": 1.0,
+      "spp": 16,
+      "temporal_bins": 128
+    },
+    "parameter_ranges": {
+      "_ALBEDO_BY_PRESET": [
+        0.0,
+        1.0
+      ],
+      "_BOTTLE_SURFACE_ALPHA": [
+        0.001,
+        0.3
+      ],
+      "_FOIL_GAP_TO_BOTTLE_RATIO": [
+        0.1,
+        6.0
+      ],
+      "_FOIL_REFLECTANCE_940NM": [
+        0.3,
+        0.98
+      ],
+      "_FOIL_SIZE_TO_DIAMETER_RATIO": [
+        2.0,
+        10.0
+      ],
+      "_FOIL_SURFACE_ALPHA": [
+        0.01,
+        0.6
+      ],
+      "_LEADING_MARGIN_BINS": [
+        2,
+        32
+      ],
+      "ambient_energy_to_mcps": [
+        1e-06,
+        "1.0e6"
+      ],
+      "ambient_jitter_relative": [
+        0.0,
+        0.5
+      ],
+      "bounce_budget": [
+        1.5,
+        10.0
+      ],
+      "distance_offset_mm": [
+        -20.0,
+        20.0
+      ],
+      "foil_orientation": null,
+      "light.cutoff_angle_deg": [
+        5.0,
+        45.0
+      ],
+      "max_depth": [
+        8,
+        32
+      ],
+      "medium.bubble_density": [
+        0.0,
+        2.0
+      ],
+      "medium.mist_density": [
+        0.0,
+        2.0
+      ],
+      "medium.turbidity": [
+        0.0,
+        2.0
+      ],
+      "noise_relative_sigma": [
+        0.0,
+        0.5
+      ],
+      "resolution": [
+        32,
+        512
+      ],
+      "sensor.fov_deg": [
+        10.0,
+        60.0
+      ],
+      "sigma_multipath_weight": [
+        0.0,
+        100.0
+      ],
+      "sigma_snr_weight": [
+        0.0,
+        100.0
+      ],
+      "sigma_width_to_mm": [
+        1e-06,
+        "1.0e6"
+      ],
+      "signal_energy_to_mcps": [
+        1e-06,
+        "1.0e6"
+      ],
+      "spp": [
+        16,
+        4096
+      ],
+      "temporal_bins": [
+        64,
+        1024
+      ]
+    },
+    "parameter_set_hash": "3bd65b50264413e6249d1d19cc900a8487673f073a4e531b3c456b760a39ff69",
+    "readiness": {
+      "IS-01": "PASS",
+      "IS-02": "PASS",
+      "IS-03": "PASS",
+      "IS-04": "PASS",
+      "IS-05": "PASS",
+      "IS-06": "PASS"
+    },
+    "registry": {
+      "confounded_groups": {
+        "CG-1_extinction": {
+          "calibrated": [
+            "medium.bubble_density",
+            "medium.mist_density",
+            "medium.turbidity"
+          ],
+          "fixed": [
+            "_SIGMA_T_REFERENCE_PER_M"
+          ],
+          "members": [
+            "_SIGMA_T_REFERENCE_PER_M",
+            "medium.bubble_density",
+            "medium.mist_density",
+            "medium.turbidity"
+          ],
+          "status": "RESOLVED"
+        },
+        "CG-2_brightness": {
+          "calibrated": [
+            "signal_energy_to_mcps"
+          ],
+          "fixed": [
+            "lighting.irradiance"
+          ],
+          "members": [
+            "lighting.irradiance",
+            "signal_energy_to_mcps"
+          ],
+          "status": "RESOLVED"
+        },
+        "CG-3_ambient": {
+          "calibrated": [
+            "ambient_energy_to_mcps"
+          ],
+          "fixed": [
+            "_ROOM_LIGHT_RADIANCE"
+          ],
+          "members": [
+            "_ROOM_LIGHT_RADIANCE",
+            "ambient_energy_to_mcps"
+          ],
+          "status": "RESOLVED"
+        }
+      },
+      "counts": {
+        "class_specific": 5,
+        "confounded_groups": 3,
+        "formal_blockers": 26,
+        "formal_blocking": 26,
+        "groups_blocked": 0,
+        "groups_resolved": 3,
+        "groups_undecided": 0,
+        "kind.calibration_only": 26,
+        "kind.derived": 1,
+        "kind.fixed": 10,
+        "kind.topology": 1,
+        "status.CONFIRMED": 9,
+        "status.CONVENTION": 3,
+        "status.PLACEHOLDER": 18,
+        "status.RECONSTRUCTED": 3,
+        "status.UNKNOWN": 5,
+        "total": 38,
+        "unresolved": 26
+      },
+      "parameter_set_hash": "3bd65b50264413e6249d1d19cc900a8487673f073a4e531b3c456b760a39ff69",
+      "version": "v0.3.0"
+    },
+    "reproducibility": {
+      "checks": {
+        "RP-01": "PASS",
+        "RP-02": "PASS",
+        "RP-03": "PASS",
+        "RP-04": "PASS"
+      },
+      "runs_compared": [
+        "outputs/repro_a",
+        "outputs/repro_b"
+      ],
+      "tolerance": {
+        "max_abs_diff": 0.0,
+        "max_rel_diff": 0.0,
+        "total_energy_rel_diff": 0.0
+      },
+      "verified": true
+    },
+    "scene_hash": "f60b2a0ce12792fd43a03e26ba629b435584e02b65269f24ed7142e2c6f7d2b6",
+    "scene_topology": {
+      "run_identity_hash": "bcbd4f42e7474948b0e5230ac96853bf0b69c1010afa33b8f6e9bde4a9f7c591",
+      "scenarios": {
+        "smoke_bubbly_1042": {
+          "binning": {
+            "bin_width_opl_m": 0.0033875000000000008,
+            "bin_width_s": 1.1299483724837403e-11,
+            "start_opl_m": 0.07289999999999999,
+            "temporal_bins": 128,
+            "total_span_s": 1.4463339167791876e-09
+          },
+          "illumination": "split_active_ambient",
+          "integrator": "transient_prbvolpath",
+          "scenario_hash": "bf6ab3ff3a31e8af4e85691a65c3d0300e00a5c08c4a422b34459c6d6b7e8f98",
+          "seed": 1042,
+          "spp": 16
+        },
+        "smoke_empty_1001": {
+          "binning": {
+            "bin_width_opl_m": 0.0033875000000000008,
+            "bin_width_s": 1.1299483724837403e-11,
+            "start_opl_m": 0.07289999999999999,
+            "temporal_bins": 128,
+            "total_span_s": 1.4463339167791876e-09
+          },
+          "illumination": "split_active_ambient",
+          "integrator": "transient_path",
+          "scenario_hash": "d1fa75c28a2fb47bbbd7c4e9fef35770a56d7121c3bfba9382483d5632187a31",
+          "seed": 1001,
+          "spp": 16
+        },
+        "smoke_misty_1004": {
+          "binning": {
+            "bin_width_opl_m": 0.0033875000000000008,
+            "bin_width_s": 1.1299483724837403e-11,
+            "start_opl_m": 0.07289999999999999,
+            "temporal_bins": 128,
+            "total_span_s": 1.4463339167791876e-09
+          },
+          "illumination": "split_active_ambient",
+          "integrator": "transient_prbvolpath",
+          "scenario_hash": "888960c7d16b57cb0aaffac6bc7fc9eaaf3f40d04c851c7767c0c21ae0c8e86d",
+          "seed": 1004,
+          "spp": 16
+        },
+        "smoke_water_1002": {
+          "binning": {
+            "bin_width_opl_m": 0.0033875000000000008,
+            "bin_width_s": 1.1299483724837403e-11,
+            "start_opl_m": 0.07289999999999999,
+            "temporal_bins": 128,
+            "total_span_s": 1.4463339167791876e-09
+          },
+          "illumination": "split_active_ambient",
+          "integrator": "transient_prbvolpath",
+          "scenario_hash": "8896051746192e7871a1765b2e63f539dbd3ca1f8b8274c3f3d38e74af93a05e",
+          "seed": 1002,
+          "spp": 16
+        }
+      },
+      "version": "NOTE-029 shell+air+shell with far-side foil reflector"
+    },
+    "surrogate": {
+      "analysis": {
+        "main_window_halfwidth_bins": 8
+      },
+      "calibration_hash": "62be141b213605dad6ccca29e9438b908af4bfa88927a5bb44ab35560b64a713",
+      "placeholders": [
+        "ambient_energy_to_mcps",
+        "ambient_jitter_relative",
+        "distance_offset_mm",
+        "noise_relative_sigma",
+        "sigma_multipath_weight",
+        "sigma_snr_weight",
+        "sigma_width_to_mm",
+        "signal_energy_to_mcps"
+      ],
+      "scales": {
+        "ambient_energy_to_mcps": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 1.0
+        },
+        "ambient_jitter_relative": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 0.05
+        },
+        "distance_offset_mm": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 0.0
+        },
+        "noise_relative_sigma": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 0.01
+        },
+        "optical_path_to_distance": {
+          "derived": true,
+          "placeholder": false,
+          "source": "derived from monostatic sensor/emitter geometry (NOTE-026): the optical path is exactly twice the one-way range, so the factor is 1/2",
+          "value": 0.5
+        },
+        "sigma_multipath_weight": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 1.0
+        },
+        "sigma_snr_weight": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 1.0
+        },
+        "sigma_width_to_mm": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 1.0
+        },
+        "signal_energy_to_mcps": {
+          "derived": false,
+          "placeholder": true,
+          "source": "smoke placeholder",
+          "value": 1.0
+        }
+      }
+    },
+    "surrogate_hash": "62be141b213605dad6ccca29e9438b908af4bfa88927a5bb44ab35560b64a713"
+  },
+  "payload_hash": "dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335",
+  "version": 1
+}

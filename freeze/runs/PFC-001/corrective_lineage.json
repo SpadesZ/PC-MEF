@@ -1,0 +1,47 @@
+{
+  "amendment": "AMD-006",
+  "carried_forward_lock_hashes": {
+    "agent_schema": "ef5149cfc4d241b736527649082c4caee6b2047b2c441e5d5827245071fd0025",
+    "calibrated_simulation": "079b248980eaff85068be1988a50ecf56a6ae783b425c05c0147e37d3ef515d9",
+    "claim_boundary": "d31b879fdc9a269caf8d2b0c03e9992c6a1c413d81be29894410a76075894814",
+    "conflict_operational": "6cdfab0fba51c5c37c82981bb35719a08244e52c55629741c15099ddd6e01c26",
+    "e1_candidates": "c4afdd1ca123d2ead32d26a809d610d0a543ed1f758d7fb26f7dd6632dfffaf3",
+    "e1_evaluation_design": "94e88a94ccb1d130adc3ef215f633e18e1db8fa65d331cedb9704de28a944347",
+    "e1_outcome": "ca94ca1fbf9c3412f193d1c795a636db49ec8b041971da460f16afb271243d10",
+    "e1_scientific_rule": "0cc14311861c21cd51d48231162c9dd8b7cf0162c6088cb8d4fdc6dc1762a69b",
+    "e2_sample_size": "38f836a87fe4be9633c26edbf9a49357c85ea804540ddb44c2c61df95c24a7ba",
+    "inference_firewall": "c4fa72dfc978f0305c5afb32d35183431803f2fca0a67c24df957db9099b82c6",
+    "initial_simulation": "dc15c9543a3aecacafcd1cbc110c48fc5fdd08d28457d4859d2a0bf573cb8335",
+    "llm_runtime": "969c45695d70fffe528ded33886a2f5852f0e5d529ace0aa75462a1da973773a",
+    "metric_config": "d9042ce3da5d957fb5eff2c954748862c45695eb6d14205c5ab0c96ffc2f3727",
+    "perception_condition_policy": "9fe097e90467f5e15160619cd511ec23090992e45ba62d1c76fc3409cfb02a75",
+    "real_split_policy": "186d307571b39ce37a7532346302c5cf6a842b0d617b0d90abd81db6b4048f40",
+    "statistics_config": "117b3663d1de41e9aa1ff3a136e07792afaa021efab6adddec239753dd9f8c08",
+    "synthetic_split_policy": "c5508fd8de19eeedd8cdbe253b4588110fa98e5a1a60a0a777d5656e186484cb",
+    "training_seed_pairs": "67df08fbfe3e182105f472acfe8bafe20e6d83ca06b28e13c1b76dbf28821dfe",
+    "validation_pool": "38699e754b32223c614483662651ccab5b495d83c9fb6568ea9916dfb3e21515"
+  },
+  "carried_forward_semantics": "byte-identical copies of the parent lock files. Their hashes are unchanged, which is the machine-checkable form of 'not re-decided'.",
+  "correction_did_not_use_final_e2": true,
+  "created_at": "2026-09-01T04:04:52.298277+00:00",
+  "final_e2_36_43_generated": "NO",
+  "final_e2_36_43_read": "NO",
+  "formal_config_status": "DEFERRED_UNTIL_EXECUTOR_VALIDATED",
+  "new_lock_hashes": {
+    "gate": "4f04333517f9884ea72e6488210bb45479fc2986e5c4a320eb9975296cb9dc14",
+    "reliability_final": "6e54e11b9800ccb62f19431fa0700d942c538121334515129a1747ec7b7a15b9"
+  },
+  "parent_freeze_dir": "freeze",
+  "parent_lineage_retained": true,
+  "reasons": {
+    "A": "NOTE-048's duplicate-identity exclusion was applied by run_gate_validation but not by the reliability fit, so the anchors were fitted on 96 samples including Empty f27 while every other stage used the effective 93.",
+    "B": "formal_config was frozen before any executor implemented the decision path named in gate.lock; the only runner available used a deterministic arbiter substitute and self-reported llm_arm_evaluated: false."
+  },
+  "run_id": "PFC-001",
+  "run_kind": "PRE_FINAL_CORRECTIVE",
+  "superseded_lock_hashes": {
+    "formal_config": "cefb453a80daa9766254dbfd549f5b7642b4be688561d5e8cb9dc80765742ed8",
+    "gate": "1ff2d66745da30a73c3b977de1d34d94c67094ee4b70a49b653d492e931ac0d3",
+    "reliability_final": "ebf4529a3d411eceaf425d6464f8f7f8f7242cf41859b11aee92dddda5371e1d"
+  }
+}
