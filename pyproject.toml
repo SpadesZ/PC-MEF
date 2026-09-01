@@ -27,7 +27,11 @@ simulation = ["mitsuba>=3.5", "drjit>=0.4", "mitransient>=1.3"]
 # EXR 讀取走 mitsuba，其餘數值走已在核心相依的 numpy/scipy。
 # 宣告錯的相依比沒宣告更糟：乾淨機器會裝兩個用不到的重套件，然後仍然缺 torch。
 perception = ["torch>=2.0"]
-agents = ["httpx>=0.27", "jsonschema>=4.20"]
+# Pillow 是 encode_image_evidence() 的 PNG 編碼後端，也就是 vision 角色
+# 送出影像的唯一路徑。2026-09-01 之前沒宣告只是因為主機碰巧裝了：
+# real validation 把編碼放在主機、provider 呼叫放在容器，所以容器缺它也不會
+# 顯現。Full PC-MEF 的 Formal E2 在同一個行程內做完兩件事，就會撞上。
+agents = ["httpx>=0.27", "jsonschema>=4.20", "Pillow>=10.0"]
 # cryptography 是 secrets vault 的加密後端。缺它時系統 fail-closed
 # （只能用 env: 形式的 secret_ref，不能在 UI 直接貼 key，見 NOTE-016），
 # 因此它是 admin 這組功能的真實相依，不是可有可無 ——
