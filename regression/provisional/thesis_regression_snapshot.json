@@ -1,0 +1,321 @@
+{
+  "FINAL_E2_36_43_TOUCHED": "NO",
+  "canonical": false,
+  "canonical_blockers": [
+    "AMD-007 is written but not frozen: the evidence-contract v2 change has not been validated against a real provider.",
+    "llm_runtime.lock still records the pre-v2 runtime identity. FIXED_SUMMARY is still the correct representation mode name; what is stale is that the lock does not yet reflect tof_fixed_summary_v2_channel_preserving, the role_evidence_contract_v2 additive whitelist, timeout_sec=120, or the new role connection topology and runtime_config_hash.",
+    "formal_config.lock inherits that stale llm_runtime identity.",
+    "The paid connection identity for the Final E2 run is not yet fixed. If secret_ref or role_connection_map change when billing is enabled, the runtime identity changes again and any baseline taken before that expires."
+  ],
+  "canonical_name_is_reserved": "This is NOT the Thesis Profile Golden Regression baseline of SAI v0.6.0 section 6. Calling it Golden would assert that the canonical scientific identity is settled, and it is not.",
+  "covered_tgr": {
+    "TGR-01": "class order",
+    "TGR-02": "scenario identity",
+    "TGR-03": "sensor observation schema",
+    "TGR-04": "ToF channel semantics",
+    "TGR-05": "perception prediction",
+    "TGR-06": "reliability values",
+    "TGR-07": "route decision",
+    "TGR-08": "LLM role evidence projection",
+    "TGR-10": "statistics resample unit/seed",
+    "TGR-12": "truth firewall"
+  },
+  "created_at": "2026-09-02T03:08:01.185816+00:00",
+  "frozen_lock_hashes": {
+    "agent_schema": "ef5149cfc4d241b736527649082c4caee6b2047b2c441e5d5827245071fd0025",
+    "conflict_operational": "6cdfab0fba51c5c37c82981bb35719a08244e52c55629741c15099ddd6e01c26",
+    "e2_sample_size": "38f836a87fe4be9633c26edbf9a49357c85ea804540ddb44c2c61df95c24a7ba",
+    "gate": "4f04333517f9884ea72e6488210bb45479fc2986e5c4a320eb9975296cb9dc14",
+    "inference_firewall": "c4fa72dfc978f0305c5afb32d35183431803f2fca0a67c24df957db9099b82c6",
+    "llm_runtime": "969c45695d70fffe528ded33886a2f5852f0e5d529ace0aa75462a1da973773a",
+    "reliability_final": "6e54e11b9800ccb62f19431fa0700d942c538121334515129a1747ec7b7a15b9",
+    "statistics_config": "117b3663d1de41e9aa1ff3a136e07792afaa021efab6adddec239753dd9f8c08",
+    "validation_pool": "38699e754b32223c614483662651ccab5b495d83c9fb6568ea9916dfb3e21515"
+  },
+  "items": {
+    "TGR-01_class_order": {
+      "agents_import_the_same_object": true,
+      "class_order": [
+        "Empty",
+        "Water-filled",
+        "Bubbly",
+        "Misty"
+      ],
+      "digest": "25967ad82f0a2b8ec0b26a695f7ffd2784037b924fcba71dc233fed780d92350",
+      "source": "pcmef.core.constants.CLASS_ORDER"
+    },
+    "TGR-02_scenario_identity": {
+      "conditions": [
+        "clean",
+        "conflict",
+        "tof_degraded",
+        "vision_degraded"
+      ],
+      "digest": "37583bc16c055b2c0dafef5037aa9ac1d72ab0a82d5d993db345225eae982ef3",
+      "empty_f27_present": false,
+      "n_base_scenarios": 93,
+      "n_families": 31,
+      "n_rows": 372
+    },
+    "TGR-03_observation_schema": {
+      "digest": "b35fb3ca04576979910d3bef8da9d29c7c6404efcb4be4a5cecccce8b03ec3d5",
+      "n_tof_features": 4,
+      "preprocessing_digest": "14e25c10035305010d9bda16310468c17363e8b3c72ce24909728c2a00e081b3",
+      "tof_recording_points": 500,
+      "tof_recording_shape": [
+        500,
+        4
+      ],
+      "tof_schema": [
+        "distance_mm",
+        "ambient_rate_mcps",
+        "signal_rate_mcps",
+        "sigma_like"
+      ]
+    },
+    "TGR-04_tof_channel_semantics": {
+      "channel_order": [
+        "distance_mm",
+        "ambient_rate_mcps",
+        "signal_rate_mcps",
+        "sigma_like"
+      ],
+      "digest": "140cdf0425351517207e94923794a638a5f161b9b761ec20a7dc428f7ed9c3c1",
+      "n_numeric_values": 27,
+      "no_cross_channel_waveform_statistic": true,
+      "numeric_paths": [
+        "channels.ambient_rate_mcps.mean",
+        "channels.ambient_rate_mcps.median",
+        "channels.ambient_rate_mcps.p10",
+        "channels.ambient_rate_mcps.p90",
+        "channels.ambient_rate_mcps.std",
+        "channels.ambient_rate_mcps.temporal_diff_std",
+        "channels.distance_mm.mean",
+        "channels.distance_mm.median",
+        "channels.distance_mm.p10",
+        "channels.distance_mm.p90",
+        "channels.distance_mm.std",
+        "channels.distance_mm.temporal_diff_std",
+        "channels.sigma_like.mean",
+        "channels.sigma_like.median",
+        "channels.sigma_like.p10",
+        "channels.sigma_like.p90",
+        "channels.sigma_like.std",
+        "channels.sigma_like.temporal_diff_std",
+        "channels.signal_rate_mcps.mean",
+        "channels.signal_rate_mcps.median",
+        "channels.signal_rate_mcps.p10",
+        "channels.signal_rate_mcps.p90",
+        "channels.signal_rate_mcps.std",
+        "channels.signal_rate_mcps.temporal_diff_std",
+        "derived.signal_to_ambient_ratio",
+        "derived.valid_sample_ratio",
+        "n_samples"
+      ],
+      "order_invariant_count": 23,
+      "order_sensitive_paths": [
+        "channels.ambient_rate_mcps.temporal_diff_std",
+        "channels.distance_mm.temporal_diff_std",
+        "channels.sigma_like.temporal_diff_std",
+        "channels.signal_rate_mcps.temporal_diff_std"
+      ],
+      "paths_contaminated_by_ambient_perturbation": [
+        "derived.signal_to_ambient_ratio"
+      ],
+      "summary_version": "tof_fixed_summary_v2_channel_preserving"
+    },
+    "TGR-05_perception_prediction": {
+      "p_tof_argmax_digest": "990259ff653656f230ad5e7cfc3c2d2c3bddc41386f76ffc723bc6ae51f762e7",
+      "p_tof_digest": "5cf70c99b536d5e8ff1d408f478985fa3dc15e4d339fbac1939eed82450bba3e",
+      "p_vision_argmax_digest": "2c87dfa01c3bf70f7a81fc6b3d09c8e3f35e0cc9aac6e589cc50ab395036a01c",
+      "p_vision_digest": "bcd903c605371691287586a43b9d7b087761429e4ba08de1adaec4d7ab12bc1f",
+      "shape": [
+        372,
+        4
+      ]
+    },
+    "TGR-06_reliability_values": {
+      "q_digests": {
+        "q_tof": "28c6ace83db5977c82d6ebe43fa9ac5004bf99b5fd305aa7c3f6d8899f1080de",
+        "q_vision": "0113f2e885a4854b4b42775ca153fa39af0867a4b5ccd47e73e8d942e25b6883"
+      },
+      "signal_digests": {
+        "D": "5f71774e2d511a9171962910dedc1dabccfd6286312360f1e0ec099bf3b3297f",
+        "Q_tof": "5c632c6b27c7e0727989179f5d21e5f2446beb4121909d9bd439e129ef0bb102",
+        "Q_vision": "83c936addf0c761a7f0746abd0b23a3dbb787a71ba5a6de7dd51dd8fd4bc14b9",
+        "U_tof": "296b46b0a8295e0c09031be55328e4baab0d412c6e1590a29eb6bc1e23800167",
+        "U_vision": "27dcab6b23d87e3b087288c1397fcb3b9c83dd84d9da9248235a232b2374633a"
+      }
+    },
+    "TGR-07_route_decision": {
+      "counts": {
+        "escalated": 142,
+        "fusion": 107,
+        "trust_tof": 63,
+        "trust_vision": 60
+      },
+      "digest": "734e941c64af9a6dfc49b8f433832feda50ce61dadfb0c73d363e08268b15b35",
+      "escalated": 142
+    },
+    "TGR-08_role_evidence_projection": {
+      "call_order": [
+        "observation_agent",
+        "physics_agent",
+        "visual_semantic_agent",
+        "arbitration_agent"
+      ],
+      "contract_version": "role_evidence_contract_v2",
+      "digest": "47c3f2253d7a6d8b10c75bcc489ee41767fb37b82d561e6da925985e5a3010a2",
+      "gate_route_withheld_from_every_role": true,
+      "image_routing": {
+        "arbitration_agent": false,
+        "observation_agent": true,
+        "physics_agent": false,
+        "visual_semantic_agent": true
+      },
+      "image_routing_declaration_matches_implementation": true,
+      "image_routing_mismatches": [],
+      "roles": {
+        "arbitration_agent": {
+          "contract_receives_image": false,
+          "receives_image": false,
+          "spec_needs_image": false,
+          "structure_digest": "b4e8d93bb9c2e927e729d1086a5da86cf4b63f14d9cb14b0f11a3cd2733b92e1",
+          "top_level_keys": [
+            "anonymous_proposals",
+            "calibrated_class_probabilities",
+            "class_order",
+            "cross_modal",
+            "evidence_contract_version",
+            "modality_reliability",
+            "observation_brief",
+            "predictive_entropy",
+            "representation_mode",
+            "role",
+            "schema_version",
+            "sensing_quality_cues"
+          ]
+        },
+        "observation_agent": {
+          "contract_receives_image": true,
+          "receives_image": true,
+          "spec_needs_image": true,
+          "structure_digest": "990da1241c3334f2175a32df87289642e7a9ff09fba0044a079ffb4fca012d90",
+          "top_level_keys": [
+            "class_order",
+            "evidence_contract_version",
+            "representation_mode",
+            "role",
+            "schema_version",
+            "sensing_quality_cues",
+            "tof_summary"
+          ]
+        },
+        "physics_agent": {
+          "contract_receives_image": false,
+          "receives_image": false,
+          "spec_needs_image": false,
+          "structure_digest": "9e018f1e081704103e500569d5ef9f75ca2a036f856de1b60e8c60ade716d20d",
+          "top_level_keys": [
+            "calibrated_class_probabilities",
+            "class_order",
+            "evidence_contract_version",
+            "modality_reliability",
+            "observation_brief",
+            "predictive_entropy",
+            "representation_mode",
+            "role",
+            "schema_version",
+            "sensing_quality_cues",
+            "tof_summary"
+          ]
+        },
+        "visual_semantic_agent": {
+          "contract_receives_image": true,
+          "receives_image": true,
+          "spec_needs_image": true,
+          "structure_digest": "ba938dd5c74c70e7d0e61b352bdcd89d4b1435abbc9f7e9e4e2e483a4db8b161",
+          "top_level_keys": [
+            "calibrated_class_probabilities",
+            "class_order",
+            "evidence_contract_version",
+            "modality_reliability",
+            "observation_brief",
+            "predictive_entropy",
+            "representation_mode",
+            "role",
+            "schema_version",
+            "sensing_quality_cues"
+          ]
+        }
+      }
+    },
+    "TGR-10_statistics": {
+      "bootstrap_replicates": 10000,
+      "bootstrap_seed": 20260827,
+      "decision_bridge_version": "selective_escalation_bridge_v1",
+      "digest": "85920735920063d777944c73a13559bfd6e110685de94d1a6355491668f6a14b",
+      "resample_unit": "physical_scene_family",
+      "routing_policy_version": "reliability_routing_v1",
+      "stratification": "class"
+    },
+    "TGR-12_truth_firewall": {
+      "clean": true,
+      "cross_condition_invariance": {
+        "condition_a": "vision_degraded",
+        "condition_b": "conflict",
+        "differing_paths_by_role": {},
+        "invariant": true,
+        "note": "Numeric values are deliberately not compared: they must differ. What must not differ is any text, identifier or flag, because that is how a generation condition would reach the model."
+      },
+      "forbidden_keys_scanned": [
+        "base_scenario_id",
+        "class_index",
+        "class_label",
+        "condition",
+        "family_index",
+        "gate_route",
+        "label",
+        "physical_scene_family",
+        "rgb_path",
+        "scenario_id",
+        "severity",
+        "stress_id",
+        "tof_path",
+        "tof_severity",
+        "truth",
+        "vision_severity"
+      ],
+      "forbidden_token_violations": {},
+      "roles_scanned": [
+        "arbitration_agent",
+        "observation_agent",
+        "physics_agent",
+        "visual_semantic_agent"
+      ],
+      "token_scan_fields": [
+        "gate_route"
+      ],
+      "violations_by_role": {}
+    }
+  },
+  "purpose": "Behavioural baseline taken before the P0-1..P0-6 refactor so that 'only moved code, did not change behaviour' is checkable rather than asserted. No accuracy is computed and no research parameter is set.",
+  "report_id": "thesis_provisional_regression_snapshot",
+  "representative_case": {
+    "note": "the first escalated row: the only route whose payload is actually sent to a provider, so it is the right shape to fingerprint",
+    "route": "escalated",
+    "row_index": 33
+  },
+  "scientific_result": false,
+  "sources": {
+    "base_manifest_dir": "outputs/perception/gate_validation",
+    "ds_dir": "outputs/perception/ds_v2",
+    "freeze_dir": "freeze/runs/PFC-001",
+    "stress_manifest": "outputs/perception/gate/stress/stress_manifest.json",
+    "stress_set_rebuilt": false
+  },
+  "uncovered_tgr": {
+    "TGR-09": "selective escalation result requires executing the four real agents. The free-tier daily quota is exhausted, and a cached deterministic substitute would validate the substitute rather than the production path.",
+    "TGR-11": "frozen formal config hash semantics / no silent fallback is what the ACTIVE_LINEAGE resolver introduces in P0-1. There is nothing to fingerprint until that resolver exists."
+  }
+}

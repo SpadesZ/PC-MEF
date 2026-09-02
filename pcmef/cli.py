@@ -2993,6 +2993,62 @@ def cmd_corrective_validate_executor(args: argparse.Namespace) -> int:
     return 0 if document["all_passed"] else 2
 
 
+def cmd_regression_capture(args: argparse.Namespace) -> int:
+    """取一份 provisional 行為快照。**不是** Golden Baseline。"""
+    from pcmef.experiments.regression_snapshot import (
+        CANONICAL_BLOCKERS, capture_snapshot, write_snapshot,
+    )
+
+    document = capture_snapshot(
+        args.freeze_dir, ds_dir=args.ds_dir, base_manifest_dir=args.base,
+        stress_manifest=args.stress_manifest,
+        progress=lambda message: print(message, flush=True),
+    )
+    path = write_snapshot(document, args.out)
+    print(f"\n  wrote {path}")
+    print(f"  canonical = {document['canonical']}  (provisional, not Golden)")
+    for name in sorted(document["items"]):
+        item = document["items"][name]
+        digest = item.get("digest", "")
+        print(f"    {name:38s} {digest[:16] if digest else '-'}")
+    print(f"\n  covered   {len(document['covered_tgr'])} TGR items")
+    print(f"  uncovered {len(document['uncovered_tgr'])}: "
+          f"{', '.join(sorted(document['uncovered_tgr']))}")
+    print(f"\n  why this is not yet the Golden baseline ({len(CANONICAL_BLOCKERS)}):")
+    for blocker in CANONICAL_BLOCKERS:
+        print(f"    - {blocker.splitlines()[0]}")
+    print(f"\n  FINAL_E2_36_43_TOUCHED = {document['FINAL_E2_36_43_TOUCHED']}")
+    return 0
+
+
+def cmd_regression_verify(args: argparse.Namespace) -> int:
+    """重新取一份快照並與存檔比對。任何差異即 exit 2。"""
+    from pcmef.experiments.regression_snapshot import SnapshotError, verify_snapshot
+
+    try:
+        report = verify_snapshot(
+            args.snapshot, args.freeze_dir, ds_dir=args.ds_dir,
+            base_manifest_dir=args.base, stress_manifest=args.stress_manifest,
+            progress=lambda message: print(message, flush=True),
+        )
+    except SnapshotError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    print(f"\n  snapshot   {report['snapshot_path']}")
+    print(f"  taken at   {report['snapshot_created_at']}")
+    if report["identical"]:
+        print("\n  IDENTICAL — deterministic behaviour unchanged")
+    else:
+        print(f"\n  {report['n_differences']} DIFFERENCE(S):")
+        for difference in report["differences"]:
+            print(f"    {difference['field']}")
+            print(f"      stored  {difference['stored']}")
+            print(f"      current {difference['current']}")
+    print(f"\n  FINAL_E2_36_43_TOUCHED = {report['FINAL_E2_36_43_TOUCHED']}")
+    return 0 if report["identical"] else 2
+
+
 def cmd_corrective_freeze_formal_config(args: argparse.Namespace) -> int:
     """最後一步：凍結更正後的 formal_config。"""
     import subprocess
@@ -4130,6 +4186,38 @@ def build_parser() -> argparse.ArgumentParser:
     corrective_regression.add_argument("--out", default="outputs/corrective")
     corrective_regression.add_argument("--cases", type=int, default=2)
     corrective_regression.set_defaults(func=cmd_corrective_evidence_regression)
+
+    regression_parser = subparsers.add_parser(
+        "regression",
+        help="重構前後的 deterministic 行為比對（provisional，不是 Golden baseline）",
+    )
+    regression_sub = regression_parser.add_subparsers(
+        dest="regression_command", required=True
+    )
+    for name, helptext, handler in (
+        ("capture", "取一份 provisional 行為快照", cmd_regression_capture),
+        ("verify", "重新取快照並與存檔比對；有差異即 exit 2", cmd_regression_verify),
+    ):
+        sub = regression_sub.add_parser(name, help=helptext)
+        sub.add_argument("--freeze-dir", default="freeze/runs/PFC-001")
+        sub.add_argument("--ds-dir", default="outputs/perception/ds_v2")
+        sub.add_argument("--base", default="outputs/perception/gate_validation")
+        sub.add_argument(
+            "--stress-manifest",
+            default="outputs/perception/gate/stress/stress_manifest.json",
+            help="沿用既有的 effective-93 stress set；**不得**改成重建",
+        )
+        if name == "capture":
+            sub.add_argument(
+                "--out",
+                default="regression/provisional/thesis_regression_snapshot.json",
+            )
+        else:
+            sub.add_argument(
+                "--snapshot",
+                default="regression/provisional/thesis_regression_snapshot.json",
+            )
+        sub.set_defaults(func=handler)
 
     locks_parser = subparsers.add_parser("locks", help="formal freeze 狀態")
     locks_sub = locks_parser.add_subparsers(dest="locks_command", required=True)

@@ -324,6 +324,85 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-053 Provisional regression snapshot：先取行為基準，且刻意不叫 Golden
+
+**決策日期**：2026-09-02（P0-0，SAI v0.6.0 §6 的前置）
+
+**適用範圍**：`pcmef/experiments/regression_snapshot.py`；
+`pcmef regression capture` / `verify`；`regression/provisional/`。
+
+**決策**：
+
+1. 在 P0-1..P0-6 的重構之前先取一份 deterministic 行為快照，涵蓋
+   TGR-01~08 / 10 / 12，排除 TGR-09（需真實 agent）與 TGR-11（需 P0-1）。
+2. 產物**進版控**，且欄位明寫 `canonical: false` 與四條 `canonical_blockers`。
+3. TGR-08 / TGR-12 走**完整 `run_pcmef_case`**，不只呼叫 `project_for_role`。
+4. Firewall 的 token 掃描只施用於 `gate_route`；真正的洩漏檢驗改為
+   **跨 condition 不變性**。
+
+**原因**：
+
+### 1. 為什麼不叫 Golden
+
+canonical baseline 一旦建立就是後續每次比對的基準，因此必須在
+**最終 scientific identity 確定之後**才能取。目前四條都還沒解除：
+AMD-007 未凍、`llm_runtime.lock` 尚未反映 v2 evidence contract、
+`formal_config` 繼承了那份 stale identity、以及 **Final E2 要用的 paid
+connection identity 尚未確定**。最後一條特別容易被忽略：換 paid key 若改變
+`secret_ref` 或 `role_connection_map`，runtime identity 就再變一次，
+先取的 baseline 當場過期。
+
+`FIXED_SUMMARY` 這個名稱本身**沒有錯**，它仍是現行的 representation mode。
+stale 的是 lock 尚未記錄 `tof_fixed_summary_v2_channel_preserving`、
+additive whitelist、`timeout_sec=120` 與新的 role connection topology。
+
+### 2. 為什麼 TGR-08 必須跑完整 `run_pcmef_case`
+
+image routing 有**三個各自獨立的宣告來源**：`AgentSpec.needs_image`、
+`ROLE_EVIDENCE_CONTRACT_V2[...]["receives_image"]`，以及 `run_pcmef_case`
+實際傳出去的 `images=`。只呼叫 `project_for_role` 驗到的是契約的宣告，
+**驗不到實作** —— 而漂移正是發生在宣告與實作之間，且不會有任何症狀。
+快照因此用一個 recording runner 走完整條流程，逐角色記下真正收到的
+payload 與 image 數，並要求三個來源逐角色相等。
+
+順帶的好處：physics / visual / arbitration 的 payload 這時才含
+`observation_brief` 與 `anonymous_proposals`，那才是它們正式執行時看到的東西。
+
+### 3. 為什麼 token 掃描不能掃整個 payload
+
+`assert_no_forbidden_tokens` 拿去掃 evidence payload 會**大量誤報**，因為
+class space 本來就公開而且是結構必需：`calibrated_class_probabilities` 與
+`class_support` 都以類別名為鍵，`class_order` 是類別空間本身 ——
+少了它 agent 根本無法輸出 `class_support`。這些欄位對每一筆 case 都帶
+同樣的四個名字，因此不透露眼前這筆是什麼。既有的 `check_no_leakage`
+只掃 `gate_route`，正是同一個理由。
+
+真正的風險是「**隨 case 變動且對應真值**」的東西。因此改用更強的檢驗：
+取兩筆不同 generation condition 的 escalated case，比對四個角色 payload 的
+**全部非數值內容**。數值本來就該不同；會不同的若是文字、識別碼或旗標，
+那就是 condition 洩漏。實測 `vision_degraded` vs `conflict` 逐欄相同。
+
+這個檢驗抓得到 token 掃描抓不到的東西 —— 例如一句隨 severity 改寫的散文，
+其中一個字都不在禁用詞表裡。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_regression_snapshot.py -v
+py -3.10 -m pcmef.cli regression capture
+py -3.10 -m pcmef.cli regression verify        # 竄改任一欄位即 exit 2
+```
+
+實測：372 rows / 142 escalated（effective-93），ToF v2 共 27 個數值，
+其中恰好 4 個（每 channel 一個 `temporal_diff_std`）對時序敏感，
+擾動 ambient 只影響 `derived.signal_to_ambient_ratio`。
+families 36-43 全程未生成、未讀取。
+
+**維護邊界**：不得把產物改名為 Golden 或把 `canonical` 改成 `true`，
+除非 `CANONICAL_BLOCKERS` 每一條都已解除 —— 那是 P0-B 的工作。
+
+---
+
 ## NOTE-052 Evidence contract correction：channel-preserving ToF 與角色最小隔離
 
 **決策日期**：2026-09-01（教授裁決，Pre-Final Evidence-Contract Correction）
