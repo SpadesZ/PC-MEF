@@ -324,6 +324,99 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-063 Primary endpoint 有自己的 CI：新增 estimator，不動舊的
+
+**決策日期**：2026-09-02（P1-4，AMD-009）
+
+**適用範圍**：`pcmef/stats/bootstrap.py` 的
+`cluster_bootstrap_worst_condition_delta()`；`e2_formal` 的
+`worst_condition_statistics` 區塊。
+
+**決策**：
+
+1. 新增 worst-condition 專用的成對 cluster bootstrap estimator。
+2. **不修改** `cluster_bootstrap_delta()`。
+3. 以 AMD-009 登記新 estimator。
+
+**原因**：
+
+### 1. 統計層級原本是倒的
+
+worst-condition macro-F1 是宣告的 primary robustness metric，卻只有點估計；
+而次要的 overall accuracy 反而有 CI。頭條數字沒有不確定度，附註有。
+
+### 2. 為什麼不能用某個 condition 的 CI 代替
+
+`statistics_config.lock` 說 worst-condition "is derivable from the reported
+quantities"。那對**點估計**成立，對**區間**不成立：
+每個 replicate 的 argmin condition 可能不同，而「最弱的會不會換人」
+本身就是 worst-condition 不確定性的一部分。
+
+這不是理論顧慮，實測就發生了。以假 agent 跑完整 executor（384 列、
+10000 replicates），`fixed_fusion` 作為 reference 時：
+
+```
+tof_degraded  8961
+conflict      1039        ← 10.4% 的 replicate 裡最弱的換成 conflict
+```
+
+若固定取 `tof_degraded` 的 CI，這 10.4% 就被無聲丟掉。
+（其餘三個方法是 conflict 10000/10000，所以「會換人」不是普遍現象 ——
+但它確實發生，而且發生在一個關鍵 baseline 上。）
+
+### 3. 為什麼是新增而不是擴充
+
+`cluster_bootstrap_delta` 的 `metric` 簽章是 `(y_true, y_pred) -> float`，
+**看不到每一列的 condition**，因此無法先分組再取 min。要傳 condition 進去
+就得改那個函式 —— 而 `statistics_config.lock` 綁定
+`hash_object(inspect.getsource(cluster_bootstrap_delta))`，
+改它的函式本體、**連 docstring**，都會讓既有 lineage 失效。
+
+新增函式則舊 hash 原封不動。測試把這一條釘死：
+`test_the_existing_estimator_is_byte_identical` 直接比對
+`1d8c80a65ab83dde4ea80d6ae73926d119a1465688f2ec4a53989d0ada509bb3`。
+
+新 estimator 的重抽與舊的**完全相同**：同一組 family cluster、
+class 分層、seed 20260827、10000 replicates、同一個 replicate 內
+所有方法共用那組列。差別只在 min 取在 replicate 內。
+
+### 4. 時機
+
+families 36-43 仍為 sealed。在開封前加入一個預先定義的 estimator，
+不可能是看了結果才選的分析 —— 那是「新增分析不算釣魚」的唯一條件。
+
+### 5. 實證：兩個層級可以給出相反結論
+
+同一次 run 的 `pcmef_full` vs `fixed_fusion`：
+
+```
+overall macro-F1     delta +0.0070   CI [-0.0443, +0.0503]   不顯著
+worst-condition      delta -0.0418   CI [-0.0642, -0.0250]   顯著更差
+```
+
+只報 overall 的 CI 會得到「兩者打平」；primary endpoint 的 CI 說的是
+「在最弱條件下顯著更差」。這正是 primary metric 必須有自己區間的理由。
+
+（該次 run 使用假 agent，`pcmef_full` 的數字沒有科學意義；
+有意義的是兩個統計層級的行為差異。）
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_worst_condition_bootstrap.py -v   # 9 條
+```
+
+其中 `test_overall_and_worst_can_disagree` 構造一個「平均打平、最弱崩潰」
+的方法，斷言 overall 不顯著而 worst 顯著；
+`test_the_weakest_condition_varies_across_replicates` 斷言 argmin
+在 500 個 replicate 中至少換過一次 —— 若它從不換人，
+固定 condition 的 CI 就夠用，這個 estimator 也就不必存在。
+
+**維護邊界**：不得為了共用程式碼而重構 `cluster_bootstrap_delta`。
+兩個函式的重複是刻意的，代價由 lock 的 code_sha256 決定。
+
+---
+
 ## NOTE-062 Worst-condition Macro-F1 進報告，並記下最弱的是哪個 condition
 
 **決策日期**：2026-09-02（P1-3，實驗計畫 v1.2 §5 的 primary metric）

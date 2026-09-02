@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.5.0
+# 版本: v0.6.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -24,6 +24,7 @@
 #   6. G1-G5 五條臂；G4 由既有 route 與 fused 導出，零 provider 呼叫
 #   7. worst_condition_macro_f1() primary endpoint 的點估計與最弱 condition
 #   8. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
+#   9. _worst_condition_statistics() primary endpoint 的成對 CI（AMD-009）
 # 維護提醒:
 #   - 不得在本檔重新擬合任何東西。門檻、溫度、anchors 一律由 lock 還原；
 #     refit 一次就等於 Formal E2 自己決定了自己的判準。
@@ -50,12 +51,14 @@
 #   - v0.3.0 新增：llm_mode dry run；dry run 不輸出 pcmef_full 臂（NOTE-056）。
 #   - v0.4.0 新增：G4 reliability_routing 臂與其成對統計（NOTE-061）。
 #   - v0.5.0 新增：worst-condition macro-F1 點估計與 primary_endpoint（NOTE-062）。
+#   - v0.6.0 新增：primary endpoint 的成對 CI（NOTE-063 / AMD-009）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
 #   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
 #   - py -3.10 -m pytest tests/e2/test_dry_run_mode.py -v
 #   - py -3.10 -m pytest tests/e2/test_reliability_routing_arm.py -v
 #   - py -3.10 -m pytest tests/e2/test_worst_condition_endpoint.py -v
+#   - py -3.10 -m pytest tests/e2/test_worst_condition_bootstrap.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -322,6 +325,34 @@ def worst_condition_macro_f1(
         worst[name] = float(block[chosen]["macro_f1"])
         where[name] = chosen
     return worst, where
+
+
+def _worst_condition_statistics(
+    labels: np.ndarray,
+    predictions: Mapping[str, np.ndarray],
+    rows: Sequence[Mapping[str, Any]],
+    stack: Mapping[str, Any],
+    reference: str,
+) -> dict[str, Any]:
+    """Primary endpoint 的成對 CI。重抽與 `_cluster_statistics` 完全相同。
+
+    分成兩個入口不是重複：worst-condition 必須在**每個 replicate 內**先分
+    condition 再取 min，而 `cluster_bootstrap_delta` 的 metric 拿不到列的
+    condition。詳見 `cluster_bootstrap_worst_condition_delta` 的說明與 AMD-009。
+    """
+    from pcmef.stats.bootstrap import cluster_bootstrap_worst_condition_delta
+
+    return cluster_bootstrap_worst_condition_delta(
+        labels,
+        predictions,
+        [r["physical_scene_family"] for r in rows],
+        [r["class_label"] for r in rows],
+        [r["condition"] for r in rows],
+        _macro_f1,
+        reference,
+        replicates=stack["bootstrap_replicates"],
+        seed=stack["bootstrap_seed"],
+    )
 
 
 def _cluster_statistics(
@@ -612,10 +643,14 @@ def run_formal_e2_full(
     worst_condition, worst_condition_at = worst_condition_macro_f1(per_condition)
 
     say("cluster bootstrap")
+    # G5 對 G1-G4 都要有成對比較（實驗計畫 v1.2 §5）。少了 G4，
+    # 「LLM 仲裁的增量」就沒有對照 —— G5 vs G3 混著路由與仲裁兩件事。
+    baselines = ("vision_only", "tof_only", "fixed_fusion", "reliability_routing")
     if dry_run:
         # 成對統計全部是 pcmef_full vs baseline；沒有 pcmef_full 就沒有比較。
         # cluster 形狀仍然算 —— 驗證 12 列 / cluster 與分層是 dry run 的重點之一。
         statistics: dict[str, Any] = {}
+        worst_condition_statistics: dict[str, Any] = {}
     else:
         statistics = {
             f"pcmef_full_vs_{baseline}": {
@@ -624,11 +659,31 @@ def run_formal_e2_full(
                     labels, predictions, rows, stack, baseline
                 ).items()
             }
-            # G5 對 G1-G4 都要有成對比較（實驗計畫 v1.2 §5）。少了 G4，
-            # 「LLM 仲裁的增量」就沒有對照 —— G5 vs G3 混著路由與仲裁兩件事。
-            for baseline in (
-                "vision_only", "tof_only", "fixed_fusion", "reliability_routing"
+            for baseline in baselines
+        }
+        # Primary endpoint 的 CI。**必須**用專用 estimator：worst-condition
+        # 的 CI 不等於任何單一 condition 的 CI，因為每個 replicate 的
+        # argmin condition 可能不同（NOTE-063 / AMD-009）。
+        say("worst-condition bootstrap (primary endpoint)")
+        worst_runs = {
+            baseline: _worst_condition_statistics(
+                labels, predictions, rows, stack, baseline
             )
+            for baseline in baselines
+        }
+        worst_condition_statistics = {
+            "estimator": next(iter(worst_runs.values()))["version"],
+            "comparisons": {
+                f"pcmef_full_vs_{baseline}":
+                    run["comparisons"][f"pcmef_full_vs_{baseline}"]
+                for baseline, run in worst_runs.items()
+            },
+            # 最弱 condition 在 replicate 之間會換人，而那正是不能用單一
+            # condition 的 CI 代替的原因。數出來讓那句話有證據。
+            "reference_worst_condition_counts": {
+                baseline: run["reference_worst_condition_counts"]
+                for baseline, run in worst_runs.items()
+            },
         }
     cluster_shape = _cluster_statistics(
         labels, predictions, rows, stack, "vision_only"
@@ -735,7 +790,15 @@ def run_formal_e2_full(
                 "about. The per-condition table stays in the report because which "
                 "condition is weakest is itself a finding."
             ),
+            "paired_ci_estimator": (
+                "pcmef.stats.bootstrap.cluster_bootstrap_worst_condition_delta -- "
+                "same clusters, strata, seed and shared-resample contract as the "
+                "overall estimator, but the minimum is taken inside each replicate. "
+                "The worst-condition CI is not the CI of any single condition "
+                "because the argmin condition varies across replicates (AMD-009)."
+            ),
         },
+        "worst_condition_statistics": worst_condition_statistics,
         "statistics": statistics,
         "statistics_config": {
             "replicates": stack["bootstrap_replicates"],

@@ -4,7 +4,7 @@
 #         B 與 seed 由 e1_scientific_rule.lock 提供，本檔不自行選值。
 # 檔案路徑: pcmef/stats/bootstrap.py
 # 產生時間: 2026-08-27 13:20 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 以重抽 recording/scenario 編號的方式估計信賴區間，
 #           而且同一次重抽會同時套用到 Initial 與 Calibrated 兩個候選，
 #           讓兩者的差異不含「抽到不同樣本」造成的雜訊。
@@ -16,6 +16,7 @@
 #   3. BootstrapResult 保存下界、上界、點估計與實際使用的 B/seed
 #   4. percentile_ci() 依 2.5/97.5 分位取區間
 #   5. cluster_bootstrap_delta() Final E2 的 family-cluster 成對重抽
+#   6. cluster_bootstrap_worst_condition_delta() primary endpoint 的成對重抽
 # 維護提醒:
 #   - cluster_bootstrap_delta() 的 cluster 必須是 physical_scene_family，
 #     不是 scenario：同一個 family 的 3 realization x 4 condition 是同一個
@@ -32,11 +33,19 @@
 #     CI 窄到幾乎必然「顯著」。
 #   - 不得在此提供 B 或 seed 的預設值。兩者由教授核定並凍結在
 #     e1_scientific_rule.lock（NOTE-015）；「換個 seed 看看」不是除錯手段。
+#   - 不得為了共用程式碼而重構 cluster_bootstrap_delta()。statistics_config.lock
+#     綁定它的 hash_object(inspect.getsource(...))；改函式本體、連 docstring，
+#     都會讓既有 lineage 失效。worst-condition 因此是**新增**函式（AMD-009）。
+#   - 不得拿某個固定 condition 的 CI 當作 worst-condition 的 CI。argmin
+#     會隨 replicate 換人，那正是 worst 不確定性的一部分（NOTE-063）。
 #   - v0.2.0 新增：cluster_bootstrap_delta()，實作 statistics_config.lock 凍結的
 #     family-cluster / class-stratified / 跨方法共用 cluster 契約（NOTE-050）。
+#   - v0.3.0 新增：cluster_bootstrap_worst_condition_delta()，E2 primary
+#     endpoint 的成對 CI（NOTE-063 / AMD-009）。
 #   - v0.1.0 新增：首版 paired bootstrap，決策見 NOTE-024。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e1/test_bootstrap.py -v
+#   - py -3.10 -m pytest tests/e2/test_worst_condition_bootstrap.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -52,6 +61,7 @@ __all__ = [
     "percentile_ci",
     "paired_bootstrap_ci",
     "cluster_bootstrap_delta",
+    "cluster_bootstrap_worst_condition_delta",
 ]
 
 
@@ -175,6 +185,10 @@ def paired_bootstrap_ci(
 #: 因此它必須存在於程式碼而不是只存在於 lock（同 NOTE-050 的做法）。
 CLUSTER_BOOTSTRAP_VERSION = "family_cluster_bootstrap_v1"
 
+#: Worst-condition 專用 estimator 的版本。與上者分開命名：它們的重抽
+#: 完全相同，指標卻不同，而 worst 的 CI 不能由 overall 的 CI 推得。
+WORST_CONDITION_BOOTSTRAP_VERSION = "family_cluster_worst_condition_v1"
+
 
 def cluster_bootstrap_delta(
     y_true: Sequence[int],
@@ -290,5 +304,172 @@ def cluster_bootstrap_delta(
         "rows_per_cluster": sorted({len(v) for v in rows_by_cluster.values()}),
         "reference": reference,
         "observed": observed,
+        "comparisons": comparisons,
+    }
+
+
+def cluster_bootstrap_worst_condition_delta(
+    y_true: Sequence[int],
+    predictions: Mapping[str, Sequence[int]],
+    cluster_ids: Sequence[str],
+    strata: Sequence[str],
+    conditions: Sequence[str],
+    metric: Callable[[np.ndarray, np.ndarray], float],
+    reference: str,
+    replicates: int,
+    seed: int,
+    confidence_level: float = 0.95,
+) -> dict[str, object]:
+    """Worst-condition 指標的成對 cluster bootstrap（Final E2 primary endpoint）。
+
+    重抽方式與 `cluster_bootstrap_delta` **完全相同** —— 同一組 cluster、
+    同樣的分層、同一個 seed、同一個 replicate 內所有方法共用那組列。
+    唯一的差別在指標怎麼算：
+
+        每個 replicate ->  對每個方法，先按 condition 分組算 metric，
+                           再取四者的 **minimum**
+        Delta         ->  min_k(reference) 與 min_k(other) 之差
+
+    **這無法用 `cluster_bootstrap_delta` 表達**，那裡的 `metric` 簽章是
+    `(y_true, y_pred) -> float`，拿不到列的 condition，因此看不到要以什麼
+    分組取 min。刻意新增一個函式而不是擴充舊的：`statistics_config.lock`
+    綁定 `hash_object(inspect.getsource(cluster_bootstrap_delta))`，
+    改動它的函式本體（連 docstring）都會讓既有 lock 失效（AMD-009）。
+
+    為什麼不能拿 per-condition 的 CI 代替：worst-condition 的 CI **不等於**
+    任何單一 condition 的 CI。每個 replicate 的 argmin condition 可能不同，
+    而那個「哪一個條件最弱會不會換人」正是 worst-condition 不確定性的
+    一部分。取某個固定 condition 的 CI 會把這件事整個抹掉。
+    """
+    if replicates <= 0:
+        raise BootstrapError(
+            f"replicates must be positive, got {replicates!r}; B is frozen in "
+            "statistics_config.lock and must not be defaulted here"
+        )
+    truth = np.asarray(y_true)
+    clusters = np.asarray([str(c) for c in cluster_ids])
+    stratum = np.asarray([str(s) for s in strata])
+    condition = np.asarray([str(c) for c in conditions])
+    n = len(truth)
+    if not (len(clusters) == len(stratum) == len(condition) == n):
+        raise BootstrapError(
+            f"y_true ({n}), cluster_ids ({len(clusters)}), strata ({len(stratum)}) "
+            f"and conditions ({len(condition)}) must be row-aligned"
+        )
+    if reference not in predictions:
+        raise BootstrapError(f"reference method {reference!r} is not in predictions")
+    for name, predicted_rows in predictions.items():
+        if len(predicted_rows) != n:
+            raise BootstrapError(
+                f"predictions[{name!r}] has {len(predicted_rows)} rows, expected {n}"
+            )
+
+    condition_names = sorted(set(condition.tolist()))
+    if not condition_names:
+        raise BootstrapError("no conditions supplied; worst-condition is undefined")
+
+    rows_by_cluster: dict[str, np.ndarray] = {}
+    stratum_of: dict[str, str] = {}
+    for cluster in np.unique(clusters):
+        mask = clusters == cluster
+        rows_by_cluster[cluster] = np.flatnonzero(mask)
+        owners = set(stratum[mask].tolist())
+        if len(owners) != 1:
+            raise BootstrapError(
+                f"cluster {cluster!r} spans strata {sorted(owners)}; a resample "
+                "unit must belong to exactly one stratum"
+            )
+        stratum_of[cluster] = owners.pop()
+
+    by_stratum: dict[str, list[str]] = {}
+    for cluster, owner in sorted(stratum_of.items()):
+        by_stratum.setdefault(owner, []).append(cluster)
+    if len(rows_by_cluster) < 2:
+        raise BootstrapError(
+            f"need at least 2 clusters to bootstrap, got {len(rows_by_cluster)}"
+        )
+
+    predicted = {name: np.asarray(values) for name, values in predictions.items()}
+
+    def worst(
+        truth_rows: np.ndarray, predicted_rows: np.ndarray, condition_rows: np.ndarray
+    ) -> tuple[float, str]:
+        """四個 condition 各算一次 metric，回傳最小值與它落在哪一個。
+
+        某個 condition 在這個 replicate 內沒有任何列時跳過它 —— 分層重抽
+        以 class 為層，不保證每個 condition 都被抽到。硬要當成 0 會讓
+        「沒抽到」與「全錯」無法區分。
+        """
+        scores: dict[str, float] = {}
+        for name in condition_names:
+            mask = condition_rows == name
+            if not mask.any():
+                continue
+            scores[name] = float(metric(truth_rows[mask], predicted_rows[mask]))
+        if not scores:
+            raise BootstrapError(
+                "a bootstrap replicate contained no rows for any condition"
+            )
+        chosen = min(sorted(scores), key=lambda name: scores[name])
+        return scores[chosen], chosen
+
+    observed: dict[str, float] = {}
+    observed_at: dict[str, str] = {}
+    for name, values in predicted.items():
+        observed[name], observed_at[name] = worst(truth, values, condition)
+
+    rng = np.random.default_rng(seed)
+    others = [name for name in predicted if name != reference]
+    draws: dict[str, np.ndarray] = {name: np.empty(replicates) for name in others}
+    #: 每個 replicate 裡 reference 的最弱 condition 是哪一個。它會換人，
+    #: 而那正是 worst-condition 的不確定性不能用單一 condition 的 CI
+    #: 代替的原因 —— 這裡把它數出來，讓那句話有證據。
+    reference_worst_at: dict[str, int] = {name: 0 for name in condition_names}
+
+    for replicate in range(replicates):
+        # 一次抽定，所有方法共用 —— 與 cluster_bootstrap_delta 相同。
+        drawn: list[np.ndarray] = []
+        for owner in sorted(by_stratum):
+            pool = by_stratum[owner]
+            picked = rng.choice(pool, size=len(pool), replace=True)
+            drawn.extend(rows_by_cluster[cluster] for cluster in picked)
+        rows = np.concatenate(drawn)
+        truth_rows = truth[rows]
+        condition_rows = condition[rows]
+
+        base, base_at = worst(truth_rows, predicted[reference][rows], condition_rows)
+        reference_worst_at[base_at] += 1
+        for name in others:
+            value, _ = worst(truth_rows, predicted[name][rows], condition_rows)
+            draws[name][replicate] = value - base
+
+    comparisons = {}
+    for name in others:
+        lower, upper = percentile_ci(draws[name], confidence_level)
+        comparisons[f"{name}_vs_{reference}"] = {
+            "delta": observed[name] - observed[reference],
+            "ci_lower": lower,
+            "ci_upper": upper,
+            "significant_at_95": bool(lower > 0.0 or upper < 0.0),
+        }
+
+    return {
+        "version": WORST_CONDITION_BOOTSTRAP_VERSION,
+        "estimator": "min over conditions, taken inside each replicate",
+        "resample_unit": "cluster",
+        "stratification": "stratum",
+        "shared_clusters_across_methods": True,
+        "replicates": int(replicates),
+        "seed": int(seed),
+        "confidence_level": float(confidence_level),
+        "n_rows": int(n),
+        "n_clusters": len(rows_by_cluster),
+        "conditions": condition_names,
+        "clusters_per_stratum": {k: len(v) for k, v in sorted(by_stratum.items())},
+        "rows_per_cluster": sorted({len(v) for v in rows_by_cluster.values()}),
+        "reference": reference,
+        "observed": observed,
+        "observed_worst_condition": observed_at,
+        "reference_worst_condition_counts": reference_worst_at,
         "comparisons": comparisons,
     }

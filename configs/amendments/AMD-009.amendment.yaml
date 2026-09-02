@@ -1,0 +1,123 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 供 `pcmef amendment freeze --spec` 讀取。凍結後產生
+#         freeze/amendments/AMD-009.amendment.json，並據以重凍
+#         statistics_config（新增 primary endpoint 的 estimator 登記）。
+# 檔案路徑: configs/amendments/AMD-009.amendment.yaml
+# 產生時間: 2026-09-02 21:20 +08:00
+# 版本: v0.1.0
+# 功能說明: 為 worst-condition Macro-F1 登記一個專用的 paired cluster
+#           bootstrap estimator，使 primary endpoint 有自己的 95% CI。
+# 模組定位: statistics amendment 的草稿。它**新增**一個 estimator，
+#           不修改既有的 cluster_bootstrap_delta，因此舊 lineage 的
+#           code_sha256 仍然成立。
+# 主要責任:
+#   1. 記錄為什麼 primary endpoint 需要自己的 estimator
+#   2. 證明既有 estimator 逐位元未動（hash 不變）
+#   3. 以 precondition_evidence 證明 families 36-43 仍為 sealed
+# 維護提醒:
+#   - 不得以本修訂為由重構 cluster_bootstrap_delta。它的原始碼雜湊被
+#     statistics_config.lock 綁著；共用程式碼的誘惑會讓既有 lineage 失效。
+#   - 不得在 families 36-43 生成或讀取之後才凍結本修訂。
+#   - v0.1.0 新增：草稿，對應 NOTE-063。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/e2/test_worst_condition_bootstrap.py -v
+#   - py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-009.amendment.yaml
+# ------------------------------------------------------------
+
+amendment_id: AMD-009
+
+title: >
+  Give the E2 primary endpoint its own paired confidence interval. Adds
+  cluster_bootstrap_worst_condition_delta; changes no existing estimator, no
+  threshold, and no sampling design.
+
+supersedes: >
+  Nothing is replaced. statistics_config gains a second registered estimator
+  alongside cluster_bootstrap_delta, whose source hash
+  (1d8c80a65ab83dde4ea80d6ae73926d119a1465688f2ec4a53989d0ada509bb3) is
+  unchanged and remains the entry point for accuracy and overall macro-F1.
+
+rationale: >
+  worst-condition macro-F1 is the declared primary robustness metric for E2,
+  but only the secondary quantities had confidence intervals. That inverts the
+  statistical hierarchy: the headline number would be a bare point estimate
+  while overall accuracy carried a CI.
+
+  statistics_config.lock notes that worst-condition "is derivable from the
+  reported quantities". That is true of the point estimate and false of the
+  interval. The worst-condition CI is not the CI of any single condition,
+  because the argmin condition varies from replicate to replicate, and that
+  variation is itself part of the uncertainty. Substituting a fixed
+  condition's interval would silently discard it.
+
+  It also cannot be expressed through the existing estimator. metric there has
+  signature (y_true, y_pred) -> float and never sees each row's condition, so
+  it cannot group before taking a minimum. Passing conditions in would mean
+  changing that function -- and statistics_config.lock binds
+  hash_object(inspect.getsource(cluster_bootstrap_delta)), so editing its body,
+  including its docstring, would invalidate the frozen lineage. Hence a second
+  function rather than a refactor.
+
+  Timing: families 36-43 are still sealed. A pre-specified estimator added
+  before the final partition is opened cannot have been chosen from the
+  outcome, which is the only condition under which adding an analysis is not
+  a fishing expedition.
+
+changed_contracts:
+  primary_endpoint_interval:
+    before: >
+      worst-condition macro-F1 had a point estimate only. Paired 95% CIs
+      existed for accuracy and overall macro-F1 via cluster_bootstrap_delta.
+    after: >
+      worst-condition macro-F1 additionally carries a paired 95% CI from
+      cluster_bootstrap_worst_condition_delta, for PC-MEF against each of
+      G1-G4.
+    why: >
+      A primary metric without an interval leaves the headline claim
+      unquantified while secondary ones are quantified.
+  worst_condition_estimator:
+    before: "Did not exist."
+    after: >
+      pcmef.stats.bootstrap.cluster_bootstrap_worst_condition_delta, version
+      family_cluster_worst_condition_v1. Identical resampling to the overall
+      estimator -- physical_scene_family clusters, class stratification, seed
+      20260827, 10000 replicates, one draw shared by every method within a
+      replicate -- with the per-condition minimum taken inside each replicate.
+    why: >
+      The minimum has to be taken after resampling, not before, or the
+      interval describes a fixed condition rather than the worst one.
+
+invariants_preserved:
+  existing_estimator_untouched: >
+    cluster_bootstrap_delta is byte-identical. Its source hash still equals
+    the code_sha256 recorded in statistics_config.lock, verified by
+    test_the_existing_estimator_is_byte_identical.
+  sampling_design_unchanged: >
+    e2_sample_size is untouched: 8 families per class, 3 realizations, 4
+    conditions, 384 condition rows, family_domain 44.
+  resampling_contract_unchanged: >
+    Same resample unit (physical_scene_family), same stratification (class),
+    same seed (20260827), same replicate count (10000), same shared-clusters
+    rule. The new estimator asserts these match the existing one.
+  no_threshold_or_anchor_changes: >
+    gate, reliability_final, conflict_operational, llm_runtime, agent_schema
+    and inference_firewall are untouched. This amendment adds a way to compute
+    an interval; it changes nothing about how any case is decided.
+  point_estimate_unchanged: >
+    The worst-condition point estimate is still min over per-condition
+    macro-F1 and is still derived from the reported per_condition table
+    (NOTE-062). This amendment adds the interval, not the statistic.
+
+precondition_evidence:
+  final_e2_families_36_43_generated: false
+  final_e2_families_36_43_read: false
+  formal_e2_report_exists: false
+  note: >
+    Specified while the final partition is sealed. Every number used to
+    motivate the estimator comes from the already-opened effective-93 pool or
+    from synthetic fixtures in the test suite.
+
+authority: >
+  Researcher decision. worst-condition macro-F1 was already the declared
+  primary robustness metric; this amendment brings its statistical treatment
+  in line with that status rather than changing what is being measured.
