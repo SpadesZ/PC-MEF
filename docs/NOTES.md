@@ -324,6 +324,67 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-058 Formal 監控頁唯讀，且與 CLI 共用同一個 pre-flight
+
+**決策日期**：2026-09-02（P0-7a，SAI v0.6.0 §3.1 / §19.1-19.8）
+
+**適用範圍**：`pcmef/experiments/formal_service.py`；
+`pcmef/console/formal_routes.py`；`pcmef/admin/templates/formal.html`。
+
+**決策**：
+
+1. pre-flight 與 run 摘要抽成 `formal_service`，CLI 與 Web **共用同一份**。
+2. 新增 `GET /formal` 監控頁與 `GET /formal/preflight.json`。
+   **完全唯讀** —— 沒有任何 POST 端點、form、button 或 input。
+3. 每條檢查帶 `blocking` 欄位；不通過但不阻擋者在畫面上顯示為
+   `NOTE`（黃）而非 `FAIL`（紅）。
+
+**原因**：
+
+### 1. 為什麼 Web 不能自己算 pre-flight
+
+畫面上顯示的 PASS 必須與 `formal run-e2` 實際據以放行的是同一組判斷。
+兩份實作必然漂移，而漂移的方向通常是**畫面比較寬鬆** ——
+那是最難發現的一種錯：使用者看到滿江綠，按下去卻被 CLI 擋，
+或更糟，畫面說可以而 CLI 也放行了一個本該被擋的狀態。
+
+### 2. 「FAIL 卻 ALLOWED」是看畫面才發現的
+
+`output_location_is_free` 在 dry-run 模式下刻意不阻擋（預演可以覆寫
+自己上一次的結果），在 formal 模式下則必須阻擋（one-shot）。
+但第一版模板把兩種不通過畫成同一個紅色 `FAIL`，於是預演那張卡片
+同時出現 `FAIL` 與 `ALLOWED` —— 讀的人不知道該信哪一個。
+
+這個缺陷在程式碼裡看不出來（服務層的 `blocking` 參數是對的），
+只有把頁面實際渲染出來才會撞到。因此 `blocking` 現在進 payload，
+模板據它分成三態：PASS / NOTE（不阻擋）/ FAIL。
+
+### 3. 為什麼這一頁不含啟動控制項
+
+§208 規定 formal run 一律無 UI 走 CLI，`console.runner._assert_not_formal()`
+是它在執行層的防線。監控與啟動是兩件事：**看**不需要動到那條線，
+因此 P0-7a 完全不碰它。頁面連 CSRF token 都沒有，因為沒有寫入端點。
+
+「唯讀」由測試釘住的方式是掃描 HTML 裡有沒有 `<form>` / `<button>` /
+`<input>` / `<textarea>`，而不是檢查說明文字 —— 文字可以留著而控制項偷偷長回來。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/console/test_formal_routes.py -v   # 10 條
+py -3.10 -m pcmef.cli formal preflight --mode dry-run
+```
+
+實際渲染確認（非僅讀 code）：四張卡片（執行身分／起跑前檢查·正式／
+起跑前檢查·預演／最近一次執行）、badge class 三態齊全、
+`BLOCKED`(bad) 與 `ALLOWED`(ok) 並存於兩組不同判準、
+頁面 form 與 button 計數為 **0**。
+
+**維護邊界**：要在本頁加入啟動控制項，必須同步修改
+`test_page_has_no_write_controls`，而那應該是一個需要 amendment 的決定。
+
+---
+
 ## NOTE-057 `perception e2` 退役：exit code，不是警告文字
 
 **決策日期**：2026-09-02（P0-6，SAI v0.6.0 §18「不允許 fallback legacy

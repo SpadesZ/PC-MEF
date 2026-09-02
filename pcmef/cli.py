@@ -3042,106 +3042,33 @@ def cmd_corrective_validate_executor(args: argparse.Namespace) -> int:
     return 0 if document["all_passed"] else 2
 
 
-def _formal_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
-    """Final E2 的起跑前檢查。回傳 (報告, 阻擋原因)。**不執行任何 case。**"""
-    from pcmef.core.active_lineage import ActiveLineageError, resolve_active_lineage
+def _formal_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """呼叫共用的 pre-flight 服務。
 
-    checks: list[dict[str, Any]] = []
-    blockers: list[str] = []
-    resolved = None
+    **不在這裡重算**：畫面上顯示的 PASS 必須與 `formal run-e2` 實際據以
+    放行的是同一組判斷，否則兩份實作遲早漂移，而漂移的方向通常是
+    畫面比較寬鬆（SAI §3.1）。
+    """
+    from pcmef.experiments.formal_service import preflight
 
-    def record(name: str, passed: bool, detail: str, blocking: bool = True) -> None:
-        checks.append({"check": name, "passed": passed, "detail": detail})
-        if blocking and not passed:
-            blockers.append(f"{name}: {detail}")
-
-    try:
-        resolved = resolve_active_lineage(args.lineage_root)
-        record(
-            "active_lineage_resolves", True,
-            f"{resolved.freeze_dir.as_posix()} ({len(resolved.lock_hashes)} locks)",
-        )
-    except ActiveLineageError as error:
-        record("active_lineage_resolves", False, str(error)[:220])
-        return {"checks": checks, "lineage": None}, blockers
-
-    # scenario_set_hash：families 36-43 的身分早已凍在 formal_config 裡。
-    # 生成出來的那一批必須與它相同，否則跑的就不是被預先承諾的那個 final set。
-    from pcmef.core.locks import LockStore
-
-    store = LockStore(resolved.freeze_dir)
-    formal_config = store.load("formal_config")
-    expected_hash = str(formal_config.get("scenario_set_hash", ""))
-    record(
-        "formal_config_pins_the_final_scenario_set",
-        bool(expected_hash),
-        f"scenario_set_hash={expected_hash[:16]}",
-    )
-
-    base = Path(args.base)
-    manifest = base / "dataset_manifest.json"
-    if args.mode == "formal":
-        if not manifest.exists():
-            record(
-                "final_scenario_set_generated", False,
-                f"{manifest.as_posix()} does not exist; generate families 36-43 first",
-            )
-        else:
-            generated = json.loads(manifest.read_text(encoding="utf-8"))
-            actual = str(generated.get("scenario_set_hash", ""))
-            record(
-                "final_scenario_set_matches_formal_config",
-                bool(actual) and actual == expected_hash,
-                f"manifest={actual[:16] or '<absent>'} lock={expected_hash[:16]}",
-            )
-            record(
-                "final_family_indices_are_36_to_43",
-                list(generated.get("family_indices", [])) == list(range(36, 44)),
-                f"family_indices={generated.get('family_indices')}",
-            )
-    else:
-        # dry run 不得碰 final partition：生成即開封，沒有預演的餘地。
-        indices = []
-        if manifest.exists():
-            indices = list(
-                json.loads(manifest.read_text(encoding="utf-8")).get(
-                    "family_indices", []
-                )
-            )
-        record(
-            "dry_run_does_not_touch_the_sealed_partition",
-            not any(int(i) >= 36 for i in indices),
-            f"base={base.as_posix()} family_indices={indices or '<none>'}",
-        )
-
-    record(
-        "output_location_is_free",
-        not (Path(args.out) / (
-            "formal_e2_dry_run.json" if args.mode == "dry-run"
-            else "formal_e2_report.json"
-        )).exists(),
-        f"{args.out}",
-        blocking=args.mode == "formal",
-    )
-
-    return (
-        {"checks": checks, "lineage": resolved.to_manifest() if resolved else None},
-        blockers,
+    return preflight(
+        mode=args.mode, base=args.base, out=args.out,
+        lineage_root=args.lineage_root,
     )
 
 
 def cmd_formal_preflight(args: argparse.Namespace) -> int:
     """只跑 pre-flight，不執行任何 case。"""
-    report, blockers = _formal_preflight(args)
+    report = _formal_preflight(args)
     for check in report["checks"]:
         print(f"  [{'PASS' if check['passed'] else 'FAIL'}] "
               f"{check['check']}: {check['detail']}")
     if report["lineage"]:
         print(f"\n  lineage  {report['lineage']['resolved_freeze_dir']}")
-    print(f"\n  START_FORMAL_RUN = {'ALLOWED' if not blockers else 'BLOCKED'}")
-    for blocker in blockers:
+    print(f"\n  START_FORMAL_RUN = {'ALLOWED' if report['allowed'] else 'BLOCKED'}")
+    for blocker in report["blockers"]:
         print(f"    - {blocker}")
-    return 0 if not blockers else 2
+    return 0 if report["allowed"] else 2
 
 
 def cmd_formal_run_e2(args: argparse.Namespace) -> int:
@@ -3157,14 +3084,14 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
         LLM_MODE_EXECUTE, LLM_MODE_SKIP, FormalE2Error, run_formal_e2_full,
     )
 
-    report, blockers = _formal_preflight(args)
+    report = _formal_preflight(args)
     print("pre-flight")
     for check in report["checks"]:
         print(f"  [{'PASS' if check['passed'] else 'FAIL'}] "
               f"{check['check']}: {check['detail']}")
-    if blockers:
+    if not report["allowed"]:
         print("\nSTART_FORMAL_RUN = BLOCKED", file=sys.stderr)
-        for blocker in blockers:
+        for blocker in report["blockers"]:
             print(f"  - {blocker}", file=sys.stderr)
         return 2
 

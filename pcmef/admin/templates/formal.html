@@ -1,0 +1,272 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/formal_routes.py 的 GET /formal 繪製；資料來自
+ #         experiments.formal_service 的 preflight() 與 latest_report()。
+ #         載入 pcmef/admin/static/admin.css。不發出任何對外請求。
+ # 檔案路徑: pcmef/admin/templates/formal.html
+ # 產生時間: 2026-09-02 16:20 +08:00
+ # 版本: v0.1.0
+ # 功能說明: Formal Research Workspace 的監控畫面。上半是 identity 與
+ #           pre-flight 燈號，下半是最近一次執行的結果與有效性狀態。
+ # 模組定位: SAI v0.6.0 §19.1-19.8 的最小實作。**唯讀** ——
+ #           §19.9 的啟動控制不在本頁，那條線由 §208 守著。
+ # 主要責任:
+ #   1. Identity Bar：active lineage、resolved 目錄與 lock 雜湊
+ #   2. Pre-flight Panel：formal 與 dry-run 兩組判準各自的燈號
+ #   3. Latest Run：結果、routing、provider 用量與有效性欄位
+ #   4. 沒有結果時明確說「尚未執行」，不留空白讓人以為壞了
+ # 維護提醒:
+ #   - 不得在本頁加入啟動按鈕。要加必須先處理 §208 的紅線與 amendment。
+ #   - 不得把 dry run 的結果顯示成正式結果。dry_run 為真時整張卡片
+ #     必須帶上明確標記，且 pcmef_full 那一列本來就不存在（NOTE-056）。
+ #   - 不得用 JavaScript 做摺疊；<details> 是原生元素。
+ #   - v0.1.0 新增：首版，對應 P0-7a。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_formal_routes.py -v
+ # ------------------------------------------------------------ #}
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC-MEF · 正式實驗</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
+</head>
+<body>
+<div class="page">
+
+  <h1>Formal Research Workspace</h1>
+  <p class="lede">
+    正式實驗的執行身分、起跑前檢查與最近一次結果。本頁<strong>唯讀</strong>：
+    可以看，不能改，也不能從這裡啟動。
+  </p>
+
+  {# --- Identity Bar（§19.1）------------------------------------------ #}
+  <section class="card">
+    <h2>執行身分
+      <span class="hint">lineage 是解析器，真正的身分是它解析到的目錄與雜湊</span>
+    </h2>
+    <div class="body">
+      {% if formal.lineage %}
+      <table>
+        <tbody>
+          <tr><th>ACTIVE_LINEAGE</th>
+              <td class="mono">{{ formal.lineage.pointer_path }}</td></tr>
+          <tr><th>解析到</th>
+              <td class="mono"><strong>{{ formal.lineage.resolved_freeze_dir }}</strong></td></tr>
+          <tr><th>取代</th>
+              <td class="mono">{{ formal.lineage.supersedes | join(', ') or '—' }}</td></tr>
+          <tr><th>狀態</th>
+              <td><span class="badge ok">{{ formal.lineage.status }}</span></td></tr>
+        </tbody>
+      </table>
+      <p class="note">{{ formal.lineage.reason }}</p>
+
+      <details class="advanced">
+        <summary>這次執行會讀的 {{ formal.lineage.lock_hashes | length }} 個 lock</summary>
+        <table>
+          <thead><tr><th>lock</th><th>payload hash</th></tr></thead>
+          <tbody>
+          {% for name, digest in formal.lineage.lock_hashes | dictsort %}
+            <tr><td>{{ name }}</td><td class="mono">{{ digest[:32] }}…</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </details>
+      {% else %}
+      <p><span class="badge bad">無法解析</span>
+         找不到可用的 active lineage，正式執行一律拒絕啟動。</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {# --- Pre-flight（§19.2）-------------------------------------------- #}
+  {% macro preflight_card(title, report, hint) %}
+  <section class="card">
+    <h2>{{ title }}
+      <span class="hint">{{ hint }}</span>
+    </h2>
+    <div class="body">
+      <p class="lede">
+        START_FORMAL_RUN =
+        {% if report.allowed %}
+          <span class="badge ok">ALLOWED</span>
+        {% else %}
+          <span class="badge bad">BLOCKED</span>
+        {% endif %}
+      </p>
+      <table>
+        <thead><tr><th>檢查</th><th>結果</th><th>細節</th></tr></thead>
+        <tbody>
+        {# 不通過但不阻擋的檢查必須與真正的 FAIL 分開顯示，否則畫面上會
+           出現「FAIL 卻 ALLOWED」，讀的人不知道該信哪一個。 #}
+        {% for check in report.checks %}
+          {% if check.passed %}
+            {% set label, style = 'PASS', 'ok' %}
+          {% elif check.blocking %}
+            {% set label, style = 'FAIL', 'bad' %}
+          {% else %}
+            {% set label, style = 'NOTE', 'warn' %}
+          {% endif %}
+          <tr>
+            <td class="mono">{{ check.check }}</td>
+            <td><span class="badge {{ style }}">{{ label }}</span>
+                {% if not check.passed and not check.blocking %}
+                <span class="note">不阻擋</span>{% endif %}</td>
+            <td class="note">{{ check.detail }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if report.blockers %}
+      <p class="note"><strong>阻擋原因：</strong></p>
+      <ul class="note">
+        {% for blocker in report.blockers %}<li>{{ blocker }}</li>{% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+  </section>
+  {% endmacro %}
+
+  {{ preflight_card('起跑前檢查 · 正式', formal,
+                    '一次性；families 36-43 必須已生成且身分相符') }}
+  {{ preflight_card('起跑前檢查 · 預演', dry,
+                    '零 provider 呼叫；不得使用 families 36-43') }}
+
+  {# --- Latest run（§19.3-19.8）--------------------------------------- #}
+  <section class="card">
+    <h2>最近一次執行
+      <span class="hint">
+        {% if report %}{{ report.path }}{% else %}尚無任何 run{% endif %}
+      </span>
+    </h2>
+    <div class="body">
+      {% if not report %}
+        <p><span class="badge warn">尚未執行</span>
+           這個位置還沒有任何報告。正式實驗尚未跑過，或輸出在別的目錄。</p>
+        <p class="note">看的位置：<span class="mono">{{ paths.out }}</span></p>
+      {% else %}
+
+        {% if report.dry_run %}
+        <p class="lede">
+          <span class="badge warn">DRY RUN — 不是正式結果</span>
+        </p>
+        <p class="note">{{ report.dry_run_meaning }}</p>
+        {% endif %}
+
+        <table>
+          <tbody>
+            <tr><th>report_id</th><td class="mono">{{ report.report_id }}</td>
+                <th>產生時間</th><td class="note">{{ report.created_at[:19] }}</td></tr>
+            <tr><th>scientific_result</th>
+                <td><span class="badge {{ 'ok' if report.scientific_result else 'warn' }}">
+                    {{ report.scientific_result }}</span></td>
+                <th>llm_arm_evaluated</th>
+                <td><span class="badge {{ 'ok' if report.llm_arm_evaluated else 'bad' }}">
+                    {{ report.llm_arm_evaluated }}</span></td></tr>
+            <tr><th>code revision</th><td class="mono">{{ report.code_version }}</td>
+                <th>列數</th><td>{{ report.total_rows }}</td></tr>
+            <tr><th>families</th>
+                <td class="mono">{{ report.family_indices | join(', ') if report.family_indices else '—' }}</td>
+                <th>escalation</th>
+                <td>{{ report.escalated_cases }}
+                    {% if report.escalation_rate is not none %}
+                      ({{ '%.1f' | format(report.escalation_rate * 100) }}%)
+                    {% endif %}</td></tr>
+          </tbody>
+        </table>
+
+        <h3 class="note">路由（§19.6）</h3>
+        <table>
+          <thead><tr>{% for name in report.route_counts | sort %}<th>{{ name }}</th>{% endfor %}</tr></thead>
+          <tbody><tr>{% for name in report.route_counts | sort %}
+            <td>{{ report.route_counts[name] }}</td>{% endfor %}</tr></tbody>
+        </table>
+
+        <h3 class="note">各方法（§19.5）</h3>
+        <table>
+          <thead><tr><th>arm</th><th>accuracy</th><th>macro-F1</th></tr></thead>
+          <tbody>
+          {% for name, block in report.results | dictsort %}
+            <tr>
+              <td class="mono">{{ name }}</td>
+              <td>{{ '%.4f' | format(block.accuracy) }}</td>
+              <td>{{ '%.4f' | format(block.macro_f1) }}</td>
+            </tr>
+          {% endfor %}
+          {% if report.dry_run %}
+            <tr><td class="mono">pcmef_full</td>
+                <td colspan="2" class="note">
+                  預演不輸出這一臂：填位值會恰好等於 fixed_fusion，
+                  讀起來像「沒有比較好」，而它其實從未執行。
+                </td></tr>
+          {% endif %}
+          </tbody>
+        </table>
+
+        <h3 class="note">Provider（§19.7）</h3>
+        <table>
+          <tbody>
+            <tr><th>實際呼叫</th>
+                <td>{{ report.provider_calls if report.provider_calls is not none else '—' }}</td>
+                <th>呼叫 LLM 的 case</th><td>{{ report.llm_called_cases }}</td></tr>
+            {% if report.skipped_escalated_cases %}
+            <tr><th>預演跳過</th><td colspan="3">{{ report.skipped_escalated_cases }} 筆 escalated</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+        {% if report.provider_calls_by_role %}
+        <table>
+          <thead><tr>{% for role in report.provider_calls_by_role | sort %}<th>{{ role }}</th>{% endfor %}</tr></thead>
+          <tbody><tr>{% for role in report.provider_calls_by_role | sort %}
+            <td>{{ report.provider_calls_by_role[role] }}</td>{% endfor %}</tr></tbody>
+        </table>
+        {% endif %}
+
+        <h3 class="note">統計（§19.8）</h3>
+        {% if report.statistics %}
+        <table>
+          <thead><tr><th>比較</th><th>metric</th><th>delta</th><th>95% CI</th></tr></thead>
+          <tbody>
+          {% for name, block in report.statistics | dictsort %}
+            {% for metric, value in block | dictsort %}
+            <tr>
+              <td class="mono">{{ name }}</td>
+              <td>{{ metric }}</td>
+              <td>{{ '%+.4f' | format(value.delta) }}</td>
+              <td class="mono">[{{ '%+.4f' | format(value.ci_lower) }},
+                                {{ '%+.4f' | format(value.ci_upper) }}]</td>
+            </tr>
+            {% endfor %}
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="note">
+          沒有成對統計。預演不產生 —— 全部比較都是 pcmef_full vs baseline，
+          而那一臂本來就不存在。
+        </p>
+        {% endif %}
+        <p class="note">
+          cluster：{{ report.statistics_config.n_clusters }} 個 ×
+          {{ report.statistics_config.rows_per_cluster }} 列／cluster；
+          重抽單位 {{ report.statistics_config.resample_unit }}、
+          seed {{ report.statistics_config.seed }}、
+          {{ report.statistics_config.replicates }} 次。
+        </p>
+
+        {% if report.claim_boundary %}
+        <p class="note"><strong>claim boundary：</strong>{{ report.claim_boundary }}</p>
+        {% endif %}
+      {% endif %}
+    </div>
+  </section>
+
+  <p class="note">
+    本頁唯讀。正式執行由
+    <span class="mono">pcmef formal run-e2 --mode formal</span> 啟動；
+    預演為 <span class="mono">--mode dry-run</span>。
+  </p>
+
+</div>
+</body>
+</html>
