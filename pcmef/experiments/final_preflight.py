@@ -1196,10 +1196,16 @@ def prove_final_e2_absent(out_root: str | Path = "outputs") -> dict[str, Any]:
 
 def build_preflight(
     out_dir: str | Path = "outputs/lock_proposals",
-    freeze_dir: str | Path = "freeze",
+    *,
+    freeze_dir: str | Path,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """推導十個 lock 的 payload 並回報所有 gap。**不寫任何 lock。**"""
+    """推導十個 lock 的 payload 並回報所有 gap。**不寫任何 lock。**
+
+    `freeze_dir` 必填：本函式會讀 `gate` 與 `reliability_final`，而這兩個
+    已被 AMD-006 在 PFC-001 supersede。舊的 `"freeze"` 預設指向 parent
+    lineage，那裡仍是更正前的值，讀錯不會拋錯（NOTE-054）。
+    """
     say = progress or (lambda _m: None)
     gaps: dict[str, list[str]] = {}
     payloads: dict[str, dict[str, Any]] = {}

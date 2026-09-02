@@ -121,8 +121,15 @@ class CountingAdapter:
 # ---------------------------------------------------------------------------
 
 
-def load_frozen_decision_stack(freeze_dir: str | Path = "freeze") -> dict[str, Any]:
-    """由 lock 還原 GateRule、ReliabilityModel 與統計設定。**不重新擬合。**"""
+def load_frozen_decision_stack(freeze_dir: str | Path) -> dict[str, Any]:
+    """由 lock 還原 GateRule、ReliabilityModel 與統計設定。**不重新擬合。**
+
+    `freeze_dir` **必填，刻意沒有預設值**。原本的預設是 `"freeze"`，
+    而那正是 superseded 的 parent lineage —— 兩份 lineage 的檔名與 schema
+    完全相同，讀錯不會拋任何錯誤，只會安靜地用被 AMD-006 更正掉的
+    anchors 與門檻跑完整場。呼叫端要嘛明確指定，要嘛先經
+    `resolve_active_lineage()` 解析（NOTE-054）。
+    """
     from pcmef.core.locks import LockStore
     from pcmef.perception.gate import GateRule, ReliabilityModel
 
@@ -290,7 +297,7 @@ def run_formal_e2_full(
     base_manifest_dir: str | Path,
     out_dir: str | Path,
     *,
-    freeze_dir: str | Path = "freeze",
+    freeze_dir: str | Path,
     ds_dir: str | Path = DS_V2,
     severity: dict[str, float] | None = None,
     agent_runner: Any = None,
@@ -303,6 +310,9 @@ def run_formal_e2_full(
 
     formal=True 時 escalated case **必須**有真正的四 agent 仲裁器；
     沒有就中止，不接受決定性替身。
+
+    `freeze_dir` 為 required keyword-only：見 `load_frozen_decision_stack`
+    的說明，這裡不得回復預設值。
     """
     from pcmef.agents.pcmef_agents import (
         RetryExhaustedError, build_case_evidence,

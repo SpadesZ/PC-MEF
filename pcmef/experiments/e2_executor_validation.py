@@ -272,7 +272,8 @@ def check_cluster_bootstrap(rows: list[dict[str, Any]], labels: np.ndarray) -> l
 
 
 def run_executor_validation(
-    freeze_dir: str | Path = "freeze/runs/PFC-001",
+    *,
+    freeze_dir: str | Path,
     out_dir: str | Path = "outputs/corrective",
     registry_dir: str | Path = "registry",
     max_real_cases: int = 2,
@@ -280,7 +281,13 @@ def run_executor_validation(
     stress_manifest: str | Path = EFFECTIVE_STRESS_MANIFEST,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Full PC-MEF executor 的執行驗證。**不看任何準確率。**"""
+    """Full PC-MEF executor 的執行驗證。**不看任何準確率。**
+
+    `freeze_dir` 必填。原本的預設 `"freeze/runs/PFC-001"` 指得雖然對，
+    但它是硬編碼的：AMD-007 之後若產生 PFC-002，這個預設會安靜地過期，
+    而驗證報告仍會宣稱自己驗的是「當前 lineage」。lineage 由呼叫端
+    透過 `resolve_active_lineage()` 決定（NOTE-054）。
+    """
     from pcmef.agents.pcmef_agents import AgentRunner, build_case_evidence
     from pcmef.experiments.e2_formal import (
         CountingAdapter, load_frozen_decision_stack, prepare_cases,
