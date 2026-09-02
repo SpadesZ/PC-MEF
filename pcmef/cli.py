@@ -1349,10 +1349,54 @@ def cmd_perception_gate(args: argparse.Namespace) -> int:
 
 
 def cmd_perception_e2(args: argparse.Namespace) -> int:
-    """Formal E2。一次性 —— 跑完就是結論。"""
+    """**已退役。** 這個指令從來不是 Full PC-MEF 的 Formal E2 執行器。
+
+    它走 `gate.run_formal_e2` —— apply_gate 加決定性替身仲裁，
+    自報 `llm_arm_evaluated: False`，統計用 `paired_bootstrap_delta`
+    （scenario 重抽、seed 20260831）。而 `statistics_config.lock` 明文寫著
+    那個入口 **must NOT be used for Final E2**：重抽單位與 seed 都不符。
+
+    只印訊息並回傳非零。刻意不保留「照樣跑」的行為：一個名字裡有
+    Formal E2、跑起來也像 Formal E2、輸出也長得像結果的指令，
+    遲早會有人在某個深夜打到它（NOTE-057）。
+    """
+    print(
+        "DEPRECATED: `perception e2` is not a Formal E2 executor and has been "
+        "retired.\n"
+        "\n"
+        "  It ran gate.run_formal_e2, which substitutes a deterministic arbiter\n"
+        "  for the four agents, self-reports llm_arm_evaluated: False, and uses\n"
+        "  paired_bootstrap_delta -- an entry point statistics_config.lock\n"
+        "  explicitly forbids for Final E2 (wrong resample unit, wrong seed).\n"
+        "\n"
+        "  For the deterministic gate pilot (families 28-35, already seen):\n"
+        "    pcmef perception e2-deterministic-pilot\n"
+        "\n"
+        "  For the real Full PC-MEF Formal E2:\n"
+        "    pcmef formal preflight --mode formal\n"
+        "    pcmef formal run-e2 --mode formal\n"
+        "\n"
+        "  To exercise the pipeline without spending provider quota:\n"
+        "    pcmef formal run-e2 --mode dry-run --base <an already-opened set>\n",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def cmd_perception_e2_deterministic_pilot(args: argparse.Namespace) -> int:
+    """決定性 gate pilot。**不是** Formal E2，不得用它產生 final 結論。"""
     import subprocess
 
     from pcmef.perception.gate import run_formal_e2
+
+    if "e2_deterministic_gate_pilot" not in str(args.e2_dir):
+        print(
+            f"refusing to run on {args.e2_dir!r}: this command is the deterministic\n"
+            "pilot and its data directory must be the already-seen pilot set. The\n"
+            "Full PC-MEF executor is `pcmef formal run-e2`.",
+            file=sys.stderr,
+        )
+        return 2
 
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
@@ -1366,7 +1410,7 @@ def cmd_perception_e2(args: argparse.Namespace) -> int:
         ds_dir=args.ds_dir, gate_rule_path=args.gate_rule, e2_dir=args.e2_dir,
         out_dir=args.out, code_version=commit, progress=say,
     )
-    print("\nFormal E2")
+    print("\nDeterministic gate pilot — NOT a Formal E2 result")
     print(f"  arbiter: {document['arbiter'][:80]}...")
     print(f"  LLM arm evaluated: {document['llm_arm_evaluated']}")
     print(f"\n  {'arm':14s} {'accuracy':>9s} {'macroF1':>9s} {'errors':>7s}")
@@ -1390,6 +1434,11 @@ def cmd_perception_e2(args: argparse.Namespace) -> int:
     print(f"\n  routing: {routing['counts']}")
     print(f"  LLM call rate (would-be): {routing['llm_call_rate']:.4f}  "
           f"actual LLM calls: {routing['llm_calls_actually_made']}")
+    print(
+        "\n  These numbers come from a deterministic arbiter on an already-seen\n"
+        "  set, with scenario-level resampling. They are a pilot finding, not a\n"
+        "  Formal E2 result, and must not be reported as one."
+    )
     return 0
 
 
@@ -4052,24 +4101,29 @@ def build_parser() -> argparse.ArgumentParser:
     perception_gate.add_argument("--fusion-weight", type=float, default=0.5)
     perception_gate.set_defaults(func=cmd_perception_gate)
 
+    # `perception e2` 已退役 —— 它從來不是 Full PC-MEF 的執行器（NOTE-057）。
+    # 保留這個名字只為了讓誤打的人得到明確指引；它一律 exit 2。
     perception_e2 = perception_sub.add_parser(
-        "e2", help="Formal E2：baseline vs PC-MEF，一次性，不得改門檻重跑"
+        "e2", help="**已退役**，見 `formal run-e2`（一律 exit 2）"
     )
-    perception_e2.add_argument("--ds-dir", default="outputs/perception/ds_v2")
-    perception_e2.add_argument("--gate-rule", default="outputs/perception/gate/gate_rule.json")
-    # 預設刻意指向一個**目前不存在**的目錄。families 28-35 的 pilot 已改名為
-    # outputs/perception/e2_deterministic_gate_pilot/，這個路徑保留給
-    # families 36-43 的 final Formal E2。指不到就失敗，比默默讀到 pilot
-    # 再把它當 final 報出來安全（那批結果已經被看過很多次）。
-    perception_e2.add_argument(
-        "--e2-dir", default="outputs/perception/formal_e2",
-        help=(
-            "final Formal E2（families 36-43）的資料目錄。"
-            "**不要指向 e2_deterministic_gate_pilot** —— 那是 pilot，非 final test。"
-        ),
-    )
-    perception_e2.add_argument("--out", default="outputs/perception/e2")
     perception_e2.set_defaults(func=cmd_perception_e2)
+
+    perception_pilot = perception_sub.add_parser(
+        "e2-deterministic-pilot",
+        help="決定性 gate pilot（families 28-35，已看過）。不是 Formal E2。",
+    )
+    perception_pilot.add_argument("--ds-dir", default="outputs/perception/ds_v2")
+    perception_pilot.add_argument(
+        "--gate-rule", default="outputs/perception/gate/gate_rule.json"
+    )
+    perception_pilot.add_argument(
+        "--e2-dir", default="outputs/perception/e2_deterministic_gate_pilot",
+        help="pilot 資料目錄；路徑必須含 e2_deterministic_gate_pilot，否則拒絕執行",
+    )
+    perception_pilot.add_argument(
+        "--out", default="outputs/perception/e2_deterministic_gate_pilot_rerun"
+    )
+    perception_pilot.set_defaults(func=cmd_perception_e2_deterministic_pilot)
 
     e1_parser = subparsers.add_parser("e1", help="E1 fidelity 實驗")
     e1_sub = e1_parser.add_subparsers(dest="e1_command", required=True)

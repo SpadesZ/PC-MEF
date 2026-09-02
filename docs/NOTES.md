@@ -324,6 +324,67 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-057 `perception e2` 退役：exit code，不是警告文字
+
+**決策日期**：2026-09-02（P0-6，SAI v0.6.0 §18「不允許 fallback legacy
+deterministic path」）
+
+**適用範圍**：`pcmef perception e2`（退役）；
+`pcmef perception e2-deterministic-pilot`（新設）。
+
+**決策**：
+
+1. `perception e2` 只印訊息並 **exit 2**，不再執行任何東西。
+2. pilot 功能移到 `perception e2-deterministic-pilot`，
+   且其 `--e2-dir` 路徑**必須含 `e2_deterministic_gate_pilot`**，否則拒絕。
+3. pilot 的輸出加註「這不是 Formal E2 結果」。
+
+**原因**：
+
+### 1. 它從來不是 Full PC-MEF 的執行器
+
+`perception e2` 走 `gate.run_formal_e2`：`apply_gate` 加**決定性替身仲裁**，
+自報 `llm_arm_evaluated: False`，統計用 `paired_bootstrap_delta`
+（scenario 重抽、seed 20260831）。而 `statistics_config.lock` 的
+`implementation.superseded_entry_point` 明文寫著它
+**must NOT be used for Final E2** —— 重抽單位與 seed 都不符。
+
+在 P0-5 之前，這是**唯一**一個名字裡有 Formal E2 的指令。
+也就是說：唯一跑得起來的「Formal E2」，正是 lock 禁止用於 Final E2 的那一條。
+
+### 2. 為什麼是 exit 2 而不是 rename 後照跑
+
+保留「印個警告但照樣跑」等於沒有退役。警告會被略過，exit code 不會。
+一個名字像 Formal E2、跑起來也像、輸出也長得像結果的指令，
+遲早會有人在某個深夜打到它，然後把那份輸出貼進論文。
+
+退役後的 parser 也不再接受 `--e2-dir` 等參數：留著會讓它看起來仍可設定。
+
+### 3. pilot 的目錄守衛
+
+pilot 指令若能指向 `outputs/perception/formal_e2`，就等於保留了
+「用 pilot 的決定性仲裁去跑 final 資料」這條路。因此路徑必須含
+`e2_deterministic_gate_pilot`，否則直接拒絕。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_legacy_e2_is_retired.py -v   # 10 條
+py -3.10 -m pcmef.cli perception e2                            # exit 2
+py -3.10 -m pcmef.cli perception e2-deterministic-pilot --e2-dir outputs/perception/formal_e2
+                                                               # exit 2
+```
+
+測試另以 monkeypatch 確認退役後的指令**連一次都不會**碰到
+`gate.run_formal_e2`，並以 `inspect.getsource` 確認新入口
+`cmd_formal_run_e2` 不含 `decide_case` 或 `build_case_evidence`
+—— CLI 只做 pre-flight 與交棒，不自己寫迴圈。
+
+**維護邊界**：`formal run-e2` 的 `--mode` 預設為 `dry-run`。
+忘記加參數不該直接花錢跑 one-shot。
+
+---
+
 ## NOTE-056 Formal E2 的唯一入口，與零成本的 dry run
 
 **決策日期**：2026-09-02（P0-5，SAI v0.6.0 §18 / FR-P19 / ACC-FML-01~03）
