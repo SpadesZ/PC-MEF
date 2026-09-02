@@ -2993,6 +2993,207 @@ def cmd_corrective_validate_executor(args: argparse.Namespace) -> int:
     return 0 if document["all_passed"] else 2
 
 
+def _formal_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
+    """Final E2 的起跑前檢查。回傳 (報告, 阻擋原因)。**不執行任何 case。**"""
+    from pcmef.core.active_lineage import ActiveLineageError, resolve_active_lineage
+
+    checks: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    resolved = None
+
+    def record(name: str, passed: bool, detail: str, blocking: bool = True) -> None:
+        checks.append({"check": name, "passed": passed, "detail": detail})
+        if blocking and not passed:
+            blockers.append(f"{name}: {detail}")
+
+    try:
+        resolved = resolve_active_lineage(args.lineage_root)
+        record(
+            "active_lineage_resolves", True,
+            f"{resolved.freeze_dir.as_posix()} ({len(resolved.lock_hashes)} locks)",
+        )
+    except ActiveLineageError as error:
+        record("active_lineage_resolves", False, str(error)[:220])
+        return {"checks": checks, "lineage": None}, blockers
+
+    # scenario_set_hash：families 36-43 的身分早已凍在 formal_config 裡。
+    # 生成出來的那一批必須與它相同，否則跑的就不是被預先承諾的那個 final set。
+    from pcmef.core.locks import LockStore
+
+    store = LockStore(resolved.freeze_dir)
+    formal_config = store.load("formal_config")
+    expected_hash = str(formal_config.get("scenario_set_hash", ""))
+    record(
+        "formal_config_pins_the_final_scenario_set",
+        bool(expected_hash),
+        f"scenario_set_hash={expected_hash[:16]}",
+    )
+
+    base = Path(args.base)
+    manifest = base / "dataset_manifest.json"
+    if args.mode == "formal":
+        if not manifest.exists():
+            record(
+                "final_scenario_set_generated", False,
+                f"{manifest.as_posix()} does not exist; generate families 36-43 first",
+            )
+        else:
+            generated = json.loads(manifest.read_text(encoding="utf-8"))
+            actual = str(generated.get("scenario_set_hash", ""))
+            record(
+                "final_scenario_set_matches_formal_config",
+                bool(actual) and actual == expected_hash,
+                f"manifest={actual[:16] or '<absent>'} lock={expected_hash[:16]}",
+            )
+            record(
+                "final_family_indices_are_36_to_43",
+                list(generated.get("family_indices", [])) == list(range(36, 44)),
+                f"family_indices={generated.get('family_indices')}",
+            )
+    else:
+        # dry run 不得碰 final partition：生成即開封，沒有預演的餘地。
+        indices = []
+        if manifest.exists():
+            indices = list(
+                json.loads(manifest.read_text(encoding="utf-8")).get(
+                    "family_indices", []
+                )
+            )
+        record(
+            "dry_run_does_not_touch_the_sealed_partition",
+            not any(int(i) >= 36 for i in indices),
+            f"base={base.as_posix()} family_indices={indices or '<none>'}",
+        )
+
+    record(
+        "output_location_is_free",
+        not (Path(args.out) / (
+            "formal_e2_dry_run.json" if args.mode == "dry-run"
+            else "formal_e2_report.json"
+        )).exists(),
+        f"{args.out}",
+        blocking=args.mode == "formal",
+    )
+
+    return (
+        {"checks": checks, "lineage": resolved.to_manifest() if resolved else None},
+        blockers,
+    )
+
+
+def cmd_formal_preflight(args: argparse.Namespace) -> int:
+    """只跑 pre-flight，不執行任何 case。"""
+    report, blockers = _formal_preflight(args)
+    for check in report["checks"]:
+        print(f"  [{'PASS' if check['passed'] else 'FAIL'}] "
+              f"{check['check']}: {check['detail']}")
+    if report["lineage"]:
+        print(f"\n  lineage  {report['lineage']['resolved_freeze_dir']}")
+    print(f"\n  START_FORMAL_RUN = {'ALLOWED' if not blockers else 'BLOCKED'}")
+    for blocker in blockers:
+        print(f"    - {blocker}")
+    return 0 if not blockers else 2
+
+
+def cmd_formal_run_e2(args: argparse.Namespace) -> int:
+    """Full PC-MEF Formal E2 的**唯一**執行入口。
+
+    CLI 本身不含任何決策邏輯：它做 pre-flight、解析 lineage、組出 runner，
+    然後把工作整個交給 run_formal_e2_full()。這裡若自己寫一段迴圈，
+    就又多了一條需要各自驗證的路徑。
+    """
+    import subprocess
+
+    from pcmef.experiments.e2_formal import (
+        LLM_MODE_EXECUTE, LLM_MODE_SKIP, FormalE2Error, run_formal_e2_full,
+    )
+
+    report, blockers = _formal_preflight(args)
+    print("pre-flight")
+    for check in report["checks"]:
+        print(f"  [{'PASS' if check['passed'] else 'FAIL'}] "
+              f"{check['check']}: {check['detail']}")
+    if blockers:
+        print("\nSTART_FORMAL_RUN = BLOCKED", file=sys.stderr)
+        for blocker in blockers:
+            print(f"  - {blocker}", file=sys.stderr)
+        return 2
+
+    lineage = report["lineage"]
+    freeze_dir = lineage["resolved_freeze_dir"]
+    dry_run = args.mode == "dry-run"
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if not dry_run:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            check=False,
+        ).stdout.strip()
+        if dirty and not args.allow_dirty:
+            print(
+                "error: the working tree has uncommitted changes. A formal run "
+                "records a commit and must be produced from it.",
+                file=sys.stderr,
+            )
+            return 2
+
+    runner = None
+    if not dry_run:
+        from pathlib import Path as _Path
+
+        from pcmef.agents.pcmef_agents import AgentRunner
+        from pcmef.experiments.e2_formal import CountingAdapter
+        from pcmef.experiments.llm_real_validation import _binding
+
+        profile, descriptor, adapter, identity = _binding(_Path(args.registry_dir))
+        print(f"\nprovider  {identity.get('provider')} / {identity.get('model_id')} "
+              f"@ {identity.get('provider_revision')}")
+        runner = AgentRunner(
+            adapter=CountingAdapter(adapter), connection=profile, model=descriptor,
+            schema_dir=Path("schemas"),
+        )
+
+    started = time.time()
+
+    def say(message: str) -> None:
+        print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+
+    try:
+        document = run_formal_e2_full(
+            args.base, args.out,
+            freeze_dir=freeze_dir,
+            ds_dir=args.ds_dir,
+            severity={"vision": args.vision_severity, "tof": args.tof_severity},
+            agent_runner=runner,
+            formal=not dry_run,
+            llm_mode=LLM_MODE_SKIP if dry_run else LLM_MODE_EXECUTE,
+            code_version=commit,
+            is_final_formal_e2=not dry_run,
+            progress=say,
+        )
+    except FormalE2Error as error:
+        print(f"\nerror: {error}", file=sys.stderr)
+        return 2
+
+    print(f"\n  report            {document['report_path']}")
+    print(f"  dry_run           {document['dry_run']}")
+    print(f"  scientific_result {document['scientific_result']}")
+    print(f"  llm_arm_evaluated {document['llm_arm_evaluated']}")
+    print(f"  rows              {document['dataset']['total_rows']}")
+    print(f"  routing           {json.dumps(document['routing']['counts'])}")
+    print(f"  escalated         {document['routing']['escalated_cases']}"
+          f" ({document['routing']['escalation_rate']:.1%})")
+    if dry_run:
+        print(f"  skipped escalated {document['skipped_escalated_cases']}"
+              "  (pcmef_full arm omitted by construction)")
+    print(f"\n  {'arm':14s} {'accuracy':>9s} {'macroF1':>9s}")
+    for name, block in document["results"].items():
+        print(f"  {name:14s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}")
+    return 0
+
+
 def cmd_locks_active_lineage(args: argparse.Namespace) -> int:
     """顯示 formal run 會讀到哪一組 lock。解析不出來即 exit 2。"""
     from pcmef.core.active_lineage import ActiveLineageError, resolve_active_lineage
@@ -4212,6 +4413,49 @@ def build_parser() -> argparse.ArgumentParser:
     corrective_regression.add_argument("--out", default="outputs/corrective")
     corrective_regression.add_argument("--cases", type=int, default=2)
     corrective_regression.set_defaults(func=cmd_corrective_evidence_regression)
+
+    formal_parser = subparsers.add_parser(
+        "formal", help="Full PC-MEF Formal E2 的唯一執行入口"
+    )
+    formal_sub = formal_parser.add_subparsers(dest="formal_command", required=True)
+
+    def _add_formal_arguments(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--mode", choices=("dry-run", "formal"), default="dry-run",
+            help=(
+                "dry-run：零 provider 呼叫，pcmef_full 臂不輸出，只驗資料生成／"
+                "routing／統計形狀。formal：一次性正式執行，需 families 36-43。"
+            ),
+        )
+        parser.add_argument(
+            "--base", default="outputs/perception/formal_e2",
+            help="dataset manifest 目錄。formal 模式必須是 families 36-43。",
+        )
+        parser.add_argument("--out", default="outputs/perception/e2_final")
+        parser.add_argument("--ds-dir", default="outputs/perception/ds_v2")
+        parser.add_argument("--registry-dir", default="registry")
+        parser.add_argument(
+            "--lineage-root", default="freeze",
+            help="ACTIVE_LINEAGE.json 所在目錄；實際 lock 目錄由它解析",
+        )
+        parser.add_argument("--vision-severity", type=float, default=2.0)
+        parser.add_argument("--tof-severity", type=float, default=0.05)
+
+    formal_preflight = formal_sub.add_parser(
+        "preflight", help="只跑起跑前檢查，不執行任何 case"
+    )
+    _add_formal_arguments(formal_preflight)
+    formal_preflight.set_defaults(func=cmd_formal_preflight)
+
+    formal_run = formal_sub.add_parser(
+        "run-e2", help="執行 Full PC-MEF E2（唯一入口，不得另寫 loop）"
+    )
+    _add_formal_arguments(formal_run)
+    formal_run.add_argument(
+        "--allow-dirty", action="store_true",
+        help="允許工作目錄有未提交變更（formal 模式預設拒絕）",
+    )
+    formal_run.set_defaults(func=cmd_formal_run_e2)
 
     regression_parser = subparsers.add_parser(
         "regression",

@@ -324,6 +324,83 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-056 Formal E2 的唯一入口，與零成本的 dry run
+
+**決策日期**：2026-09-02（P0-5，SAI v0.6.0 §18 / FR-P19 / ACC-FML-01~03）
+
+**適用範圍**：`pcmef formal preflight` / `pcmef formal run-e2`；
+`e2_formal` 的 `llm_mode`。
+
+**決策**：
+
+1. 新增 `pcmef formal run-e2` 作為 Full PC-MEF Formal E2 的**唯一**執行入口。
+   CLI 不含任何決策邏輯：pre-flight、解析 lineage、組 runner，然後整個
+   交給 `run_formal_e2_full()`。
+2. pre-flight 四項，任一 FAIL 即拒絕啟動：ACTIVE_LINEAGE 可解析、
+   `formal_config` 有釘住 `scenario_set_hash`、生成出來的 final set 與它相同
+   且 `family_indices == 36..43`、輸出位置未被占用。
+3. 新增 `--mode dry-run`：零 provider 呼叫的預演。
+4. dry run **不輸出 `pcmef_full` 臂，也不輸出任何成對統計**，
+   並寫入 `formal_e2_dry_run.json` 而非 `formal_e2_report.json`。
+5. `llm_mode="skip"` 與 `formal=True` 互斥。
+
+**原因**：
+
+### 1. 為什麼需要 dry run
+
+Final E2 是 one-shot、要花 NT$128–257、跑壞沒有第二次。在那之前必須能
+零成本驗證整條 pipeline —— 資料生成、routing、reliability、cluster 形狀
+是否都正常。先前唯一能做到這件事的是 `gate.run_formal_e2()`，
+而那條路徑有下述問題。
+
+### 2. dry run 為什麼不能輸出 pcmef_full 的數字
+
+這是 `gate.run_formal_e2()` 的教訓。它自報 `llm_arm_evaluated: false`
+卻**照樣把 pcmef_full 那一欄寫進報告**，於是一份沒有 LLM 的結果
+在目錄裡與正式結果長得一模一樣。
+
+dry run 的 escalated 列以傳統決策填位（純粹為了讓 sum-to-1 與 cluster
+形狀檢查仍有意義）。若把那一欄報出去，`pcmef_full` 會**恰好等於
+fixed_fusion**，讀起來像「PC-MEF 沒有比固定融合好」——
+一個看似真實、實際上只反映「從未執行」的結論。
+
+因此整條臂連同三組成對統計一律缺席。三個 baseline 的數字則完整有效，
+它們本來就不需要 LLM。檔名也分開：同名會讓唯一的差別藏在 JSON 欄位裡。
+
+### 3. dry run 不得碰 families 36-43
+
+生成即開封，沒有預演的餘地。pre-flight 因此在 dry-run 模式下反過來檢查
+「base manifest 的 family_indices **不含** >= 36」。
+final set 的正確性改由另一條保證：生成之後比對
+`scenario_set_hash` 是否等於 `formal_config` 凍的 `34fd823d…`。
+
+### 4. trace 保留真正的 route
+
+填位用的 fusion 決策不得改寫 trace 的 `route`，否則 dry run 的紀錄
+看起來會像是路由本身變了 —— 而路由完全沒有改變。
+skipped 列另加 `llm_skipped` 與 `final_is_placeholder` 兩個旗標。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_dry_run_mode.py -v          # 9 條
+py -3.10 -m pcmef.cli formal preflight --mode formal          # 36-43 未生成 -> exit 2
+py -3.10 -m pcmef.cli formal run-e2 --mode dry-run --base outputs/perception/gate_validation
+```
+
+實測 dry run：384 列、143 escalated 全部 skipped、**0 次 provider 呼叫**、
+32 cluster × 12 列、`statistics = {}`、`results` 只有三個 baseline、
+輸出檔名為 `formal_e2_dry_run.json`。
+
+「不建證據」這條是用**故意缺席的 .npy 檔**驗的：dry run 若嘗試組裝
+payload 就會 `FileNotFoundError`。對照組（execute 模式、同一份輸入）
+確實會失敗，這讓前一條測試能分辨「沒讀證據」與「根本沒走到」。
+
+**維護邊界**：`llm_mode` 的預設必須是 `execute`。預設成 `skip`
+會讓忘記加參數的人拿到一份假結果。
+
+---
+
 ## NOTE-055 執行迴圈抽成單一函式，讓驗證與正式執行跑同一段程式
 
 **決策日期**：2026-09-02（P0-3，SAI v0.6.0 §18 / ACC-FML-03）

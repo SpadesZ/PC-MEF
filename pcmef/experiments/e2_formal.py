@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -31,6 +31,8 @@
 #     少一個 case 就是分母悄悄變小，那正是 bounded retry 要防的事。
 #   - 不得對 non-escalated case 呼叫 provider。selective escalation 的整個
 #     論點就是「傳統證據足夠就不叫 LLM」，多叫一次就推翻了它。
+#   - 不得讓 dry run 輸出 pcmef_full 的數字。那一欄會等於 fixed_fusion，
+#     讀起來像「PC-MEF 沒有比固定融合好」，而它其實從未執行（NOTE-056）。
 #   - 不得改用 scenario-level bootstrap。statistics_config.lock 凍的是
 #     physical_scene_family cluster，且所有方法共用同一組 cluster。
 #   - 不得在別處另寫一份等價的執行迴圈。execute_full_pcmef_cases() 抽出來
@@ -38,9 +40,11 @@
 #     「另一份很像的實作」（NOTE-055）。
 #   - v0.1.0 新增：首版 Full PC-MEF formal executor，決策見 NOTE-051。
 #   - v0.2.0 新增：抽出 execute_full_pcmef_cases()，freeze_dir 改必填。
+#   - v0.3.0 新增：llm_mode dry run；dry run 不輸出 pcmef_full 臂（NOTE-056）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
 #   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
+#   - py -3.10 -m pytest tests/e2/test_dry_run_mode.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -65,6 +69,13 @@ __all__ = [
 ]
 
 DS_V2 = Path("outputs/perception/ds_v2")
+
+#: 正式執行：escalated case 呼叫四個真 agent。
+LLM_MODE_EXECUTE = "execute"
+#: 零成本預演：資料生成、routing 與統計形狀照跑，但完全不呼叫 provider。
+#: **不是**降級的正式執行 —— pcmef_full 整條臂會被排除在報告之外。
+LLM_MODE_SKIP = "skip"
+LLM_MODES = frozenset({LLM_MODE_EXECUTE, LLM_MODE_SKIP})
 
 
 class FormalE2Error(RuntimeError):
@@ -311,6 +322,7 @@ def execute_full_pcmef_cases(
     *,
     agent_runner: Any = None,
     formal: bool = True,
+    llm_mode: str = LLM_MODE_EXECUTE,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """**唯一**的 Full PC-MEF 執行迴圈。逐 case 決策並回傳 F(x) 與 trace。
@@ -327,9 +339,27 @@ def execute_full_pcmef_cases(
     `formal=True` 時 escalated case 必須有真正的四 agent 仲裁器；
     `decide_case` 會拒絕決定性替身。retry 耗盡一律中止整場 run，
     **不得 drop case** —— drop 會讓分母隨方法而變。
+
+    `llm_mode="skip"` 是零成本的預演：資料生成、routing 與統計形狀全部照跑，
+    但 escalated case **不呼叫 provider**。這一列的 F(x) 以傳統決策填位，
+    純粹為了讓後續的 sum-to-1 與 cluster 形狀檢查仍有意義；
+    **呼叫端必須據 `skipped_escalated_cases > 0` 把 pcmef_full 整條臂排除**，
+    否則那一欄會等於 fixed_fusion，看起來像「PC-MEF 沒有比固定融合好」——
+    一個從未執行過的方法不該有數字（見 `run_formal_e2_full` 的處理）。
     """
     from pcmef.agents.pcmef_agents import RetryExhaustedError, build_case_evidence
     from pcmef.perception.pcmef_orchestrator import decide_case
+
+    if llm_mode not in LLM_MODES:
+        raise FormalE2Error(
+            f"unknown llm_mode {llm_mode!r}; expected one of {sorted(LLM_MODES)}"
+        )
+    if llm_mode == LLM_MODE_SKIP and formal:
+        raise FormalE2Error(
+            "llm_mode='skip' cannot be combined with formal=True: skipping the "
+            "arbiter is exactly the deterministic substitute that formal mode "
+            "exists to refuse. A dry run is not a formal run."
+        )
 
     say = progress or (lambda _m: None)
 
@@ -339,20 +369,26 @@ def execute_full_pcmef_cases(
 
     escalated_cases = 0
     llm_called_cases = 0
+    skipped_escalated_cases = 0
     calls_before_first_escalation: int | None = None
     finals = np.empty_like(p_vision)
     traces: list[dict[str, Any]] = []
 
-    say(f"deciding {len(rows)} cases")
+    say(f"deciding {len(rows)} cases" + (" (dry run: no provider calls)"
+                                         if llm_mode == LLM_MODE_SKIP else ""))
     for index, row in enumerate(rows):
         route = str(routes[index])
+        escalated = route == "escalated"
+        skipping = escalated and llm_mode == LLM_MODE_SKIP
         evidence = None
-        if route == "escalated":
+
+        if escalated:
             escalated_cases += 1
             if calls_before_first_escalation is None and counter is not None:
                 calls_before_first_escalation = counter.calls
-            # 證據只在 escalated 分支組裝：non-escalated 連 payload 都不建，
-            # 因此不可能不小心送出去。
+        if escalated and not skipping:
+            # 證據只在真的要送出去時才組裝：non-escalated 與 dry run 連 payload
+            # 都不建，因此不可能不小心送出去。
             evidence = build_case_evidence(
                 rgb=np.load(row["rgb_path"]),
                 tof=np.load(row["tof_path"]),
@@ -362,20 +398,35 @@ def execute_full_pcmef_cases(
                 q_tof=float(q["q_tof"][index]),
                 duq={k: float(v[index]) for k, v in signals.items()},
             )
+
         try:
             decision = decide_case(
-                route, p_vision[index], p_tof[index], rule.fusion_weight,
-                evidence=evidence, agent_runner=agent_runner, formal=formal,
+                # dry run 把這一列當成 fusion 走，只是為了取得一個合法分布填位。
+                "fusion" if skipping else route,
+                p_vision[index], p_tof[index], rule.fusion_weight,
+                evidence=evidence,
+                agent_runner=None if skipping else agent_runner,
+                formal=formal,
             )
         except RetryExhaustedError as error:
             # 明確不 drop：整場 run 中止。
             raise FormalE2Error(
                 f"ABORT_FORMAL_RUN at row {index} ({row['stress_id']}): {error}"
             ) from None
+
         finals[index] = decision.final
         if decision.llm_called:
             llm_called_cases += 1
-        traces.append({"stress_id": row["stress_id"], **decision.to_trace()})
+        trace = {"stress_id": row["stress_id"], **decision.to_trace()}
+        if skipping:
+            skipped_escalated_cases += 1
+            # trace 保留這一列**真正的** route，否則 dry run 的紀錄會看起來
+            # 像是路由本身變了，而路由完全沒有改變。
+            trace["route"] = route
+            trace["e"] = 1
+            trace["llm_skipped"] = True
+            trace["final_is_placeholder"] = True
+        traces.append(trace)
         if (index + 1) % 48 == 0:
             say(f"  {index + 1}/{len(rows)} cases")
 
@@ -392,6 +443,8 @@ def execute_full_pcmef_cases(
         "traces": traces,
         "escalated_cases": escalated_cases,
         "llm_called_cases": llm_called_cases,
+        "skipped_escalated_cases": skipped_escalated_cases,
+        "llm_mode": llm_mode,
         "calls_before_first_escalation": calls_before_first_escalation,
         "counter": counter,
     }
@@ -406,6 +459,7 @@ def run_formal_e2_full(
     severity: dict[str, float] | None = None,
     agent_runner: Any = None,
     formal: bool = True,
+    llm_mode: str = LLM_MODE_EXECUTE,
     code_version: str = "",
     is_final_formal_e2: bool = False,
     progress: Callable[[str], None] | None = None,
@@ -415,15 +469,17 @@ def run_formal_e2_full(
     formal=True 時 escalated case **必須**有真正的四 agent 仲裁器；
     沒有就中止，不接受決定性替身。
 
+    `llm_mode="skip"` 產出一份 **dry-run 報告**：三個 baseline 臂的數字完整
+    有效（它們本來就不需要 LLM），而 `pcmef_full` 整條臂連同它的成對統計
+    一律不輸出。理由是 dry run 的 F(x) 只是填位值；把它當成 PC-MEF 的結果
+    報出去，就會得到「PC-MEF 恰好等於 fixed fusion」這個看似真實、
+    實際上只反映「從未執行」的結論。
+
     `freeze_dir` 為 required keyword-only：見 `load_frozen_decision_stack`
     的說明，這裡不得回復預設值。
     """
-    from pcmef.agents.pcmef_agents import (
-        RetryExhaustedError, build_case_evidence,
-    )
-    from pcmef.perception.pcmef_orchestrator import decide_case
-
     say = progress or (lambda _m: None)
+    dry_run = llm_mode == LLM_MODE_SKIP
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -445,12 +501,13 @@ def run_formal_e2_full(
 
     executed = execute_full_pcmef_cases(
         rows, p_vision, p_tof, q, signals, routes, rule,
-        agent_runner=agent_runner, formal=formal, progress=say,
+        agent_runner=agent_runner, formal=formal, llm_mode=llm_mode, progress=say,
     )
     finals = executed["finals"]
     traces = executed["traces"]
     escalated_cases = executed["escalated_cases"]
     llm_called_cases = executed["llm_called_cases"]
+    skipped_escalated = executed["skipped_escalated_cases"]
     calls_before_first_escalation = executed["calls_before_first_escalation"]
     counter = executed["counter"]
 
@@ -459,8 +516,16 @@ def run_formal_e2_full(
         "vision_only": p_vision,
         "tof_only": p_tof,
         "fixed_fusion": fused,
-        "pcmef_full": finals,
     }
+    if dry_run:
+        # pcmef_full 刻意缺席。dry run 的 F(x) 是填位值，報出去會變成
+        # 「PC-MEF 恰好等於 fixed fusion」—— 一個從未執行的方法不該有數字。
+        say(
+            f"dry run: {skipped_escalated} escalated case(s) skipped; "
+            "the pcmef_full arm is omitted from the report"
+        )
+    else:
+        arms["pcmef_full"] = finals
     predictions = {name: proba.argmax(1) for name, proba in arms.items()}
 
     conditions = np.array([r["condition"] for r in rows])
@@ -489,29 +554,48 @@ def run_formal_e2_full(
     }
 
     say("cluster bootstrap")
-    statistics = {
-        f"pcmef_full_vs_{baseline}": {
-            metric: value["comparisons"][f"pcmef_full_vs_{baseline}"]
-            for metric, value in _cluster_statistics(
-                labels, predictions, rows, stack, baseline
-            ).items()
+    if dry_run:
+        # 成對統計全部是 pcmef_full vs baseline；沒有 pcmef_full 就沒有比較。
+        # cluster 形狀仍然算 —— 驗證 12 列 / cluster 與分層是 dry run 的重點之一。
+        statistics: dict[str, Any] = {}
+    else:
+        statistics = {
+            f"pcmef_full_vs_{baseline}": {
+                metric: value["comparisons"][f"pcmef_full_vs_{baseline}"]
+                for metric, value in _cluster_statistics(
+                    labels, predictions, rows, stack, baseline
+                ).items()
+            }
+            for baseline in ("vision_only", "tof_only", "fixed_fusion")
         }
-        for baseline in ("vision_only", "tof_only", "fixed_fusion")
-    }
     cluster_shape = _cluster_statistics(
         labels, predictions, rows, stack, "vision_only"
     )["accuracy"]
 
     route_names, route_counts = np.unique(routes, return_counts=True)
     document = {
-        "report_id": "formal_e2_full_pcmef",
-        "scientific_result": bool(is_final_formal_e2),
-        "is_final_formal_e2": is_final_formal_e2,
-        "one_shot": True,
+        "report_id": "formal_e2_dry_run" if dry_run else "formal_e2_full_pcmef",
+        # dry run 永遠不是科學結果，即使呼叫端把 is_final_formal_e2 設成 True。
+        "scientific_result": bool(is_final_formal_e2) and not dry_run,
+        "is_final_formal_e2": is_final_formal_e2 and not dry_run,
+        "one_shot": not dry_run,
+        "llm_mode": llm_mode,
+        "dry_run": dry_run,
+        "dry_run_meaning": (
+            None if not dry_run else
+            "Data generation, routing, reliability and cluster shape were exercised "
+            "with zero provider calls. The pcmef_full arm and every paired statistic "
+            "are absent by construction: a method that never ran must not have a "
+            "number. The three baseline arms are complete and valid -- they never "
+            "needed an LLM."
+        ),
+        "skipped_escalated_cases": skipped_escalated,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "code_version": code_version,
         "formal_mode": formal,
-        "llm_arm_evaluated": llm_called_cases > 0 or escalated_cases == 0,
+        "llm_arm_evaluated": (
+            False if dry_run else (llm_called_cases > 0 or escalated_cases == 0)
+        ),
         "architecture": {
             "routing_policy_version": stack["routing_policy_version"],
             "decision_bridge_version": stack["decision_bridge_version"],
@@ -574,8 +658,12 @@ def run_formal_e2_full(
             "or F(x). The escalation rate is a finding, not a tuning target."
         ),
     }
-    (out / "formal_e2_report.json").write_text(
+    # 檔名分開：dry run 不得寫進 formal report 的位置。同名會讓一份預演
+    # 在目錄裡與正式結果長得一模一樣，而唯一的差別藏在 JSON 欄位裡。
+    filename = "formal_e2_dry_run.json" if dry_run else "formal_e2_report.json"
+    (out / filename).write_text(
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    document["report_path"] = (out / filename).as_posix()
     return document
