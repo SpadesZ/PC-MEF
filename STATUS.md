@@ -7,6 +7,101 @@
 
 ---
 
+## P1 實驗計畫 v1.2 對齊完成（2026-09-02，NOTE-060~063、AMD-009）
+
+**四個 commit。families 36-43 全程未生成、未讀取；
+`regression verify` 每一階段都回報 IDENTICAL。**
+
+依 `PC-MEF_實驗計畫_v1.2`（`pre碩論/正式可用/正式實驗/`）的四點裁決。
+
+### P1-1 全零 class_support 改判 semantic failure
+
+`normalise_class_support()` 舊行為是把總和 0 救成 25/25/25/25，
+註解寫「均分才誠實」。那個推理是錯的：均分是一個**合法的分布**，
+會進 F(x)、被 argmax 取走 `Empty`、進統計，而它代表的是
+「仲裁者什麼都沒說」——下游無法區分。
+
+防線其實早就寫好了：`core.numeric.normalize_support()` 一直拒絕全零
+（SRC-SAI FR-024），只是 agent layer 在上游先把證據抹掉，
+所以那道檢查**永遠觸發不到**。core 的 $\varepsilon_s$ 是拿來穩定
+**合法的非零** support，處理順序（先驗總和 > 0，通過才 `arr + eps`）本來就對。
+
+改法：`AgentRunner.run()` 在 schema 驗證後加語意檢查，
+拋 `AgentError` 子類 → 被**既有的** retry 分支接住 → 耗盡即 `ABORT_FORMAL_RUN`。
+
+> **這個缺陷一直被 stub 掩蓋。** `_synthesise_from_schema` 對
+> `{"minimum": 0}` 合成出 `0.0`，所以 `StubOfflineAdapter` 每一次都回全零
+> —— 離線測試從來沒跑過「仲裁者真的給出判斷」的路徑。補上 stub hint 後，
+> 11 個依賴 uniform fallback 的測試全部回綠。
+
+### P1-2 G4 Reliability Routing arm
+
+executor 先前只有四條臂，缺 G4。後果不是少一個數字，而是
+**LLM 仲裁的增量沒有對照**：
+
+```
+G4 vs G3  =  路由本身
+G5 vs G4  =  Multi-Agent 仲裁
+G5 vs G3  =  兩者混在一起
+```
+
+G4 完全由既有資訊導出（`escalated → fused`，其餘沿用 `finals`，
+因為 non-escalated 時 F(x) 依定義等於 p_trad），零 provider 呼叫。
+
+**它在 dry run 中完全有效**——dry run 對 escalated 填的就是 fused。
+所以零成本預演現在給出**四條真實的臂**。
+
+### P1-3 / P1-4 Worst-condition Macro-F1 與它的 CI
+
+點估計進報告，並記下**最弱的是哪個 condition**。實測：
+
+```
+arm                   overall   worst     weakest
+vision_only            0.7711   0.5345    conflict
+tof_only               0.6309   0.1450    conflict
+fixed_fusion           0.6388   0.1635    tof_degraded
+reliability_routing    0.7215   0.1806    conflict
+```
+
+排序與 overall 不同（routing 與 vision 在 overall 差 0.05，在 worst 差 0.35），
+且 `fixed_fusion` 的最弱條件與其餘三條不同。
+
+CI 則需要**專用 estimator**：`cluster_bootstrap_worst_condition_delta`。
+`cluster_bootstrap_delta` 的 `metric` 簽章看不到 condition，無法先分組再取 min；
+而 `statistics_config.lock` 綁定它的
+`hash_object(inspect.getsource(...))`，改函式本體連 docstring 都會讓 lineage 失效。
+因此**新增**函式，舊 hash 逐位元不變（`1d8c80a6…`，測試直接比對）。
+
+為什麼不能用某個 condition 的 CI 代替 —— 實測 `fixed_fusion` 作為 reference 時：
+
+```
+tof_degraded  8961
+conflict      1039     ← 10.4% 的 replicate 最弱條件換人
+```
+
+而兩個統計層級可以給出**相反結論**（同一次 run，pcmef_full vs fixed_fusion）：
+
+```
+overall macro-F1   delta +0.0070   CI [-0.0443, +0.0503]   不顯著
+worst-condition    delta -0.0418   CI [-0.0642, -0.0250]   顯著更差
+```
+
+### 新增的 amendment
+
+| | 狀態 |
+|---|---|
+| AMD-008 | spec 已寫（P0-7b，§208 紅線變更）**未凍結** |
+| AMD-009 | spec 已寫（worst-condition estimator）**未凍結** |
+
+兩者都必須在 families 36-43 開封**之前**凍結。
+
+### 文件端（使用者自行處理，不在程式範圍）
+
+實驗計畫 v1.2 的 $s_A$ 公式保留 $\varepsilon_s$，補上定義域
+$\sum_j a_A(j) > 0$ 與一句「總證據量為 0 時視為無效仲裁輸出，重新取得」。
+
+---
+
 ## P0 FORMAL EXECUTION PATH 完成（2026-09-02，NOTE-053~059、AMD-008）
 
 **九個 commit，全部是入口、守衛與介面；沒有動任何 threshold、anchor、
