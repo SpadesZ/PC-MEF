@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -19,8 +19,9 @@
 #   1. load_frozen_decision_stack() 由 lock 還原門檻、溫度與 reliability anchors
 #   2. CountingAdapter 把「實際 provider 呼叫次數」與「escalated case 數」分開量
 #   3. prepare_cases() 產生 stress 列並算出 p_V / p_T / D-U-Q / q_m / route
-#   4. run_formal_e2_full() 逐 case 執行 selective escalation 並彙總
-#   5. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
+#   4. execute_full_pcmef_cases() 是**唯一**的執行迴圈，正式執行與驗證共用
+#   5. run_formal_e2_full() 組裝 formal identity、呼叫上者、彙總並寫報告
+#   6. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
 # 維護提醒:
 #   - 不得在本檔重新擬合任何東西。門檻、溫度、anchors 一律由 lock 還原；
 #     refit 一次就等於 Formal E2 自己決定了自己的判準。
@@ -32,9 +33,14 @@
 #     論點就是「傳統證據足夠就不叫 LLM」，多叫一次就推翻了它。
 #   - 不得改用 scenario-level bootstrap。statistics_config.lock 凍的是
 #     physical_scene_family cluster，且所有方法共用同一組 cluster。
+#   - 不得在別處另寫一份等價的執行迴圈。execute_full_pcmef_cases() 抽出來
+#     就是為了讓驗證跑到與正式執行同一段程式；再複製一份，驗到的又會是
+#     「另一份很像的實作」（NOTE-055）。
 #   - v0.1.0 新增：首版 Full PC-MEF formal executor，決策見 NOTE-051。
+#   - v0.2.0 新增：抽出 execute_full_pcmef_cases()，freeze_dir 改必填。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
+#   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -54,6 +60,7 @@ __all__ = [
     "CountingAdapter",
     "load_frozen_decision_stack",
     "prepare_cases",
+    "execute_full_pcmef_cases",
     "run_formal_e2_full",
 ]
 
@@ -293,51 +300,38 @@ def _cluster_statistics(
 # ---------------------------------------------------------------------------
 
 
-def run_formal_e2_full(
-    base_manifest_dir: str | Path,
-    out_dir: str | Path,
+def execute_full_pcmef_cases(
+    rows: Sequence[Mapping[str, Any]],
+    p_vision: np.ndarray,
+    p_tof: np.ndarray,
+    q: Mapping[str, np.ndarray],
+    signals: Mapping[str, np.ndarray],
+    routes: np.ndarray,
+    rule: Any,
     *,
-    freeze_dir: str | Path,
-    ds_dir: str | Path = DS_V2,
-    severity: dict[str, float] | None = None,
     agent_runner: Any = None,
     formal: bool = True,
-    code_version: str = "",
-    is_final_formal_e2: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Full PC-MEF 的 Formal E2。
+    """**唯一**的 Full PC-MEF 執行迴圈。逐 case 決策並回傳 F(x) 與 trace。
 
-    formal=True 時 escalated case **必須**有真正的四 agent 仲裁器；
-    沒有就中止，不接受決定性替身。
+    這個函式從 `run_formal_e2_full` 抽出來，目的只有一個：讓
+    **正式執行與執行驗證跑的是同一段程式**。先前 validator 自己重建了一份
+    等價迴圈，於是它證明的是「另一份很像的實作能跑」，而不是
+    「正式入口能跑」—— 兩者之間的差異正好是最不會有症狀的那種。
 
-    `freeze_dir` 為 required keyword-only：見 `load_frozen_decision_stack`
-    的說明，這裡不得回復預設值。
+    切在這裡而不是切整個 `run_formal_e2_full`，是為了讓 validator 能用
+    **已開封的 effective-93** 驗證同一條執行路徑，而不必碰 families 36-43。
+    final partition 一旦生成就是開封，沒有預演的餘地。
+
+    `formal=True` 時 escalated case 必須有真正的四 agent 仲裁器；
+    `decide_case` 會拒絕決定性替身。retry 耗盡一律中止整場 run，
+    **不得 drop case** —— drop 會讓分母隨方法而變。
     """
-    from pcmef.agents.pcmef_agents import (
-        RetryExhaustedError, build_case_evidence,
-    )
+    from pcmef.agents.pcmef_agents import RetryExhaustedError, build_case_evidence
     from pcmef.perception.pcmef_orchestrator import decide_case
 
     say = progress or (lambda _m: None)
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    stack = load_frozen_decision_stack(freeze_dir)
-    rule = stack["rule"]
-    say(
-        f"frozen decision stack: bridge={stack['decision_bridge_version']} "
-        f"routing={stack['routing_policy_version']} D>{rule.disagreement_threshold:.6f}"
-    )
-
-    prepared = prepare_cases(
-        base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
-        code_version=code_version, progress=say,
-    )
-    rows = prepared["rows"]
-    labels = prepared["labels"]
-    p_vision, p_tof = prepared["p_vision"], prepared["p_tof"]
-    signals, q, routes = prepared["signals"], prepared["q"], prepared["routes"]
 
     counter: CountingAdapter | None = None
     if agent_runner is not None and isinstance(agent_runner.adapter, CountingAdapter):
@@ -392,6 +386,73 @@ def run_formal_e2_full(
         raise FormalE2Error(
             f"F(x) rows do not sum to 1 (min {sums.min()}, max {sums.max()})"
         )
+
+    return {
+        "finals": finals,
+        "traces": traces,
+        "escalated_cases": escalated_cases,
+        "llm_called_cases": llm_called_cases,
+        "calls_before_first_escalation": calls_before_first_escalation,
+        "counter": counter,
+    }
+
+
+def run_formal_e2_full(
+    base_manifest_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    freeze_dir: str | Path,
+    ds_dir: str | Path = DS_V2,
+    severity: dict[str, float] | None = None,
+    agent_runner: Any = None,
+    formal: bool = True,
+    code_version: str = "",
+    is_final_formal_e2: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Full PC-MEF 的 Formal E2。
+
+    formal=True 時 escalated case **必須**有真正的四 agent 仲裁器；
+    沒有就中止，不接受決定性替身。
+
+    `freeze_dir` 為 required keyword-only：見 `load_frozen_decision_stack`
+    的說明，這裡不得回復預設值。
+    """
+    from pcmef.agents.pcmef_agents import (
+        RetryExhaustedError, build_case_evidence,
+    )
+    from pcmef.perception.pcmef_orchestrator import decide_case
+
+    say = progress or (lambda _m: None)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    stack = load_frozen_decision_stack(freeze_dir)
+    rule = stack["rule"]
+    say(
+        f"frozen decision stack: bridge={stack['decision_bridge_version']} "
+        f"routing={stack['routing_policy_version']} D>{rule.disagreement_threshold:.6f}"
+    )
+
+    prepared = prepare_cases(
+        base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
+        code_version=code_version, progress=say,
+    )
+    rows = prepared["rows"]
+    labels = prepared["labels"]
+    p_vision, p_tof = prepared["p_vision"], prepared["p_tof"]
+    signals, q, routes = prepared["signals"], prepared["q"], prepared["routes"]
+
+    executed = execute_full_pcmef_cases(
+        rows, p_vision, p_tof, q, signals, routes, rule,
+        agent_runner=agent_runner, formal=formal, progress=say,
+    )
+    finals = executed["finals"]
+    traces = executed["traces"]
+    escalated_cases = executed["escalated_cases"]
+    llm_called_cases = executed["llm_called_cases"]
+    calls_before_first_escalation = executed["calls_before_first_escalation"]
+    counter = executed["counter"]
 
     fused = rule.fusion_weight * p_vision + (1.0 - rule.fusion_weight) * p_tof
     arms = {

@@ -324,6 +324,64 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-055 執行迴圈抽成單一函式，讓驗證與正式執行跑同一段程式
+
+**決策日期**：2026-09-02（P0-3，SAI v0.6.0 §18 / ACC-FML-03）
+
+**適用範圍**：`pcmef/experiments/e2_formal.py` 的
+`execute_full_pcmef_cases()`；`e2_executor_validation` 的驗證路徑。
+
+**決策**：把 `run_formal_e2_full()` 內部的逐 case 決策迴圈抽成獨立函式
+`execute_full_pcmef_cases()`，由 `run_formal_e2_full()` 呼叫；
+`corrective validate-executor` 改呼叫同一個函式（P0-4）。
+
+**原因**：
+
+### 1. 驗證過的與要跑的必須是同一份程式
+
+先前 `e2_executor_validation` 只 import `prepare_cases` 與
+`load_frozen_decision_stack`，然後**自己重建了一份等價的 route →
+build_case_evidence → decide_case 迴圈**。那樣的 15/15 PASS 證明的是
+「另一份很像的實作能跑」，不是「正式入口能跑」。兩者之間的差異
+恰好屬於最不會有症狀的那一類。
+
+順帶查證的事實：`run_formal_e2_full()` 在此之前
+**沒有任何呼叫點，也沒有任何測試執行過它** —— repo 全域搜尋只找得到
+函式定義、`__all__`，以及 `corrective_run.py` 裡的一個 metadata 字串。
+
+### 2. 為什麼切在迴圈而不是整個 executor
+
+validator 必須能用**已開封的 effective-93** 驗證同一條執行路徑。
+若共用的單位是整個 `run_formal_e2_full()`，驗證就得指定一份 base manifest
+並走完 formal identity 組裝；而 final partition（families 36-43）
+一旦生成就是開封，沒有預演的餘地。切在迴圈這一層，
+正式執行與驗證共用決策邏輯，但各自餵不同的資料池。
+
+### 3. 重構的行為不變是量出來的，不是宣稱的
+
+以決定性的假四角色 runner 跑完整條 `run_formal_e2_full`（384 列、
+143 escalated），比對重構前後的 routing counts、per-arm 結果、
+per-condition、cluster bootstrap 統計與全部 trace 的雜湊：
+
+```
+before trace_digest = d35ec9c91c623d8cf255a804b34e8b03d0be63e0df5011467f278193b29eda9b
+after  trace_digest = d35ec9c91c623d8cf255a804b34e8b03d0be63e0df5011467f278193b29eda9b
+```
+
+指紋逐位元相同。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v   # 8 條
+py -3.10 -m pcmef.cli regression verify                            # IDENTICAL
+```
+
+**維護邊界**：不得在別處再寫一份等價迴圈。要新增執行模式
+（例如 P0-5 的 dry-run）一律加參數，不得複製函式。
+
+---
+
 ## NOTE-054 Active lineage 是 resolver，不是 scientific identity
 
 **決策日期**：2026-09-02（P0-1，SAI v0.6.0 §18 / ACC-FML-02）
