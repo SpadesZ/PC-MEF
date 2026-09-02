@@ -324,6 +324,72 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-062 Worst-condition Macro-F1 進報告，並記下最弱的是哪個 condition
+
+**決策日期**：2026-09-02（P1-3，實驗計畫 v1.2 §5 的 primary metric）
+
+**適用範圍**：`pcmef/experiments/e2_formal.py` 的
+`worst_condition_macro_f1()` 與報告的 `primary_endpoint` 區塊。
+
+**決策**：報告直接輸出每個方法的 `worst_condition_macro_f1`
+（四個 generation condition 中最低的 macro-F1）與 `worst_condition_at`
+（那個 condition 是哪一個）。平手時取字典序最小，避免依賴 dict 插入順序。
+
+**原因**：
+
+### 1. 它可推導，但推導不等於已報告
+
+`statistics_config.lock` 的 `metric_definitions.note` 寫著 worst-condition
+"is derivable from the reported quantities"。那句話對**點估計**成立，
+所以先前只報 per-condition 是合規的。但 primary metric 讓讀者自己取 min，
+等於把主要結論放在附註裡。
+
+### 2. 「最弱的是哪一個 condition」本身就是結果
+
+實測（effective gate-validation，384 列）：
+
+```
+arm                   overall   worst     weakest
+vision_only            0.7711   0.5345    conflict
+tof_only               0.6309   0.1450    conflict
+fixed_fusion           0.6388   0.1635    tof_degraded
+reliability_routing    0.7215   0.1806    conflict
+```
+
+兩件事只有算出來才看得見：
+
+- **排序不同**。overall 上 routing 與 vision 差 0.05；worst 上差了 0.35。
+  以平均判斷會嚴重高估 routing 的穩健性。
+- **`fixed_fusion` 的最弱條件是 `tof_degraded`，其餘三條都是 `conflict`**。
+  固定融合會被壞掉的 ToF 拖著走，而路由至少能避開它 —— 這個對比
+  在 per-condition 表格裡看得到，卻很容易被略過。
+
+因此 `worst_condition_at` 與最小值一起報，不是只報一個數字。
+
+### 3. 由 per_condition 取 min，不另外算一次
+
+`worst_condition_macro_f1(per_condition)` 只讀既有的表格。另外算一次就有
+兩個可能不一致的來源，而不一致時沒有任何症狀。測試以
+`inspect.getsource` 釘住這個呼叫關係。
+
+`per_condition` 仍留在報告裡：worst 是它的**摘要**，不是它的替代。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_worst_condition_endpoint.py -v   # 7 條
+py -3.10 -m pcmef.cli formal run-e2 --mode dry-run --base outputs/perception/gate_validation
+```
+
+其中一條測試刻意構造「平均較高但最弱條件崩掉」與「平均較低但四條件都穩」
+兩個方法，斷言後者的 worst 較高 —— 那正是把這個指標當 primary 的整個理由。
+
+**維護邊界**：本條只涵蓋**點估計**。worst-condition 的 paired CI 需要
+專用 estimator（每個 replicate 內先分 condition 再取 min），見 P1-4 與
+AMD-009；worst 的 CI 不等於任何單一 condition 的 CI。
+
+---
+
 ## NOTE-061 G4 Reliability Routing：把路由的效果與仲裁的效果分開量
 
 **決策日期**：2026-09-02（P1-2，實驗計畫 v1.2 §4.2 的 G4）

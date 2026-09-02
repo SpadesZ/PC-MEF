@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.4.0
+# 版本: v0.5.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -22,7 +22,8 @@
 #   4. execute_full_pcmef_cases() 是**唯一**的執行迴圈，正式執行與驗證共用
 #   5. run_formal_e2_full() 組裝 formal identity、呼叫上者、彙總並寫報告
 #   6. G1-G5 五條臂；G4 由既有 route 與 fused 導出，零 provider 呼叫
-#   7. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
+#   7. worst_condition_macro_f1() primary endpoint 的點估計與最弱 condition
+#   8. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
 # 維護提醒:
 #   - 不得在本檔重新擬合任何東西。門檻、溫度、anchors 一律由 lock 還原；
 #     refit 一次就等於 Formal E2 自己決定了自己的判準。
@@ -37,6 +38,8 @@
 #     （NOTE-061）。也不得把它從 dry run 拿掉 —— 它不依賴 LLM。
 #   - 不得讓 dry run 輸出 pcmef_full 的數字。那一欄會等於 fixed_fusion，
 #     讀起來像「PC-MEF 沒有比固定融合好」，而它其實從未執行（NOTE-056）。
+#   - 不得只報 worst-condition 的最小值而不報它落在哪個 condition。
+#     不同方法的最弱條件可能不同，那個對比本身就是結果（NOTE-062）。
 #   - 不得改用 scenario-level bootstrap。statistics_config.lock 凍的是
 #     physical_scene_family cluster，且所有方法共用同一組 cluster。
 #   - 不得在別處另寫一份等價的執行迴圈。execute_full_pcmef_cases() 抽出來
@@ -46,11 +49,13 @@
 #   - v0.2.0 新增：抽出 execute_full_pcmef_cases()，freeze_dir 改必填。
 #   - v0.3.0 新增：llm_mode dry run；dry run 不輸出 pcmef_full 臂（NOTE-056）。
 #   - v0.4.0 新增：G4 reliability_routing 臂與其成對統計（NOTE-061）。
+#   - v0.5.0 新增：worst-condition macro-F1 點估計與 primary_endpoint（NOTE-062）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
 #   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
 #   - py -3.10 -m pytest tests/e2/test_dry_run_mode.py -v
 #   - py -3.10 -m pytest tests/e2/test_reliability_routing_arm.py -v
+#   - py -3.10 -m pytest tests/e2/test_worst_condition_endpoint.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -71,6 +76,7 @@ __all__ = [
     "load_frozen_decision_stack",
     "prepare_cases",
     "execute_full_pcmef_cases",
+    "worst_condition_macro_f1",
     "run_formal_e2_full",
 ]
 
@@ -288,6 +294,34 @@ def _macro_f1(truth: np.ndarray, predicted: np.ndarray) -> float:
 
 def _accuracy(truth: np.ndarray, predicted: np.ndarray) -> float:
     return float((truth == predicted).mean())
+
+
+def worst_condition_macro_f1(
+    per_condition: Mapping[str, Mapping[str, Mapping[str, float]]],
+) -> tuple[dict[str, float], dict[str, str]]:
+    """E2 的 primary robustness endpoint：每個方法在四個 condition 中的最低
+    macro-F1，以及那個 condition 是哪一個。
+
+    它可由 per-condition 表格推導，但算出來報出去有兩個理由：讀者不必自己
+    取 min，而且**哪一個 condition 是最弱的本身就是結果的一部分** ——
+    不同方法的最弱條件可能不同，那件事在表格裡看得到卻很容易被略過。
+
+    平手時取字典序最小的 condition，讓輸出不依賴 dict 的插入順序。
+    """
+    worst: dict[str, float] = {}
+    where: dict[str, str] = {}
+    for name, block in per_condition.items():
+        if not block:
+            raise FormalE2Error(
+                f"method {name!r} has no per-condition breakdown; the worst-condition "
+                "endpoint is undefined without one"
+            )
+        chosen = min(
+            sorted(block), key=lambda condition: block[condition]["macro_f1"]
+        )
+        worst[name] = float(block[chosen]["macro_f1"])
+        where[name] = chosen
+    return worst, where
 
 
 def _cluster_statistics(
@@ -575,6 +609,8 @@ def run_formal_e2_full(
         for name, predicted in predictions.items()
     }
 
+    worst_condition, worst_condition_at = worst_condition_macro_f1(per_condition)
+
     say("cluster bootstrap")
     if dry_run:
         # 成對統計全部是 pcmef_full vs baseline；沒有 pcmef_full 就沒有比較。
@@ -683,6 +719,23 @@ def run_formal_e2_full(
         },
         "results": results,
         "per_condition": per_condition,
+        # 實驗計畫 v1.2 §5 的 primary robustness metric。
+        "worst_condition_macro_f1": worst_condition,
+        "worst_condition_at": worst_condition_at,
+        "primary_endpoint": {
+            "metric": "worst_condition_macro_f1",
+            "definition": (
+                "min over the four generation conditions of that method's "
+                "per-condition macro-F1"
+            ),
+            "conditions": sorted(set(conditions.tolist())),
+            "rationale": (
+                "A method that lifts the average while the weakest condition "
+                "still collapses has not shown robustness, which is what E2 asks "
+                "about. The per-condition table stays in the report because which "
+                "condition is weakest is itself a finding."
+            ),
+        },
         "statistics": statistics,
         "statistics_config": {
             "replicates": stack["bootstrap_replicates"],

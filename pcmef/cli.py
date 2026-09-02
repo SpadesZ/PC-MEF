@@ -3164,9 +3164,18 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     if dry_run:
         print(f"  skipped escalated {document['skipped_escalated_cases']}"
               "  (pcmef_full arm omitted by construction)")
-    print(f"\n  {'arm':20s} {'accuracy':>9s} {'macroF1':>9s}")
+    worst = document.get("worst_condition_macro_f1", {})
+    worst_at = document.get("worst_condition_at", {})
+    print(f"\n  {'arm':20s} {'accuracy':>9s} {'macroF1':>9s} {'worstF1':>9s}  weakest")
     for name, block in document["results"].items():
-        print(f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}")
+        cell = worst.get(name)
+        print(
+            f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f} "
+            f"{cell:>9.4f}  {worst_at.get(name, '')}"
+            if cell is not None
+            else f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}"
+        )
+    print("\n  worst-condition macro-F1 is the primary robustness endpoint")
     return 0
 
 
