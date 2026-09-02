@@ -79,7 +79,14 @@ def _reply_for(body: dict) -> str:
             "the request carried no JSON schema; a structured-output agent must "
             "actually ask for one"
         )
-    return json.dumps(_synthesise_from_schema(schema, STUB_ROLE_HINTS.get(task_code)))
+    hints = STUB_ROLE_HINTS.get(task_code)
+    if hints is None and "class_support" in (schema.get("properties") or {}):
+        # Google 的請求 body 不帶角色名（task_code 只存在於 OpenAI 的
+        # json_schema.name），因此這裡改由 schema 特徵辨認仲裁者。
+        # 照字面合成會給出四個 0：那份回應通過 JSON Schema，卻表示
+        # 「仲裁者什麼都沒說」，是真實模型會被語意檢查擋下的違約。
+        hints = STUB_ROLE_HINTS["arbitration_agent"]
+    return json.dumps(_synthesise_from_schema(schema, hints))
 
 
 @pytest.fixture()

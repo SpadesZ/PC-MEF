@@ -5,7 +5,7 @@
 #         被未來的 experiments.e2_formal 呼叫；本檔**不**讀取任何 dataset。
 # 檔案路徑: pcmef/agents/pcmef_agents.py
 # 產生時間: 2026-08-31 20:05 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 四個正式 Agent（observation / physics / visual_semantic / arbitration）
 #           的執行體。負責把一個 escalated case 的證據組成 FIXED_SUMMARY payload、
 #           送進 provider、把回應 parse 成 schema-valid 物件，並在重試耗盡時
@@ -20,6 +20,7 @@
 #   3. encode_image_evidence() 把 RGB 陣列編成 PNG bytes，**不傳路徑**
 #   4. AgentRunner.run() 執行 invoke + parse + jsonschema 驗證 + bounded retry
 #   5. 重試耗盡拋 RetryExhaustedError（ABORT_FORMAL_RUN），不得回傳 None
+#   5b. assert_support_is_usable() 在 schema 之後擋下全零 class_support
 #   6. run_pcmef_case() 串起四個 agent，產出 cache 要的六份 artifact
 # 維護提醒:
 #   - 不得在本模組直接呼叫 httpx / google.generativeai / openai。所有外呼
@@ -35,7 +36,11 @@
 #   - 不得在重試耗盡時 drop case。少算一個 case 會讓分母悄悄變小，
 #     而那正是 bounded retry 要防的事（SRC-SAI §28 / FR-013）。
 #   - 不得讓 stub_offline 的輸出進入任何 formal 結果。它只證明工程路徑走得通。
+#   - 不得把全零 class_support 救成 25/25/25/25。均分是一個合法的分布，
+#     會進 F(x)、會被 argmax 取走 CLASS_ORDER[0]、會進統計，而它實際
+#     代表「仲裁者什麼都沒說」—— 下游無法區分兩者（NOTE-060）。
 #   - v0.1.0 新增：首版四 agent 實作，決策見 NOTE-047。
+#   - v0.2.0 新增：全零 class_support 改判 semantic failure（NOTE-060）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/agents/test_pcmef_agents.py -v
 # ------------------------------------------------------------
@@ -67,6 +72,8 @@ from pcmef.core.hash import hash_file, hash_object
 __all__ = [
     "AgentError",
     "RetryExhaustedError",
+    "EmptyClassSupport",
+    "assert_support_is_usable",
     "AgentSpec",
     "AGENTS",
     "REPRESENTATION_MODE",
@@ -225,19 +232,69 @@ AGENTS: dict[str, AgentSpec] = {
 SUPPORT_SUM_TOLERANCE = 5.0
 
 
+class EmptyClassSupport(AgentError):
+    """Arbitration 回了一份總證據量為 0 的 class_support。
+
+    與一般 AgentError 分開命名，是因為它的成因與處置都不同：這不是格式
+    問題，而是**仲裁者沒有給出任何判斷**。它照樣通過 JSON Schema
+    （四個欄位都在，`minimum: 0` 允許 0），所以只有語意層攔得住。
+    """
+
+
 def normalise_class_support(support: Mapping[str, float]) -> dict[str, float]:
     """把 class_support 正規化成總和 100。
 
     回傳新的 dict，不改動輸入。總和落在 100 ± SUPPORT_SUM_TOLERANCE 之外時
     仍然正規化，但呼叫端會把原始總和記進 artifact —— 偏離太多是模型沒有
     遵守指示的證據，不該被正規化悄悄抹平。
+
+    **總和為 0 一律 raise，不得救成 uniform。** 25/25/25/25 是一個合法的
+    分布：它會進 F(x)、會被 argmax 取走 CLASS_ORDER[0]、會進統計，而它
+    實際代表的是「仲裁者什麼都沒說」。兩者在下游無法區分，於是一次
+    semantic failure 會偽裝成一個「四類等可能」的判斷。
+
+    `core.numeric.normalize_support()` 早就拒絕全零
+    （SRC-SAI FR-024：「不得靠 EPS_S 轉成 uniform 再繼續」），但那道防線
+    先前永遠觸發不到 —— 本函式在上游就把證據抹掉了。core 的 EPS_S 是拿來
+    穩定**合法的非零** support 的，不是拿來救全零的（NOTE-060）。
     """
     values = {name: float(support.get(name, 0.0)) for name in CLASS_ORDER}
     total = sum(values.values())
     if total <= 0:
-        # 全零沒有辦法正規化。這是「模型什麼都沒說」，均分才誠實。
-        return {name: 100.0 / len(CLASS_ORDER) for name in CLASS_ORDER}
+        raise EmptyClassSupport(
+            f"class_support sums to {total}; a zero total means the arbiter "
+            "produced no judgement at all. Refusing to spread it evenly: that "
+            "would disguise a semantic failure as a four-way tie, and nothing "
+            "downstream could tell the difference."
+        )
     return {name: round(value * 100.0 / total, 6) for name, value in values.items()}
+
+
+def assert_support_is_usable(spec: AgentSpec, parsed: Mapping[str, Any]) -> None:
+    """schema 之外的語意檢查：帶 class_support 的角色不得回全零。
+
+    JSON Schema 管得了「四個鍵都在、每個都是 0..100 的數」，管不了
+    「加起來要大於 0」。這道檢查放在 `AgentRunner.run` 的 schema 驗證之後，
+    因此 raise 出來的 `AgentError` 會被既有的 retry 分支接住 ——
+    重試一次，附上更正指示；耗盡則 `RetryExhaustedError` 一路上拋成
+    `ABORT_FORMAL_RUN`，而不是 drop 這個 case。
+    """
+    support = parsed.get("class_support")
+    if support is None:
+        return
+    if not isinstance(support, Mapping):
+        raise AgentError(
+            f"{spec.task_code} returned class_support of type "
+            f"{type(support).__name__}; expected an object keyed by class"
+        )
+    total = sum(float(support.get(name, 0.0)) for name in CLASS_ORDER)
+    if total <= 0:
+        raise EmptyClassSupport(
+            f"{spec.task_code} returned a class_support summing to {total}. "
+            "Every class carries zero evidence, which is schema-valid but "
+            "means no judgement was made. Retrying rather than treating it as "
+            "a uniform distribution."
+        )
 
 
 def assert_prompts_state_the_rule() -> None:
@@ -713,6 +770,9 @@ class AgentRunner:
                 )
                 parsed = _extract_json(response.text)
                 jsonschema.validate(parsed, schema)
+                # schema 之外的語意檢查。全零 class_support 是 schema-valid
+                # 的，但它代表「沒有判斷」—— 必須重試，不得當成均勻分布。
+                assert_support_is_usable(spec, parsed)
             except ProviderError as error:
                 # 傳輸/HTTP 失敗。原封不動重送 —— 這類失敗多半是暫態，
                 # 若不重試，一次網路抖動就會終止整場 formal run。

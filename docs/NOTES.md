@@ -324,6 +324,89 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-060 全零 class_support 是 semantic failure，不得救成 uniform
+
+**決策日期**：2026-09-02（P1-1，實驗計畫 v1.2 對齊）
+
+**適用範圍**：`pcmef/agents/pcmef_agents.py` 的 `normalise_class_support()`
+與新增的 `assert_support_is_usable()`；`pcmef/agents/provider.py` 的
+`STUB_ROLE_HINTS`。
+
+**決策**：
+
+1. `normalise_class_support()` 在總和為 0 時 **raise `EmptyClassSupport`**，
+   不再回傳 25/25/25/25。
+2. `AgentRunner.run()` 在 jsonschema 驗證之後加一道語意檢查
+   `assert_support_is_usable()`；它拋的是 `AgentError` 子類，因此被**既有的**
+   retry 分支接住 —— 重試一次，耗盡即 `RetryExhaustedError` → `ABORT_FORMAL_RUN`。
+3. `STUB_ROLE_HINTS` 補上 `arbitration_agent` 的合法 class_support。
+
+**原因**：
+
+### 1. 均分不是「誠實」，是偽裝
+
+舊註解寫「全零沒有辦法正規化。這是『模型什麼都沒說』，均分才誠實」。
+那個推理是錯的：25/25/25/25 是一個**合法的分布**，它會進 F(x)、
+會被 argmax 取走 `CLASS_ORDER[0]`（Empty）、會進統計。而它實際代表的是
+「仲裁者沒有給出任何判斷」。兩者在下游完全無法區分，於是一次
+semantic failure 會偽裝成一個「四類等可能」的判斷。
+
+JSON Schema 攔不住它：`class_support` 的每一類是
+`{"type": "number", "minimum": 0}`，四個 0 完全合法。只有語意層攔得住。
+
+### 2. 防線早就寫好了，只是永遠觸發不到
+
+`core.numeric.normalize_support()` 從一開始就寫著：
+
+```python
+if arr.sum() <= 0:
+    raise InvalidAgentSupport("raw support sums to zero; must not be rescued into uniform")
+shifted = arr + eps
+```
+
+`support_to_vector()` 的 docstring 也載明 SRC-SAI FR-024：
+「all-zero 或含 NaN/Inf 視為 semantic failure，**不得靠 EPS_S 轉成 uniform
+再繼續**」。
+
+問題是 agent layer 在上游就把證據抹掉了 —— core 永遠收不到全零。
+**EPS_S 是用來穩定合法的非零 support 的，不是用來救全零的**；
+core 的處理順序（先驗總和 > 0，通過才 `arr + eps`）本來就對。
+
+### 3. 這個缺陷一直被 stub 掩蓋
+
+`_synthesise_from_schema()` 對 `{"type": "number", "minimum": 0}` 合成出
+`0.0`，所以 `StubOfflineAdapter` **每一次**都回傳全零 class_support。
+也就是說：**離線測試從來沒有跑過「仲裁者真的給出判斷」的路徑**，
+四-agent 的整套測試走的都是 uniform fallback 那一條。
+
+`STUB_ROLE_HINTS` 的既有註解已經寫對了原則 ——「stub 要模擬的是一個
+**守約**的模型，不是一個剛好通過 schema 的模型」。全零正是不守約，
+只是先前只想到 `modality` enum，沒想到數值欄位。
+
+值刻意取不對稱且總和 95：不對稱讓「正規化有沒有保持相對大小」驗得出來，
+總和不為 100 讓 `support_sum_before_normalisation` 這個稽核欄位有東西可記。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/agents/ -v
+```
+
+新增四條純函式測試（agent layer 拒絕、單一非零類仍可用、core layer 也拒絕、
+core 對合法 support 仍套 epsilon）與兩條端到端測試：
+全零 arbitration 會被**重試一次**再 `ABORT_FORMAL_RUN`，
+且對照組（只有一類有證據）必須照常通過 —— 少了對照組就無法分辨
+「擋住了全零」與「擋住了全部」。
+
+補 stub hint 後，先前 11 個依賴 uniform fallback 的測試全部回綠。
+
+**維護邊界**：不得為了讓某個 stub 或測試通過而恢復 uniform fallback。
+兩層防線要一起在：runner 層觸發 retry，`normalise_class_support` 拒絕
+靜默救援。實驗計畫 v1.2 的 $s_A$ 公式保留 $\varepsilon_s$，但定義域補上
+$\sum_j a_A(j) > 0$。
+
+---
+
 ## NOTE-059 §208 的第二次劃細：UI 可以觸發 formal run，不可以設定它
 
 **決策日期**：2026-09-02（P0-7b，AMD-008）

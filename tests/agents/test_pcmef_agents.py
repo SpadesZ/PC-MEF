@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -366,6 +367,60 @@ def test_retry_exhaustion_aborts_and_never_returns_a_case(connection, model, evi
     assert not any(a.ok for a in runner.attempts)
 
 
+def test_an_all_zero_arbitration_is_retried_then_aborts(connection, model, evidence):
+    """全零 class_support 是 schema-valid 的，所以只有語意層攔得住。
+
+    它必須走與其他 semantic failure 相同的路徑：retry 一次，耗盡即
+    ABORT_FORMAL_RUN —— 而不是變成一個「四類等可能」的判斷混進統計。
+    """
+    class ZeroSupport(StubOfflineAdapter):
+        def invoke(self, connection, model, task_code, payload, runtime_cfg):
+            response = super().invoke(connection, model, task_code, payload, runtime_cfg)
+            if task_code != "arbitration_agent":
+                return response
+            parsed = json.loads(response.text)
+            parsed["class_support"] = dict.fromkeys(evidence_classes(), 0.0)
+            return replace(response, text=json.dumps(parsed))
+
+    runner = AgentRunner(
+        adapter=ZeroSupport(resolve_secret=lambda r: "x"),
+        connection=connection, model=model, schema_dir=SCHEMA_DIR,
+    )
+    with pytest.raises(RetryExhaustedError, match="ABORT_FORMAL_RUN"):
+        run_pcmef_case(runner, evidence)
+
+    arbitration_attempts = [a for a in runner.attempts if a.task_code == "arbitration_agent"]
+    assert len(arbitration_attempts) == 2, "an all-zero support must be retried once"
+    assert not any(a.ok for a in arbitration_attempts)
+    # 失敗原因要看得出是語意問題，不是格式問題 —— 兩者的處置不同。
+    assert any("class_support" in (a.error or "") for a in arbitration_attempts)
+
+
+def test_a_usable_arbitration_still_passes(connection, model, evidence):
+    """對照組：只有一類有證據時不得被誤判為失敗。
+
+    少了這一條，上一個測試無法分辨「擋住了全零」與「擋住了全部」。
+    """
+    class SingleClass(StubOfflineAdapter):
+        def invoke(self, connection, model, task_code, payload, runtime_cfg):
+            response = super().invoke(connection, model, task_code, payload, runtime_cfg)
+            if task_code != "arbitration_agent":
+                return response
+            parsed = json.loads(response.text)
+            support = dict.fromkeys(evidence_classes(), 0.0)
+            support["Misty"] = 100.0
+            parsed["class_support"] = support
+            return replace(response, text=json.dumps(parsed))
+
+    runner = AgentRunner(
+        adapter=SingleClass(resolve_secret=lambda r: "x"),
+        connection=connection, model=model, schema_dir=SCHEMA_DIR,
+    )
+    bundle = run_pcmef_case(runner, evidence)
+    validated = bundle.artifacts["arbitration_validated"]
+    assert validated["class_support"]["Misty"] == pytest.approx(100.0)
+
+
 def test_abort_propagates_out_of_the_whole_case(connection, model, evidence):
     """整個 case 也必須一起失敗，而不是少一個 agent 照樣組出 bundle。"""
     class FailsOnArbitration(StubOfflineAdapter):
@@ -588,12 +643,55 @@ def test_support_is_normalised_instead_of_aborting_the_run():
     assert normalised["Empty"] > normalised["Water-filled"] > normalised["Bubbly"]
 
 
-def test_an_all_zero_support_is_spread_evenly_not_left_at_zero():
+def test_an_all_zero_support_is_refused_not_spread_evenly():
+    """全零不得被救成 25/25/25/25。
+
+    均分是一個**合法的分布**：它會進 F(x)、會被 argmax 取走 CLASS_ORDER[0]、
+    會進統計，而它實際代表的是「仲裁者什麼都沒說」。兩者在下游無法區分，
+    於是一次 semantic failure 會偽裝成一個「四類等可能」的判斷。
+
+    core.numeric.normalize_support() 早就拒絕全零（SRC-SAI FR-024），
+    但這道防線先前永遠觸發不到 —— agent layer 在上游就把證據抹掉了。
+    """
+    from pcmef.agents.pcmef_agents import EmptyClassSupport, normalise_class_support
+
+    with pytest.raises(EmptyClassSupport) as error:
+        normalise_class_support(dict.fromkeys(evidence_classes(), 0.0))
+    assert "no judgement" in str(error.value)
+
+
+def test_a_single_non_zero_class_is_still_usable():
+    """只有一類有證據仍是合法判斷，不該被當成失敗。"""
     from pcmef.agents.pcmef_agents import normalise_class_support
 
-    normalised = normalise_class_support(dict.fromkeys(evidence_classes(), 0.0))
+    support = dict.fromkeys(evidence_classes(), 0.0)
+    support["Bubbly"] = 3.0
+    normalised = normalise_class_support(support)
+    assert normalised["Bubbly"] == pytest.approx(100.0)
     assert sum(normalised.values()) == pytest.approx(100.0)
-    assert len(set(normalised.values())) == 1
+
+
+def test_the_core_bridge_also_refuses_all_zero():
+    """兩層防線都要在：core 的那道是最後一關，不因上游改動而失效。"""
+    import numpy as np
+
+    from pcmef.core.numeric import InvalidAgentSupport, normalize_support
+
+    with pytest.raises(InvalidAgentSupport):
+        normalize_support(np.zeros(len(evidence_classes())))
+
+
+def test_the_core_bridge_still_applies_epsilon_to_legal_support():
+    """EPS_S 是用來穩定合法的非零 support，不是用來救全零的。"""
+    import numpy as np
+
+    from pcmef.core.numeric import normalize_support
+
+    s_a = normalize_support(np.array([10.0, 0.0, 0.0, 0.0]))
+    assert s_a.sum() == pytest.approx(1.0)
+    # 零的那幾類經 epsilon 之後為正，但仍遠小於有證據的那一類。
+    assert all(value > 0.0 for value in s_a)
+    assert s_a[0] > 0.9
 
 
 def test_the_raw_sum_is_preserved_for_audit(runner, evidence):

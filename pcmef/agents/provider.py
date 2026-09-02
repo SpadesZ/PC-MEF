@@ -958,9 +958,26 @@ def _parse_stub_catalogue(raw: str) -> dict[str, tuple[Capability, ...]]:
 #: modality enum 是 [physics, visual_semantic]，照字面取第一個會讓
 #: visual_semantic_agent 自稱 physics，而那是真實模型會被擋下的違約。
 #: stub 要模擬的是一個**守約**的模型，不是一個剛好通過 schema 的模型。
+#:
+#: 同樣的道理適用於 class_support。schema 說每一類是
+#: `{"type": "number", "minimum": 0}`，照字面合成會得到四個 0 —— 那份回應
+#: 通過 JSON Schema，卻表示「仲裁者什麼都沒說」，是一個真實模型會被語意
+#: 檢查擋下的違約（NOTE-060）。
+#:
+#: 這一點先前把 all-zero 的處理整段藏了起來：離線測試從來沒有跑過
+#: 「仲裁者真的給出判斷」的路徑，因為 stub 每次都回全零，而 agent layer
+#: 又把全零救成 25/25/25/25。
+#:
+#: 值刻意不對稱且總和不為 100：不對稱讓「正規化有沒有保持相對大小」驗得出來，
+#: 總和 95 讓 support_sum_before_normalisation 這個稽核欄位有東西可記。
 STUB_ROLE_HINTS: dict[str, dict[str, Any]] = {
     "physics_agent": {"modality": "physics"},
     "visual_semantic_agent": {"modality": "visual_semantic"},
+    "arbitration_agent": {
+        "class_support": {
+            "Empty": 55.0, "Water-filled": 25.0, "Bubbly": 10.0, "Misty": 5.0,
+        }
+    },
 }
 
 
