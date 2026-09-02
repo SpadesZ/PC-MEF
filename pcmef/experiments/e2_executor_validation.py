@@ -6,7 +6,7 @@
 #         **只用已看過的資料；families 36-43 完全不觸碰。**
 # 檔案路徑: pcmef/experiments/e2_executor_validation.py
 # 產生時間: 2026-09-01 17:20 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: Final E2 之前對 Full PC-MEF executor 的執行驗證 —— 只驗「路徑是否
 #           照已凍結的架構跑」，不看也不比較任何準確率。
 # 模組定位: formal_config 重凍結的前置閘（AMD-006 reason B）。它「不是」實驗：
@@ -18,15 +18,22 @@
 #   4. check_zero_calls_when_not_escalated() 非 escalated 一次 provider 都不呼叫
 #   5. check_retry_exhaustion_aborts() retry 耗盡即中止且不 drop case
 #   6. check_cluster_bootstrap() family cluster 形狀與跨方法共用
-#   7. run_executor_validation() 匯總並回報 all_passed
+#   7. _execute_subset() 把列子集餵給 **production** 執行迴圈
+#   8. run_executor_validation() 匯總並回報 all_passed
 # 維護提醒:
 #   - 不得在本檔比較或印出任何 accuracy / macro-F1。看了分數再回頭改參數，
 #     就是用結果選方法；本檔存在的意義就是證明「沒有那樣做」。
 #   - 不得用 families 36-43 做驗證。只准用 effective 93 與已看過的 pilot。
 #   - 不得為了讓某條 check 通過而放寬 executor 的 fail-closed 行為。
+#   - 不得在 run_executor_validation 內重建逐 row 的 decide_case 迴圈。
+#     必須呼叫 e2_formal.execute_full_pcmef_cases —— 那才是 Final E2 會跑的
+#     同一段程式；重建一份等價迴圈只能證明「另一份很像的實作能跑」
+#     （NOTE-055）。純函式層的 bridge identity 檢查不受此限，那些不碰資料集。
 #   - v0.1.0 新增：首版 executor 驗證，決策見 NOTE-051 與 AMD-006。
+#   - v0.2.0 新增：改走 production 執行迴圈；freeze_dir 改必填。
 # 驗證方式:
 #   - py -3.10 -m pcmef.cli corrective validate-executor
+#   - py -3.10 -m pytest tests/e2/test_validator_uses_production_loop.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -271,6 +278,36 @@ def check_cluster_bootstrap(rows: list[dict[str, Any]], labels: np.ndarray) -> l
 # ---------------------------------------------------------------------------
 
 
+def _execute_subset(
+    prepared: dict[str, Any],
+    indices: Sequence[int],
+    stack: dict[str, Any],
+    runner: Any,
+    progress: Callable[[str], None],
+) -> dict[str, Any]:
+    """對 prepared 的一個列子集跑 **production** 執行迴圈。
+
+    子集而非全量：驗證只需要證明那條路徑會動，不需要付 372 列的 provider
+    費用。切子集的方式必須保持每個陣列的對應關係 —— 錯位不會拋錯，
+    只會讓驗證在錯的證據上通過。
+    """
+    from pcmef.experiments.e2_formal import execute_full_pcmef_cases
+
+    picked = np.asarray(list(indices), dtype=int)
+    return execute_full_pcmef_cases(
+        [prepared["rows"][i] for i in picked],
+        prepared["p_vision"][picked],
+        prepared["p_tof"][picked],
+        {name: value[picked] for name, value in prepared["q"].items()},
+        {name: value[picked] for name, value in prepared["signals"].items()},
+        prepared["routes"][picked],
+        stack["rule"],
+        agent_runner=runner,
+        formal=True,
+        progress=progress,
+    )
+
+
 def run_executor_validation(
     *,
     freeze_dir: str | Path,
@@ -292,7 +329,6 @@ def run_executor_validation(
     from pcmef.experiments.e2_formal import (
         CountingAdapter, load_frozen_decision_stack, prepare_cases,
     )
-    from pcmef.perception.pcmef_orchestrator import decide_case
 
     say = progress or (lambda _m: None)
     checks: list[dict[str, Any]] = []
@@ -357,9 +393,15 @@ def run_executor_validation(
     checks.append(check_no_leakage(evidence))
 
     # -- 真實 provider 路徑 --------------------------------------------------
+    #
+    # 以下兩段都呼叫 experiments.e2_formal.execute_full_pcmef_cases —— 也就是
+    # Final E2 會跑的**同一段程式**。先前這裡自己重建了一份等價迴圈，
+    # 那樣驗到的是「另一份很像的實作能跑」，不是「正式入口能跑」（NOTE-055）。
+    # 餵進去的仍然只有已開封的 effective-93 子集，families 36-43 不參與。
     runtime_identity: dict[str, Any] = {}
     real_calls = 0
     measured_usage: dict[str, Any] = {}
+    counting: CountingAdapter | None = None
     try:
         from pcmef.experiments.llm_real_validation import _binding
 
@@ -370,85 +412,83 @@ def run_executor_validation(
             schema_dir=Path("schemas"),
         )
 
-        say(f"non-escalated cases must make zero provider calls")
+        say("non-escalated cases must make zero provider calls")
+        quiet = other_index[:8]
         before = counting.calls
-        for index in other_index[:8]:
-            decision = decide_case(
-                str(routes[index]), prepared["p_vision"][index],
-                prepared["p_tof"][index], stack["rule"].fusion_weight,
-                evidence=None, agent_runner=runner, formal=True,
-            )
-            if decision.llm_called:
-                raise RuntimeError(f"row {index} called the LLM while not escalated")
+        quiet_result = _execute_subset(prepared, quiet, stack, runner, say)
         checks.append(
             _check(
                 "non_escalated_cases_make_zero_provider_calls",
-                counting.calls == before,
-                f"{len(other_index[:8])} non-escalated case(s), "
-                f"provider calls {before} -> {counting.calls}",
+                counting.calls == before and quiet_result["llm_called_cases"] == 0,
+                f"{len(quiet)} non-escalated case(s), "
+                f"provider calls {before} -> {counting.calls}, "
+                f"llm_called_cases={quiet_result['llm_called_cases']}",
             )
         )
 
         say(f"real LLM path on up to {max_real_cases} escalated case(s)")
-        finals = []
-        for index in escalated_index[:max_real_cases]:
-            case_evidence = build_case_evidence(
-                rgb=np.load(rows[index]["rgb_path"]),
-                tof=np.load(rows[index]["tof_path"]),
-                p_vision=prepared["p_vision"][index].tolist(),
-                p_tof=prepared["p_tof"][index].tolist(),
-                q_vision=float(prepared["q"]["q_vision"][index]),
-                q_tof=float(prepared["q"]["q_tof"][index]),
-                duq={k: float(v[index]) for k, v in prepared["signals"].items()},
-            )
-            decision = decide_case(
-                "escalated", prepared["p_vision"][index], prepared["p_tof"][index],
-                stack["rule"].fusion_weight, evidence=case_evidence,
-                agent_runner=runner, formal=True,
-            )
-            finals.append(decision)
-            # 每 case 結束就更新，不等整個迴圈跑完 —— 中途失敗時
-            # 「已經打了幾通」是判斷失敗性質（配額 vs 程式）的關鍵資訊。
-            real_calls = counting.calls
-            measured_usage = {
-                "by_role": {k: dict(v) for k, v in counting.usage_by_task.items()},
-                "totals": counting.usage_totals(),
-                "escalated_cases_measured": len(finals),
-            }
+        chosen = escalated_index[:max_real_cases]
+        loud_result = _execute_subset(prepared, chosen, stack, runner, say)
+        traces = loud_result["traces"]
+        real_calls = counting.calls
+        measured_usage = {
+            "by_role": {k: dict(v) for k, v in counting.usage_by_task.items()},
+            "totals": counting.usage_totals(),
+            "escalated_cases_measured": len(traces),
+        }
+        finals = loud_result["finals"]
         checks.append(
             _check(
                 "real_llm_path_executes_all_four_agents",
-                bool(finals)
-                and all(d.llm_called and d.s_a is not None for d in finals)
-                and real_calls == 4 * len(finals),
-                f"{len(finals)} escalated case(s), {real_calls} provider call(s), "
+                bool(traces)
+                and all(t["llm_called"] and t["s_a"] is not None for t in traces)
+                and real_calls == 4 * len(traces),
+                f"{len(traces)} escalated case(s), {real_calls} provider call(s), "
                 f"by role {counting.calls_by_task}",
             )
         )
         checks.append(
             _check(
                 "escalated_final_equals_s_a_on_the_real_path",
-                bool(finals) and all(
-                    np.allclose(d.final, d.s_a) for d in finals
+                bool(traces) and all(
+                    t["s_a"] is not None
+                    and np.allclose(np.asarray(t["final"]), np.asarray(t["s_a"]))
+                    for t in traces
                 ),
                 "; ".join(
-                    f"F={d.final.round(4).tolist()} s_A={d.s_a.round(4).tolist()}"
-                    for d in finals
+                    f"F={np.asarray(t['final']).round(4).tolist()} "
+                    f"s_A={None if t['s_a'] is None else np.asarray(t['s_a']).round(4).tolist()}"
+                    for t in traces
                 ),
             )
         )
         checks.append(
             _check(
                 "all_outputs_finite_and_sum_to_one",
-                bool(finals) and all(
-                    np.all(np.isfinite(d.final)) and abs(d.final.sum() - 1.0) < 1e-9
-                    for d in finals
-                ),
-                "; ".join(f"sum={float(d.final.sum()):.12f}" for d in finals),
+                bool(traces)
+                and bool(np.all(np.isfinite(finals)))
+                and bool(np.allclose(finals.sum(axis=1), 1.0, atol=1e-9)),
+                "; ".join(f"sum={float(row.sum()):.12f}" for row in finals),
+            )
+        )
+        checks.append(
+            _check(
+                "validation_runs_the_production_execution_loop",
+                True,
+                "both subsets went through "
+                "pcmef.experiments.e2_formal.execute_full_pcmef_cases, the same "
+                "function run_formal_e2_full calls",
             )
         )
     except Exception as error:  # noqa: BLE001
         # 供應商配額與程式缺陷必須分得出來：前者重跑就好，後者不能重跑。
+        if counting is not None:
+            real_calls = counting.calls
+            measured_usage = measured_usage or {
+                "by_role": {k: dict(v) for k, v in counting.usage_by_task.items()},
+                "totals": counting.usage_totals(),
+                "escalated_cases_measured": 0,
+            }
         text = str(error)
         quota = "429" in text or "quota" in text.lower() or "RESOURCE_EXHAUSTED" in text
         checks.append(
