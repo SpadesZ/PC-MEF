@@ -5,17 +5,19 @@
 # 檔案路徑: tests/console/test_formal_routes.py
 # 產生時間: 2026-09-02 17:10 +08:00
 # 版本: v0.1.0
-# 功能說明: 確認監控頁真的唯讀，而且畫面上的 PASS 與 CLI 放行的判準同源。
-# 模組定位: P0-7a 的回歸測試。守兩件事：頁面沒有任何寫入控制項，
-#           以及 Web 沒有自己重算一份比較寬鬆的 pre-flight。
+# 功能說明: 確認畫面上的 PASS 與 CLI 放行的判準同源，且頁面不含任何
+#           科學參數欄位。
+# 模組定位: P0-7a 的回歸測試。守兩件事：Web 沒有自己重算一份比較寬鬆的
+#           pre-flight，以及表單只送白名單內的鍵（AMD-008 放寬的是
+#           觸發權，不是設定權）。
 # 主要責任:
-#   1. test_page_has_no_write_controls 沒有 form、button、input
-#   2. test_page_does_not_offer_to_start_a_run
+#   1. test_the_page_has_no_scientific_input_fields
+#   2. test_the_only_form_fields_are_the_whitelisted_ones
 #   3. test_json_matches_the_service 逐欄位比對，確認未重算
 #   4. test_non_blocking_failures_are_distinguishable 不阻擋的失敗要看得出來
 # 維護提醒:
-#   - 不得在本頁加入啟動控制項而不同步修改 test_page_has_no_write_controls。
-#     那條線由 §208 與 console.runner._assert_not_formal() 守著。
+#   - 不得在表單加入任何科學參數欄位。UI 只能決定「跑不跑」與模式；
+#     多一個鍵就會被 ConsoleRunner 的白名單擋下（AMD-008）。
 #   - 不得讓 Web 自己算 pre-flight。畫面比 CLI 寬鬆是最難發現的那種錯。
 #   - v0.1.0 新增：首版，對應 P0-7a。
 # 驗證方式:
@@ -56,23 +58,40 @@ def test_the_page_renders(client):
     assert "Formal Research Workspace" in body
 
 
-def test_page_has_no_write_controls(client):
-    """唯讀不是靠說明文字，是靠頁面上沒有可送出的東西。"""
+def test_the_page_has_no_scientific_input_fields(client):
+    """AMD-008 放寬的是**觸發權**，不是設定權。
+
+    頁面自 P0-7b 起有兩個 form（預演／正式執行），但表單裡不得出現任何
+    科學參數欄位。這條測試列的每一個名字都是「一旦出現就代表 UI 成了
+    第二條設定通道」的東西。
+    """
     body = client.get("/formal").get_data(as_text=True)
-    for tag in ("<form", "<button", "<input", "<textarea"):
-        assert tag not in body.lower(), f"the read-only monitor contains {tag}"
+    for forbidden in (
+        "severity", "threshold", "freeze_dir", "freeze-dir", "ds_dir", "ds-dir",
+        "lineage_root", "lineage-root", "fusion_weight", "temperature",
+        'name="base"', 'name="out"',
+    ):
+        assert f'name="{forbidden}"' not in body and forbidden not in _form_field_names(body), (
+            f"the formal page exposes a scientific input named {forbidden!r}"
+        )
 
 
-def test_page_does_not_offer_to_start_a_run(client):
-    """連字面上的啟動端點都不該出現 —— 那會讓人以為只是壞掉了。"""
-    body = client.get("/formal").get_data(as_text=True)
-    assert "csrf" not in body.lower()
-    # 指令字串可以出現（那是給人照著打的），但不得有指向自身的 POST 路徑。
-    assert not re.search(r'action="[^"]*formal', body)
+def _form_field_names(body: str) -> set[str]:
+    """取出所有 form 欄位的 name。"""
+    return set(re.findall(r'<(?:input|select|textarea)[^>]*name="([^"]+)"', body))
 
 
-def test_there_is_no_post_endpoint_under_formal(client):
-    assert client.post("/formal").status_code in (404, 405)
+def test_the_only_form_fields_are_the_whitelisted_ones(client):
+    from pcmef.console.runner import FORMAL_PARAM_WHITELIST
+
+    names = _form_field_names(client.get("/formal").get_data(as_text=True))
+    # csrf_token 是安全機制，不是研究參數。
+    assert names - {"csrf_token"} <= FORMAL_PARAM_WHITELIST, (
+        f"unexpected form fields: {sorted(names - {'csrf_token'} - FORMAL_PARAM_WHITELIST)}"
+    )
+
+
+def test_preflight_json_is_read_only(client):
     assert client.post("/formal/preflight.json").status_code in (404, 405)
 
 

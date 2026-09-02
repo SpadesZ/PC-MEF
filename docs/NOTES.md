@@ -324,6 +324,84 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-059 §208 的第二次劃細：UI 可以觸發 formal run，不可以設定它
+
+**決策日期**：2026-09-02（P0-7b，AMD-008）
+
+**適用範圍**：`pcmef/console/runner.py` 的 `formal_e2` run kind 與
+`FORMAL_PARAM_WHITELIST`；`POST /formal/start`；`configs/amendments/AMD-008`。
+
+**決策**：
+
+1. `formal_e2` 加入 console 允許啟動的 run kind。
+2. UI **只能傳兩個鍵**：`mode`（dry-run｜formal）與 `confirm`。
+   其餘一律被 `FORMAL_PARAM_WHITELIST` 拒絕。
+3. `mode=formal` 額外要求確認片語 `RUN FINAL E2`。
+4. dry run 讀的資料集由**伺服器端設定**決定，不從表單來。
+5. 開 AMD-008 記錄這次紅線變更。**不 supersede 任何 scientific lock。**
+
+**原因**：
+
+### 1. §208 的規則比它要防的事更寬
+
+§208 寫「formal run 一律無 UI、走 CLI」，要防的是**UI 成為繞過 freeze
+的第二條設定通道**。那條規則是這個顧慮的代理，而代理比顧慮寬。
+
+2026-08-31 第一次劃細時已經用過這個判準：把「跑 formal experiment」
+與「凍結 draft 成 lock」分開，允許 console 觸發後者，理由記在
+`_assert_not_formal` 的 docstring 裡 —— **差別在於誰做判斷，不在於誰按鍵**。
+按鈕啟動的 `pcmef llm snapshot --freeze` 走同一條通道、同一組檢查，
+而且留下完整指令與輸出，比 shell history 更完整。
+
+本次把同一個判準套用到 formal run 本身。console 啟動的是
+`pcmef formal run-e2` 子行程；pre-flight、ACTIVE_LINEAGE 解析、
+sealed-partition 檢查與 `scenario_set_hash` 比對全部在那個行程內，
+不通過就 exit 2。**UI 沒有任何一行程式碼能決定這次該不該跑。**
+
+### 2. 真正該守的是參數，而那另外守
+
+放寬觸發權的同時，設定權必須**更緊**。`FORMAL_PARAM_WHITELIST` 只有
+`mode` 與 `confirm` 兩個鍵：`severity`、各種門檻、`freeze_dir`、
+`base`、`ds_dir` 全部不在其中。lineage 由 ACTIVE_LINEAGE 解析，
+預演的資料位置是伺服器端設定，其餘一切來自已凍結的 lock。
+
+少了這一條，按鈕就會變成 §52 結語要擋的那條第二設定通道。
+測試逐一列出十一個曾經或可能被誤加的鍵，全部必須被拒絕。
+
+### 3. 為什麼 formal 模式要打字確認
+
+Final E2 是一次性、不可重跑、要花錢的。誤點不該能把它花掉。
+dry run 不需要確認 —— 它零成本且可重複。
+
+### 4. 頁面上正式執行按鈕在 BLOCKED 時是灰的
+
+但那只是**便利**，不是防線。真正的防線是 CLI 的 pre-flight：
+就算有人繞過表單直接打 `POST /formal/start`，子行程仍會自己擋下來。
+畫面上的 disabled 屬性從來不是安全機制。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/console/test_formal_start.py -v     # 17 條
+py -3.10 -m pytest tests/console/ -v                          # 110 條
+```
+
+實際按下畫面上的「執行預演」後，`run.json` 記到的是：
+
+```
+kind    = formal_e2
+params  = {'mode': 'dry-run'}          ← 零科學參數
+command = pcmef.cli formal run-e2 --mode dry-run --out <run>/artifacts
+                                       --base outputs/perception/gate_validation
+```
+
+正式執行按鈕在 families 36-43 未生成時為 disabled，`confirm` 欄位同樣灰掉。
+
+**維護邊界**：不得擴大 `FORMAL_PARAM_WHITELIST`。放寬的是觸發權，
+不是設定權；兩者混為一談就回到 §208 原本要擋的狀態。
+
+---
+
 ## NOTE-058 Formal 監控頁唯讀，且與 CLI 共用同一個 pre-flight
 
 **決策日期**：2026-09-02（P0-7a，SAI v0.6.0 §3.1 / §19.1-19.8）

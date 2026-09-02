@@ -4,11 +4,12 @@
 #         狀態寫入同目錄的 run.json；產物落在該 run 的 artifacts 目錄。
 # 檔案路徑: pcmef/console/runner.py
 # 產生時間: 2026-08-27 16:10 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 讓網頁按一下就能跑模擬，而且跑的過程像在看終端機一樣逐行出現。
 #           每次執行都存成一筆有編號的紀錄，含當時用的完整參數與完整輸出。
-# 模組定位: Console 的執行層。它「不是」formal runner ——
-#           §208 規定 formal run 一律無 UI 走 CLI，因此本檔硬性拒絕 --formal。
+# 模組定位: Console 的執行層。formal run 自 AMD-008 起可由此觸發，但
+#           **只能觸發，不能設定** —— 白名單只收 mode 與 confirm，
+#           准駁全在 `pcmef formal run-e2` 子行程的 pre-flight 內。
 # 主要責任:
 #   1. RunSpec 定義一次執行的種類、參數與產生的指令
 #   2. PRESETS 提供三個懶人包，進階參數才需要展開
@@ -18,9 +19,10 @@
 #   6. ConsoleRunner.list_runs() / get() 提供歷史紀錄
 #   7. _assert_not_formal() 擋下任何試圖從 UI 啟動 formal 的參數
 # 維護提醒:
-#   - 不得讓本檔產生含 --formal 的指令。§52 結語與 §208 的界線是
-#     「UI 可以探索、不可以產生 formal identity」；一旦 UI 能跑 formal，
-#     所有 lock 的意義都會被繞過。_assert_not_formal() 是硬性檢查。
+#   - 不得擴大 FORMAL_PARAM_WHITELIST。UI 一旦能傳 severity、門檻或
+#     freeze_dir，它就成了繞過 freeze 的第二條設定通道，而那正是
+#     §52 結語與 §208 要擋的事。能按按鈕不等於能決定跑什麼（AMD-008）。
+#   - 不得讓 formal 模式在沒有確認片語的情況下啟動。那是一次性的。
 #   - 不得把子行程改成同一行程內呼叫。NOTE-012：drjit/mitsuba 在
 #     Windows 連續算多場景後會於 DLL detach 崩潰，子行程隔離是既有結論；
 #     而且網頁行程被算圖卡住的話，整個 console 會失去回應。
@@ -29,6 +31,7 @@
 #   - 不得移除 run.json 裡的完整參數與指令；沒有它就無法回答
 #     「這張圖是用什麼參數跑出來的」。
 #   - v0.1.0 新增：首版執行器，決策見 NOTE-025。
+#   - v0.2.0 新增：formal_e2 run kind 與參數白名單（AMD-008、NOTE-059）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_runner.py -v
 # ------------------------------------------------------------
@@ -127,8 +130,21 @@ def _now() -> str:
 #: _assert_not_formal() 的說明：console 仍然不跑 formal experiment，
 #: 但可以觸發「把目前的 draft 設定凍結成 lock」這個動作。
 RUN_KINDS: tuple[str, ...] = (
-    "sim_smoke", "surrogate_smoke", "audit_gates", "llm_snapshot",
+    "sim_smoke", "surrogate_smoke", "audit_gates", "llm_snapshot", "formal_e2",
 )
+
+#: `formal_e2` **唯一**接受的參數。任何其他鍵一律拒絕。
+#:
+#: 這個集合刻意小到不含任何科學設定：severity、門檻、freeze_dir、base、
+#: ds_dir 全部不在其中。lineage 由 ACTIVE_LINEAGE 解析，資料位置由伺服器端
+#: 設定決定 —— UI 能決定的只有「跑不跑」與「跑哪一種模式」。
+FORMAL_PARAM_WHITELIST: frozenset[str] = frozenset({"mode", "confirm"})
+
+#: formal 模式必須附上的確認字串。dry run 不需要。
+FORMAL_CONFIRM_PHRASE = "RUN FINAL E2"
+
+#: 預演預設讀的資料集。已開封的 gate-validation，不是 final partition。
+DEFAULT_DRY_RUN_BASE = "outputs/perception/gate_validation"
 
 
 @dataclass(frozen=True)
@@ -214,11 +230,15 @@ class ConsoleRunner:
         self,
         run_root: str | Path = DEFAULT_RUN_ROOT,
         python_executable: str | None = None,
+        dry_run_base: str | Path = DEFAULT_DRY_RUN_BASE,
     ) -> None:
         self.run_root = Path(run_root)
         self.run_root.mkdir(parents=True, exist_ok=True)
         self._python = python_executable or sys.executable
         self._threads: dict[str, threading.Thread] = {}
+        # 預演用的資料位置由**伺服器端**決定，不從表單來。讓 UI 指定 base
+        # 等於讓它挑要用哪一批資料，而 families 36-43 生成即開封。
+        self.dry_run_base = Path(dry_run_base)
 
     # -- 路徑 -------------------------------------------------------------
 
@@ -234,34 +254,56 @@ class ConsoleRunner:
     # -- 參數 -------------------------------------------------------------
 
     @staticmethod
-    def _assert_not_formal(params: Mapping[str, Any]) -> None:
-        """擋下任何試圖從 UI 啟動 formal experiment 的參數。
+    def _assert_not_formal(params: Mapping[str, Any], kind: str = "") -> None:
+        """擋下任何試圖用 UI 設定 formal experiment 的參數。
 
-        §208：所有 formal run 一律無 UI、走 CLI。這裡不是提醒而是硬性檢查。
+        §208 原本規定：所有 formal run 一律無 UI、走 CLI。這條線被**兩次**
+        明確劃細，而不是被放寬 —— 兩次用的是同一個判準：**誰做判斷**。
 
-        **這條線在 2026-08-31 被明確劃細，而不是被放寬。** 原本的理解是
-        「UI 不得碰任何與 formal 有關的事」，於是連凍結設定都只能在終端機做。
-        現在區分成兩件事：
+        第一次（2026-08-31）：區分「跑 formal experiment」與「凍結 draft
+        設定成 lock」。後者允許由 console 觸發（`llm_snapshot`），因為
+        console 只是啟動真正的 `pcmef llm snapshot --freeze` 子行程，
+        前提未齊時是 CLI 自己拒絕並回 exit 2。UI 沒有任何一行程式碼能決定
+        「這份 lock 該不該寫」。
 
-          * **跑 formal experiment** —— 仍然完全禁止，就是這個函式擋的事。
-            那會產生研究結果，而結果必須來自一個可重現、無人值守的路徑。
-          * **凍結目前的 draft 設定成 lock** —— 允許由 console 觸發
-            （run kind `llm_snapshot`），但**准駁權不在 UI**：
-            console 只是啟動真正的 `pcmef llm snapshot --freeze` 子行程，
-            前提未齊時是 CLI 自己拒絕並回 exit 2。UI 沒有任何一行程式碼
-            能決定「這份 lock 該不該寫」。
+        第二次（2026-09-02，AMD-008）：`formal_e2` 加入允許清單。同樣的
+        判準 —— console 啟動的是 `pcmef formal run-e2` 子行程，
+        pre-flight、lineage 解析、sealed-partition 檢查全部在 CLI 內，
+        不通過就 exit 2。UI 能決定的只有「跑不跑」與「哪一種模式」。
 
-        差別在於「誰做判斷」。§52 結語要擋的是「UI 成為繞過 freeze 的第二條
-        設定通道」—— 而按鈕觸發的 CLI 走的是同一條通道、同一組檢查，
-        並且把完整指令、時間與輸出留成一筆 run record，
-        那比 shell history 更完整，不是更少。
+        關鍵在於 UI **不能設定任何科學參數**：severity、門檻、freeze_dir、
+        base、ds_dir 都不在 `FORMAL_PARAM_WHITELIST` 內。少了這一條，
+        按鈕觸發就會變成「UI 成為繞過 freeze 的第二條設定通道」，
+        那正是 §52 結語要擋的事。
+
+        其餘 run kind 維持原本的全面拒絕：它們沒有理由帶 formal 參數。
         """
+        if kind == "formal_e2":
+            unknown = sorted(set(params) - FORMAL_PARAM_WHITELIST)
+            if unknown:
+                raise FormalRunRefused(
+                    f"the console refuses to pass {unknown} to a formal run. A "
+                    f"formal run accepts only {sorted(FORMAL_PARAM_WHITELIST)}: the "
+                    "lineage comes from ACTIVE_LINEAGE and every scientific setting "
+                    "comes from the frozen locks. Letting the UI supply them would "
+                    "make it a second configuration channel that bypasses freeze."
+                )
+            mode = str(params.get("mode", "dry-run"))
+            if mode not in ("dry-run", "formal"):
+                raise FormalRunRefused(f"unknown formal run mode {mode!r}")
+            if mode == "formal" and str(params.get("confirm", "")) != FORMAL_CONFIRM_PHRASE:
+                raise FormalRunRefused(
+                    "a formal run is one-shot and unrepeatable; it requires the "
+                    f"confirmation phrase {FORMAL_CONFIRM_PHRASE!r}"
+                )
+            return
+
         for key, value in params.items():
             if "formal" in str(key).lower() and value:
                 raise FormalRunRefused(
-                    f"the console refuses {key}={value!r}. Formal experiment runs "
-                    "are CLI-only (SRC-SAI §208); the console explores, views, and "
-                    "may trigger a freeze, but it never runs a formal experiment."
+                    f"the console refuses {key}={value!r} for run kind {kind!r}. "
+                    "Only the formal_e2 kind may start a formal run, and it takes "
+                    f"no scientific parameters (SRC-SAI §208, AMD-008)."
                 )
 
     def build_config(self, run_id: str, params: Mapping[str, Any]) -> Path:
@@ -379,13 +421,23 @@ class ConsoleRunner:
             if spec.params.get("freeze"):
                 command.append("--freeze")
             return command
+        if spec.kind == "formal_e2":
+            # 只有 --mode 來自使用者。--base 由伺服器端設定決定，
+            # lineage 由 CLI 自己解析 ACTIVE_LINEAGE —— 兩者都不經表單。
+            mode = str(spec.params.get("mode", "dry-run"))
+            command = base + [
+                "formal", "run-e2", "--mode", mode, "--out", str(out_dir),
+            ]
+            if mode == "dry-run":
+                command += ["--base", str(self.dry_run_base)]
+            return command
         return base + ["audit", "e1-gates", "--out", str(out_dir)]
 
     # -- 執行 -------------------------------------------------------------
 
     def start(self, spec: RunSpec) -> RunRecord:
         """啟動一次執行並立刻回傳。輸出由背景執行緒逐行落盤。"""
-        self._assert_not_formal(spec.params)
+        self._assert_not_formal(spec.params, spec.kind)
         run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
         self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
 

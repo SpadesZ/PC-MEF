@@ -1,0 +1,126 @@
+# PC-MEF Research System source maintenance contract
+# 上下游: 供 `pcmef amendment freeze --spec` 讀取。這是 **operational**
+#         amendment：它不改任何科學參數，只放寬「誰可以按下開始」。
+#         凍結後產生 freeze/amendments/AMD-008.amendment.json。
+# 檔案路徑: configs/amendments/AMD-008.amendment.yaml
+# 產生時間: 2026-09-02 17:40 +08:00
+# 版本: v0.1.0
+# 功能說明: 記錄 SRC-SAI §208「formal run 一律無 UI、走 CLI」的第二次劃細：
+#           允許由 Web 觸發 formal run，但 UI 不得傳遞任何科學參數。
+# 模組定位: operational amendment 的草稿。spec 進版控代表決策內容公開可稽核，
+#           凍結才代表承諾。它**不** supersede 任何 scientific lock。
+# 主要責任:
+#   1. 記錄 §208 的界線由「誰按按鈕」改為「誰做判斷」
+#   2. 明列 UI 能傳與不能傳的參數，以及擋下它的機制
+#   3. 證明沒有任何 scientific lock 因此變動
+# 維護提醒:
+#   - 不得以本修訂為由擴大 FORMAL_PARAM_WHITELIST。放寬的是觸發權，
+#     不是設定權；兩者混為一談就等於讓 UI 成為第二條設定通道。
+#   - 不得在 families 36-43 生成或讀取之後才凍結本修訂。
+#   - v0.1.0 新增：草稿，對應 NOTE-059。
+# 驗證方式:
+#   - py -3.10 -m pytest tests/console/test_formal_start.py -v
+#   - py -3.10 -m pcmef.cli amendment freeze --spec configs/amendments/AMD-008.amendment.yaml
+# ------------------------------------------------------------
+
+amendment_id: AMD-008
+
+title: >
+  Allow a formal run to be triggered from the local web console, while keeping
+  every scientific setting out of the UI. Operational only: no scientific lock
+  is superseded and no research parameter changes.
+
+supersedes: >
+  Nothing. This amendment changes no lock. It narrows the reading of
+  SRC-SAI section 208 ("all formal runs are CLI-only, no UI") for the second
+  time, using the same criterion as the first narrowing.
+
+rationale: >
+  Section 208 was written to stop one specific failure: the UI becoming a
+  second configuration channel that bypasses freeze. The rule it produced --
+  "no formal run may be started from a UI" -- is a proxy for that concern, and
+  the proxy is wider than the concern.
+
+  The first narrowing (2026-08-31) separated "run a formal experiment" from
+  "freeze the current draft configuration into a lock", and allowed the console
+  to trigger the latter. The reasoning recorded then was that a button which
+  starts `pcmef llm snapshot --freeze` as a subprocess goes through the same
+  channel and the same checks as typing it, and leaves a fuller record than
+  shell history. What matters is who makes the judgement, not who presses the
+  key.
+
+  This amendment applies that same criterion to the formal run itself. The
+  console starts `pcmef formal run-e2` as a subprocess. Pre-flight, lineage
+  resolution via ACTIVE_LINEAGE, the sealed-partition check and the
+  scenario_set_hash comparison all happen inside that process and all exit 2 on
+  failure. No line of UI code decides whether a run may proceed.
+
+  The part that actually needs guarding is parameters, and that is guarded
+  separately: ConsoleRunner rejects any key outside a two-element whitelist.
+
+changed_contracts:
+  who_may_start_a_formal_run:
+    before: "CLI only. ConsoleRunner refused any parameter whose name contained 'formal'."
+    after: >
+      CLI, or the local console via run kind formal_e2. The console builds the
+      same `pcmef formal run-e2` command a person would type.
+    why: >
+      Section 208's concern is configuration bypass, not the input device. A
+      button that runs the same command through the same gates and records the
+      full command line, timestamps and output is more auditable than shell
+      history, not less.
+  what_the_ui_may_supply:
+    before: "Not applicable -- the console could not start a formal run at all."
+    after: >
+      Exactly two keys: mode (dry-run | formal) and confirm. Everything else is
+      refused by FORMAL_PARAM_WHITELIST. severity, thresholds, freeze_dir, base
+      and ds_dir are all absent: the lineage comes from ACTIVE_LINEAGE, the
+      dry-run data location is a server-side setting, and every scientific value
+      comes from the frozen locks.
+    why: >
+      This is the boundary that matters. Trigger rights and configuration rights
+      are different things; conflating them is exactly the bypass section 208
+      was written to prevent.
+  confirmation_for_a_one_shot_run:
+    before: "Not applicable."
+    after: >
+      mode=formal additionally requires the phrase 'RUN FINAL E2'. A dry run
+      requires nothing.
+    why: >
+      The Final E2 is one-shot and unrepeatable. A misclick must not be able to
+      spend it.
+
+invariants_preserved:
+  no_scientific_lock_changes: >
+    No lock is superseded, re-frozen or re-read. gate, reliability_final,
+    formal_config, statistics_config, e2_sample_size, conflict_operational,
+    llm_runtime, agent_schema, inference_firewall and validation_pool are all
+    untouched by this amendment.
+  single_execution_path: >
+    The console starts a subprocess running pcmef.cli. There is no second
+    executor: the Web, the CLI and the validator all reach
+    e2_formal.execute_full_pcmef_cases (NOTE-055).
+  preflight_is_not_duplicated: >
+    The page and the CLI both call experiments.formal_service.preflight. The
+    screen cannot be more permissive than the gate, because it is the gate.
+  sealed_partition_still_sealed: >
+    A dry run started from the UI reads a server-configured, already-opened
+    dataset. Pre-flight refuses any dry run whose base manifest contains a
+    family index >= 36.
+  formal_runner_does_not_read_live_bindings: >
+    Unchanged. The frozen llm_runtime identity governs the run; the registry is
+    not consulted for scientific identity.
+
+precondition_evidence:
+  final_e2_families_36_43_generated: false
+  final_e2_families_36_43_read: false
+  formal_e2_report_exists: false
+  note: >
+    Written while the final partition is still sealed, which is what makes
+    "not chosen from the outcome" checkable.
+
+authority: >
+  Researcher decision. The criterion is the one already recorded in
+  ConsoleRunner._assert_not_formal for the 2026-08-31 narrowing: the line is
+  drawn at who makes the judgement, not at who presses the key. This amendment
+  is operational; it grants a trigger, not a setting.

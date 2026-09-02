@@ -7,15 +7,18 @@
  # 版本: v0.1.0
  # 功能說明: Formal Research Workspace 的監控畫面。上半是 identity 與
  #           pre-flight 燈號，下半是最近一次執行的結果與有效性狀態。
- # 模組定位: SAI v0.6.0 §19.1-19.8 的最小實作。**唯讀** ——
- #           §19.9 的啟動控制不在本頁，那條線由 §208 守著。
+ # 模組定位: SAI v0.6.0 §19.1-19.9 的最小實作。啟動按鈕觸發的是
+ #           `pcmef formal run-e2` 子行程，與終端機同一條路徑；
+ #           准駁由 CLI 的 pre-flight 判定，不在畫面上（AMD-008）。
  # 主要責任:
  #   1. Identity Bar：active lineage、resolved 目錄與 lock 雜湊
+ #   0. Run Controls：預演與正式執行；正式需輸入確認片語
  #   2. Pre-flight Panel：formal 與 dry-run 兩組判準各自的燈號
  #   3. Latest Run：結果、routing、provider 用量與有效性欄位
  #   4. 沒有結果時明確說「尚未執行」，不留空白讓人以為壞了
  # 維護提醒:
- #   - 不得在本頁加入啟動按鈕。要加必須先處理 §208 的紅線與 amendment。
+ #   - 不得在本頁加入任何科學參數欄位。表單只送 mode 與 confirm；
+ #     多送一個鍵就會被 ConsoleRunner 的白名單擋下（那是刻意的）。
  #   - 不得把 dry run 的結果顯示成正式結果。dry_run 為真時整張卡片
  #     必須帶上明確標記，且 pcmef_full 那一列本來就不存在（NOTE-056）。
  #   - 不得用 JavaScript 做摺疊；<details> 是原生元素。
@@ -36,9 +39,66 @@
 
   <h1>Formal Research Workspace</h1>
   <p class="lede">
-    正式實驗的執行身分、起跑前檢查與最近一次結果。本頁<strong>唯讀</strong>：
-    可以看，不能改，也不能從這裡啟動。
+    正式實驗的執行身分、起跑前檢查、啟動與最近一次結果。
+    本頁<strong>不能設定任何科學參數</strong>：門檻、severity、lineage
+    全部來自已凍結的 lock，按鈕只決定「跑不跑」。
   </p>
+
+  {# --- Run Controls（§19.9）------------------------------------------ #}
+  <section class="card">
+    <h2>啟動
+      <span class="hint">按鈕只觸發 CLI；准駁由 pre-flight 判定，不在畫面上</span>
+    </h2>
+    <div class="body">
+      {% if active %}
+        <p><span class="badge warn">執行中</span>
+           <a class="mono" href="{{ url_for('console.run_page', run_id=active.run_id) }}">
+             {{ active.run_id }}</a> — {{ active.label }}
+        </p>
+        <p class="note">一次只跑一個。要看逐行輸出，點上面的編號。</p>
+      {% else %}
+
+        <form method="post" action="{{ url_for('formal.start') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="mode" value="dry-run">
+          <p class="note">
+            <strong>預演</strong>：零 provider 呼叫，不花錢，不碰 families 36-43。
+            驗資料生成、routing 與統計形狀。
+          </p>
+          <button class="btn" type="submit"
+                  {% if not dry.allowed %}disabled{% endif %}
+                  title="{% if dry.allowed %}跑一次零成本預演{% else %}pre-flight 未通過{% endif %}">
+            執行預演
+          </button>
+        </form>
+
+        <hr>
+
+        <form method="post" action="{{ url_for('formal.start') }}"
+              onsubmit="return confirm('這是一次性的正式實驗，跑完就是結論，不能重跑。\n確定要開始嗎？');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="mode" value="formal">
+          <p class="note">
+            <strong>正式執行</strong>：一次性，會呼叫 provider 並產生研究結論。
+            {% if not formal.allowed %}
+              目前 <span class="badge bad">BLOCKED</span>，見下方起跑前檢查。
+            {% endif %}
+          </p>
+          <div class="field">
+            <label for="confirm">輸入 <span class="mono">{{ confirm_phrase }}</span> 以確認</label>
+            <input id="confirm" name="confirm" type="text" autocomplete="off"
+                   placeholder="{{ confirm_phrase }}"
+                   {% if not formal.allowed %}disabled{% endif %}>
+          </div>
+          <button class="btn danger" type="submit"
+                  {% if not formal.allowed %}disabled{% endif %}>
+            開始正式執行
+          </button>
+        </form>
+
+      {% endif %}
+    </div>
+  </section>
 
   {# --- Identity Bar（§19.1）------------------------------------------ #}
   <section class="card">
@@ -262,9 +322,9 @@
   </section>
 
   <p class="note">
-    本頁唯讀。正式執行由
-    <span class="mono">pcmef formal run-e2 --mode formal</span> 啟動；
-    預演為 <span class="mono">--mode dry-run</span>。
+    畫面上的按鈕啟動的是
+    <span class="mono">pcmef formal run-e2</span> 子行程，與在終端機打完全同一條路徑。
+    UI 不傳任何科學參數：lineage 由 ACTIVE_LINEAGE 解析，其餘來自已凍結的 lock。
   </p>
 
 </div>

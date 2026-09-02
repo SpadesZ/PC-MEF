@@ -80,7 +80,7 @@ def echo(tmp_path) -> _EchoRunner:
 )
 def test_formal_is_refused(runner, params):
     """§208：formal run 一律無 UI、走 CLI。"""
-    with pytest.raises(FormalRunRefused, match="CLI-only"):
+    with pytest.raises(FormalRunRefused, match="formal_e2"):
         runner.start(RunSpec(kind="sim_smoke", params=params))
 
 
