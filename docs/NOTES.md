@@ -324,6 +324,77 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-061 G4 Reliability Routing：把路由的效果與仲裁的效果分開量
+
+**決策日期**：2026-09-02（P1-2，實驗計畫 v1.2 §4.2 的 G4）
+
+**適用範圍**：`pcmef/experiments/e2_formal.py` 的 `reliability_routing` 臂
+與成對統計的 baseline 清單。
+
+**決策**：新增 G4：沿用**同一組** q_V / q_T / D 與同一條 route，
+三條傳統路徑照常輸出，escalated 改用 fixed fusion。整條臂
+**零 provider 呼叫**，且被納入 G5 的成對比較。
+
+**原因**：
+
+### 1. 少了 G4，G5 vs G3 混著兩件事
+
+實驗計畫把 G4 列為五個比較組之一，而 executor 先前只有四條臂
+（G1/G2/G3/G5）。缺 G4 的後果不是「少一個數字」，而是
+**「LLM 仲裁的增量」沒有對照**：
+
+```
+G4 vs G3  =  路由本身的效果
+G5 vs G4  =  Multi-Agent 仲裁的效果
+G5 vs G3  =  兩者混在一起
+```
+
+只有 G5 vs G3 的話，無法回答「是路由有用，還是仲裁有用」——
+而那正是 pilot 的 negative finding 所在的位置。
+
+### 2. 它完全由既有資訊導出，不需要重跑
+
+```python
+reliability_routing = np.where(escalated_mask[:, None], fused, finals)
+```
+
+non-escalated 的列直接沿用 `finals`：那時 F(x) **依定義**等於 p_trad
+（見 `decide_case` 的 non-escalated 分支），所以這不是近似，是等式。
+G4 因此一個 case 都沒有新跑，provider 呼叫數不變。
+
+### 3. G4 在 dry run 中完全有效
+
+dry run 對 escalated 列填的就是 fused，而那正是 G4 的定義。
+所以 **G4 在預演與正式執行下逐位元相同** —— 測試以此為斷言，
+並用「G5 在兩種模式下必須不同」當對照，否則那個相等毫無意義。
+
+實務結果：零成本預演現在能給出**四條真實的臂**（G1–G4），
+而不是先前的三條。只有 G5 缺席，因為它是唯一需要 LLM 的。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_reliability_routing_arm.py -v   # 7 條
+py -3.10 -m pcmef.cli formal run-e2 --mode dry-run --base outputs/perception/gate_validation
+```
+
+實測（effective gate-validation，384 列、143 escalated）：
+
+```
+vision_only          0.7708 / 0.7711
+tof_only             0.6302 / 0.6309
+fixed_fusion         0.6380 / 0.6388
+reliability_routing  0.7214 / 0.7215      ← G4
+```
+
+G4 明顯優於 fixed fusion，但未勝 vision-only —— 與 deterministic-gate
+pilot 的既有結論一致（STATUS.md 的 pilot 專節）。
+
+**維護邊界**：G4 不得走任何會呼叫 provider 的分支。一旦它叫了 LLM，
+G5 vs G4 就不再是仲裁的增量。也不得把它從 dry run 拿掉。
+
+---
+
 ## NOTE-060 全零 class_support 是 semantic failure，不得救成 uniform
 
 **決策日期**：2026-09-02（P1-1，實驗計畫 v1.2 對齊）

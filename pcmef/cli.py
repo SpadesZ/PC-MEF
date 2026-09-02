@@ -3164,9 +3164,9 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     if dry_run:
         print(f"  skipped escalated {document['skipped_escalated_cases']}"
               "  (pcmef_full arm omitted by construction)")
-    print(f"\n  {'arm':14s} {'accuracy':>9s} {'macroF1':>9s}")
+    print(f"\n  {'arm':20s} {'accuracy':>9s} {'macroF1':>9s}")
     for name, block in document["results"].items():
-        print(f"  {name:14s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}")
+        print(f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}")
     return 0
 
 

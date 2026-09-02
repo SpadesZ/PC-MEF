@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.3.0
+# 版本: v0.4.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -21,7 +21,8 @@
 #   3. prepare_cases() 產生 stress 列並算出 p_V / p_T / D-U-Q / q_m / route
 #   4. execute_full_pcmef_cases() 是**唯一**的執行迴圈，正式執行與驗證共用
 #   5. run_formal_e2_full() 組裝 formal identity、呼叫上者、彙總並寫報告
-#   6. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
+#   6. G1-G5 五條臂；G4 由既有 route 與 fused 導出，零 provider 呼叫
+#   7. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
 # 維護提醒:
 #   - 不得在本檔重新擬合任何東西。門檻、溫度、anchors 一律由 lock 還原；
 #     refit 一次就等於 Formal E2 自己決定了自己的判準。
@@ -31,6 +32,9 @@
 #     少一個 case 就是分母悄悄變小，那正是 bounded retry 要防的事。
 #   - 不得對 non-escalated case 呼叫 provider。selective escalation 的整個
 #     論點就是「傳統證據足夠就不叫 LLM」，多叫一次就推翻了它。
+#   - 不得讓 G4 reliability_routing 走任何會呼叫 provider 的分支。它的定義
+#     是「路由但不仲裁」；一旦它叫了 LLM，G5 vs G4 就不再是仲裁的增量
+#     （NOTE-061）。也不得把它從 dry run 拿掉 —— 它不依賴 LLM。
 #   - 不得讓 dry run 輸出 pcmef_full 的數字。那一欄會等於 fixed_fusion，
 #     讀起來像「PC-MEF 沒有比固定融合好」，而它其實從未執行（NOTE-056）。
 #   - 不得改用 scenario-level bootstrap。statistics_config.lock 凍的是
@@ -41,10 +45,12 @@
 #   - v0.1.0 新增：首版 Full PC-MEF formal executor，決策見 NOTE-051。
 #   - v0.2.0 新增：抽出 execute_full_pcmef_cases()，freeze_dir 改必填。
 #   - v0.3.0 新增：llm_mode dry run；dry run 不輸出 pcmef_full 臂（NOTE-056）。
+#   - v0.4.0 新增：G4 reliability_routing 臂與其成對統計（NOTE-061）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
 #   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
 #   - py -3.10 -m pytest tests/e2/test_dry_run_mode.py -v
+#   - py -3.10 -m pytest tests/e2/test_reliability_routing_arm.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -512,17 +518,33 @@ def run_formal_e2_full(
     counter = executed["counter"]
 
     fused = rule.fusion_weight * p_vision + (1.0 - rule.fusion_weight) * p_tof
+    escalated_mask = np.asarray([str(r) == "escalated" for r in routes])
+
+    # G4：可靠度路由，但**不呼叫 LLM**。三條傳統路徑照常輸出，
+    # escalated 改用 fixed fusion。這條臂把「路由本身」與「Multi-Agent
+    # 仲裁」的效果乾淨隔開：G4 vs G3 量的是路由，G5 vs G4 量的是仲裁。
+    #
+    # non-escalated 的列直接沿用 finals —— 那時 F(x) 依定義等於 p_trad
+    # （見 decide_case 的 non-escalated 分支），所以這裡不是近似，是等式。
+    # 整條 G4 的 provider 呼叫數為 0，因為它一個 case 都沒有新跑。
+    reliability_routing = np.where(escalated_mask[:, None], fused, finals)
+
     arms = {
         "vision_only": p_vision,
         "tof_only": p_tof,
         "fixed_fusion": fused,
+        "reliability_routing": reliability_routing,
     }
     if dry_run:
         # pcmef_full 刻意缺席。dry run 的 F(x) 是填位值，報出去會變成
         # 「PC-MEF 恰好等於 fixed fusion」—— 一個從未執行的方法不該有數字。
+        #
+        # G4 則相反，在 dry run 下**完全有效**：它的定義就是 escalated 用
+        # fused，而那正是 dry run 對 escalated 列填的值。
         say(
             f"dry run: {skipped_escalated} escalated case(s) skipped; "
-            "the pcmef_full arm is omitted from the report"
+            "the pcmef_full arm is omitted from the report "
+            "(reliability_routing remains valid: it never calls an LLM)"
         )
     else:
         arms["pcmef_full"] = finals
@@ -566,7 +588,11 @@ def run_formal_e2_full(
                     labels, predictions, rows, stack, baseline
                 ).items()
             }
-            for baseline in ("vision_only", "tof_only", "fixed_fusion")
+            # G5 對 G1-G4 都要有成對比較（實驗計畫 v1.2 §5）。少了 G4，
+            # 「LLM 仲裁的增量」就沒有對照 —— G5 vs G3 混著路由與仲裁兩件事。
+            for baseline in (
+                "vision_only", "tof_only", "fixed_fusion", "reliability_routing"
+            )
         }
     cluster_shape = _cluster_statistics(
         labels, predictions, rows, stack, "vision_only"
@@ -586,9 +612,27 @@ def run_formal_e2_full(
             "Data generation, routing, reliability and cluster shape were exercised "
             "with zero provider calls. The pcmef_full arm and every paired statistic "
             "are absent by construction: a method that never ran must not have a "
-            "number. The three baseline arms are complete and valid -- they never "
-            "needed an LLM."
+            "number. The other four arms -- including reliability_routing -- are "
+            "complete and valid, because none of them ever calls an LLM."
         ),
+        "arm_definitions": {
+            "vision_only": "G1. argmax p_V.",
+            "tof_only": "G2. argmax p_T.",
+            "fixed_fusion": (
+                f"G3. {rule.fusion_weight} p_V + {1.0 - rule.fusion_weight} p_T "
+                "on every row, regardless of route."
+            ),
+            "reliability_routing": (
+                "G4. The same q_V / q_T / D and the same route as G5, but the "
+                "escalated route falls back to fixed fusion instead of calling the "
+                "arbiter. Zero provider calls by construction. G4 vs G3 isolates "
+                "the routing; G5 vs G4 isolates the multi-agent arbitration."
+            ),
+            "pcmef_full": (
+                "G5. Reliability routing plus selective multi-agent arbitration; "
+                "escalated rows carry s_A."
+            ),
+        },
         "skipped_escalated_cases": skipped_escalated,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "code_version": code_version,
