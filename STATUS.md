@@ -7,6 +7,113 @@
 
 ---
 
+## P0 FORMAL EXECUTION PATH 完成（2026-09-02，NOTE-053~059、AMD-008）
+
+**九個 commit，全部是入口、守衛與介面；沒有動任何 threshold、anchor、
+prompt、schema 或 model weight。families 36-43 全程未生成、未讀取。**
+
+依 SAI v0.6.0（`PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`）
+的 §18 / §19 / ACC-FML-01~03 與 §46 First Slice。
+
+### 起因：唯一跑得起來的「Formal E2」正是 lock 禁止的那一條
+
+盤點發現三件事，每一件單獨都不會有症狀：
+
+| 發現 | 事實 |
+|---|---|
+| `run_formal_e2_full()` **從未被執行過** | 全 repo 只有定義、`__all__` 與一個 metadata 字串；沒有呼叫點，沒有測試 |
+| `perception e2` 走決定性替身 | `gate.run_formal_e2` + `paired_bootstrap_delta`，而 `statistics_config.lock` 明文寫它 **must NOT be used for Final E2** |
+| `freeze_dir` 預設 `"freeze"` | 那是 superseded 的 parent lineage；兩份 lineage 檔名與 schema 相同，讀錯不拋錯 |
+
+### 九個 phase
+
+| # | 內容 | 對應 |
+|---|---|---|
+| P0-0 | provisional regression snapshot（TGR-01~08/10/12），進版控 `regression/provisional/` | NOTE-053 |
+| P0-1 | `freeze/ACTIVE_LINEAGE.json` + resolver，六種 fail-closed | NOTE-054 |
+| P0-2 | `freeze_dir` 改 required keyword-only | NOTE-054 |
+| P0-3 | 抽出 `execute_full_pcmef_cases()`，正式與驗證共用 | NOTE-055 |
+| P0-4 | validator 改走 production loop，刪掉重建的迴圈 | NOTE-055 |
+| P0-5 | `pcmef formal run-e2` 唯一入口 + `--mode dry-run` | NOTE-056 |
+| P0-6 | `perception e2` 退役（exit 2），pilot 移到新指令 | NOTE-057 |
+| P0-7a | `/formal` 監控頁，與 CLI 共用 pre-flight | NOTE-058 |
+| P0-7b | Web 可啟動，白名單只有 `mode` + `confirm` | NOTE-059、AMD-008 |
+
+### 重構沒有改行為，這是量出來的
+
+以決定性假 agent 跑完整 `run_formal_e2_full`（384 列、143 escalated），
+比對 routing、per-arm、per-condition、cluster bootstrap 與全部 trace 的雜湊：
+
+```
+before  d35ec9c91c623d8cf255a804b34e8b03d0be63e0df5011467f278193b29eda9b
+after   d35ec9c91c623d8cf255a804b34e8b03d0be63e0df5011467f278193b29eda9b
+```
+
+`regression verify` 在每一個 phase 之後都回報 IDENTICAL。
+
+### 新增的能力：零成本預演
+
+```powershell
+py -3.10 -m pcmef.cli formal preflight --mode formal      # 未達條件即 exit 2
+py -3.10 -m pcmef.cli formal run-e2 --mode dry-run --base outputs/perception/gate_validation
+py -3.10 -m pcmef.cli formal run-e2 --mode formal         # 一次性，需 36-43
+```
+
+dry run 走**完全相同**的資料生成、routing 與 cluster bootstrap，
+但零 provider 呼叫，且**不輸出 `pcmef_full` 臂與任何成對統計** ——
+填位值會恰好等於 `fixed_fusion`，報出去會變成「PC-MEF 沒有比較好」，
+而它其實從未執行。三個 baseline 的數字則完整有效。
+
+實測：384 列、143 escalated 全部 skipped、0 次 provider 呼叫、
+32 cluster × 12 列、`statistics = {}`、檔名 `formal_e2_dry_run.json`。
+
+### Web：`http://localhost:8790/formal`
+
+Identity bar（lineage 與十個 lock 雜湊）、兩組 pre-flight 燈號、
+啟動控制、最近一次結果與 provider 用量。
+
+**AMD-008 放寬的是觸發權，不是設定權。** UI 只能傳 `mode` 與 `confirm`；
+`severity`、門檻、`freeze_dir`、`base`、`ds_dir` 全部被白名單擋下。
+`mode=formal` 另需輸入 `RUN FINAL E2`。准駁全在 CLI 子行程的 pre-flight 內
+—— 畫面上的 disabled 只是便利，不是防線。
+
+實測按下畫面按鈕：`run.json` 記到 `params={'mode': 'dry-run'}`（零科學參數），
+384 列跑完，exit 0。
+
+### 這一輪**沒有**做的事
+
+- 沒有跑 `corrective validate-executor`（會消耗每日配額，那要留給 evidence-regression）
+- 沒有凍結 AMD-007 或 AMD-008
+- 沒有建立 canonical Golden Baseline（見下）
+- 沒有碰 families 36-43
+
+### Golden Baseline 為什麼還不能取
+
+`regression/provisional/` 明寫 `canonical: false` 與四條 blocker。
+最容易被忽略的是最後一條：**Final E2 要用的 paid connection identity
+尚未確定**。換 paid key 若改變 `secret_ref` 或 `role_connection_map`，
+runtime identity 就再變一次，先取的 baseline 當場過期。
+
+`FIXED_SUMMARY` 這個名稱本身沒有錯，它仍是現行 representation mode；
+stale 的是 lock 尚未記錄 v2 evidence contract、`timeout_sec=120`
+與新的 role connection topology。
+
+正確順序：
+
+```
+quota 恢復
+  → corrective evidence-regression --cases 2
+  → corrective validate-executor（此時已走 production loop）
+  → amendment freeze AMD-007
+  → 重凍 llm_runtime → 重凍 formal_config
+  → paid connection identity 確認（有變則再 amendment + re-freeze）
+  → P0-B canonical Golden Baseline（補齊 TGR-09/11）
+  → 生成 families 36-43，比對 scenario_set_hash = 34fd823d…
+  → formal run-e2 --mode formal
+```
+
+---
+
 ## EVIDENCE-CONTRACT CORRECTION（2026-09-02，NOTE-052）
 
 **程式碼已完成並通過離線測試；`llm_runtime` 與 `formal_config` 的重凍
