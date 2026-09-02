@@ -1,0 +1,10 @@
+{
+  "schema_version": "active_lineage_v1",
+  "active_freeze_dir": "freeze/runs/PFC-001",
+  "status": "ACTIVE",
+  "supersedes": [
+    "freeze"
+  ],
+  "reason": "PFC-001 corrective lineage (AMD-006). The root freeze/ directory still holds the parent lineage byte-for-byte, including the superseded reliability_final ebf4529a, gate 1ff2d667 and formal_config cefb453a. Reading it would silently execute decisions that were corrected.",
+  "note": "This pointer is a resolver, not a scientific identity. When the next corrective lineage is created this file must be updated to name it; what identifies a formal run is the resolved directory plus its lock hashes, both recorded in the run manifest."
+}

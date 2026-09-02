@@ -324,6 +324,71 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-054 Active lineage 是 resolver，不是 scientific identity
+
+**決策日期**：2026-09-02（P0-1，SAI v0.6.0 §18 / ACC-FML-02）
+
+**適用範圍**：`freeze/ACTIVE_LINEAGE.json`；`pcmef/core/active_lineage.py`；
+所有 formal 執行入口的 lineage 解析。
+
+**決策**：
+
+1. 新增 `freeze/ACTIVE_LINEAGE.json`，宣告 `active_freeze_dir`、`status`
+   與 `supersedes`。目前指向 `freeze/runs/PFC-001`。
+2. formal 執行前必須 `resolve_active_lineage()`，六種情況一律拒絕：
+   pointer 不存在、schema 版本不認得、`status != ACTIVE`、
+   指向自己宣告已 supersede 的目錄、目標目錄不存在、required lock 不齊。
+3. **pointer 本身不進 run manifest 當身分**；要記的是它當下**解析到什麼**
+   （`resolved_freeze_dir` + 十個 lock 的雜湊）。
+4. 不為 lineage 提供任何預設值。
+
+**原因**：
+
+### 1. 兩份 lineage 並存，而且指錯不會有症狀
+
+`freeze/` 與 `freeze/runs/PFC-001/` 同時存在，前者仍逐位元保留 parent
+lineage 的 22 個 lock，其中三個已被 AMD-006 supersede：
+`reliability_final ebf4529a`、`gate 1ff2d667`、`formal_config cefb453a`。
+兩邊的檔名、schema 與載入路徑完全相同，讀錯**不會拋任何錯誤**，
+只會安靜地用被更正掉的 anchors 與門檻跑完整場 Final E2。
+
+### 2. 為什麼 pointer 不能當身分
+
+pointer 會移動：AMD-007 完成後若產生 PFC-002，這個檔案就得改指過去。
+把「ACTIVE_LINEAGE」記進 run manifest，等於記了一個之後會變的東西 ——
+日後回頭看那筆 run，無法還原它當初實際讀了哪一組 lock。
+因此 manifest 記的是 `resolved_freeze_dir` 與 lock 雜湊：
+pointer 是解析器，解析結果才是證據。
+
+### 3. 為什麼沒有預設值
+
+`load_frozen_decision_stack()` 原本的 `freeze_dir="freeze"` 正是最危險的那個
+預設 —— 它指向 superseded root。有預設值的 fail-open 與沒有預設值的
+fail-closed 差別在於：前者出錯時看起來一切正常。
+
+### 4. 為什麼「lock 不齊」也要拒絕
+
+只驗 pointer 指得到目錄不夠。一個只有一半 lock 的 lineage 會讓 run
+從這裡讀一部分決策、從別處讀另一部分，而那是最難事後查證的狀態。
+`REQUIRED_FORMAL_LOCKS` 列的是**這條執行路徑真的會讀的**十個，
+不是全部 22 個。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_active_lineage.py -v     # 13 條
+py -3.10 -m pcmef.cli locks active-lineage                # 解析不出即 exit 2
+```
+
+實測解析結果為 `freeze/runs/PFC-001`，且三個 supersede 過的 lock
+確實取到新值（`6e54e11b` / `4f043335` / `aec8e88a`），
+不是 parent 的舊值 —— 這一條由測試釘住。
+
+**維護邊界**：新增 corrective lineage 時必須同步更新這個檔案；
+`supersedes` 要把前一條 lineage 列進去。不得為 `freeze_dir` 加回預設值。
+
+---
+
 ## NOTE-053 Provisional regression snapshot：先取行為基準，且刻意不叫 Golden
 
 **決策日期**：2026-09-02（P0-0，SAI v0.6.0 §6 的前置）

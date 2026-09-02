@@ -2993,6 +2993,32 @@ def cmd_corrective_validate_executor(args: argparse.Namespace) -> int:
     return 0 if document["all_passed"] else 2
 
 
+def cmd_locks_active_lineage(args: argparse.Namespace) -> int:
+    """顯示 formal run 會讀到哪一組 lock。解析不出來即 exit 2。"""
+    from pcmef.core.active_lineage import ActiveLineageError, resolve_active_lineage
+
+    try:
+        resolved = resolve_active_lineage(args.root)
+    except ActiveLineageError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    print(f"  pointer    {resolved.pointer_path.as_posix()}")
+    print(f"  resolves   {resolved.freeze_dir.as_posix()}")
+    print(f"  supersedes {', '.join(resolved.supersedes) or '-'}")
+    print(f"  status     {resolved.status}")
+    print(f"\n  {resolved.reason}")
+    print(f"\n  {len(resolved.lock_hashes)} lock(s) a formal run reads from here:")
+    for name in sorted(resolved.lock_hashes):
+        print(f"    {name:26s} {resolved.lock_hashes[name][:16]}")
+    print(
+        "\n  The pointer is a resolver, not an identity: a formal run records the\n"
+        "  resolved directory and these hashes, because the pointer moves when the\n"
+        "  next corrective lineage is created."
+    )
+    return 0
+
+
 def cmd_regression_capture(args: argparse.Namespace) -> int:
     """取一份 provisional 行為快照。**不是** Golden Baseline。"""
     from pcmef.experiments.regression_snapshot import (
@@ -4224,6 +4250,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = locks_sub.add_parser("status", help="顯示每個 lock 的凍結狀態與前置條件")
     status.add_argument("--freeze-dir", default="freeze")
     status.set_defaults(func=cmd_locks_status)
+
+    active_lineage = locks_sub.add_parser(
+        "active-lineage", help="顯示 formal run 會讀到哪一組 lock；解析不出即 exit 2"
+    )
+    active_lineage.add_argument("--root", default="freeze")
+    active_lineage.set_defaults(func=cmd_locks_active_lineage)
 
     locks_resolve = locks_sub.add_parser(
         "resolve",
