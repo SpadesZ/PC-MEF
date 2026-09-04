@@ -324,6 +324,64 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-068 Pipeline 頁的每個數字都要帶出處，且不得照欄位名顯示門檻
+
+**決策日期**：2026-09-04（P2-3，SAI v0.6.0 §20 Pipeline 入口）
+
+**適用範圍**：`pcmef/console/pipeline.py`；
+`pcmef/admin/templates/pipeline.html`。
+
+**決策**：七個節點各自展開 Input / Process / Output，每一條都顯示 frozen lock
+的**實際值**與**出自哪個 lock**。Process 不寫「門檻由 gate.lock 還原」這種說明，
+而是寫 `D ≤ 0.489660` 這種可被查證的事實。
+
+**原因**：這一頁的用途是讓凍結設定可被查證。「門檻由 lock 還原」只是複述機制，
+讀者無法用它核對任何東西；「D ≤ 0.489660，出自 gate.lock」才能被拿去比對。
+出處標記不得移除 —— 沒有出處的數字與寫死在頁面上的數字無法區分。
+
+**不得照欄位名顯示路由門檻**：`gate.lock` 有 `q_vision_threshold = 1.3158` 與
+`q_tof_threshold = 17.013`。名字看起來是 q 的門檻，實際上是 **Q（原始感測品質）**
+尺度的值，屬於 `gate_route()`；而 `gate_route()` 在全庫**沒有任何呼叫者**。
+正式路徑走 `reliability_route()`，比較的是：
+
+- `q_m ≥ 0.5`（`RELIABLE_MARGIN`，對應 `reliability_final.lock` 的
+  `parameters.reliable_margin`）
+- `D ≤ 0.48965981236738715`（`gate.lock` 的 `disagreement_threshold`）
+
+因此路由節點顯示的是後面這兩個。照欄位名把 1.3158 標成「vision 的路由門檻」，
+會讓讀者拿到一個從未被比較過的數字 —— 而 case trace 上顯示的門檻是 0.5，
+兩頁會互相矛盾。頁面另闢一段「一個容易拿錯的數字」說明這件事。
+`test_routing_shows_the_thresholds_actually_compared` 斷言那兩個 Q 尺度的值
+不得出現在路由節點的任何一格。
+
+（`gate_route()` 沒有呼叫者這件事本身尚未處理。它與 NOTE-049 記錄的
+`legacy_continuous_gate` 屬同一類，但後者已在 lock 內標記
+`SUPERSEDED_NEVER_ACTIVATED`，`gate_route()` 還沒有。）
+
+**partial calibration 要看得見**：模擬節點顯示
+`已收斂：MAPPING_AMBIENT` 與
+`被抑制：SCENE_GEOMETRY_SURFACE_FOIL、MAPPING_SIGNAL、MAPPING_SIGMA`。
+E1 只有 Ambient 收斂是整份論文最重要的邊界之一，只寫在文件裡而畫面上看不到，
+等於預設讀者會去翻文件。
+
+**觀察頁不 fail-closed**：`resolve_active_lineage()` 對執行路徑是 fail-closed，
+但在這裡 fail-closed 只換來一頁 500，使用者連「為什麼看不到」都不知道。
+解析失敗時保留靜態結構並說明原因；個別 lock 讀不到時指名是哪一個。
+
+**一個測試陷阱**：`ACTIVE_LINEAGE.json` 的 `active_freeze_dir` 是 repo 相對路徑
+（`freeze/runs/PFC-001`），解析時相對 **cwd** 而不是相對傳入的 root。因此
+`build_pipeline(tmp/freeze)` 會從副本讀 pointer、卻從本尊讀 lock。只複製目錄
+不換 cwd 的測試會通過但什麼都沒驗到，必須連 `monkeypatch.chdir` 一起。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/console/test_pipeline.py -v
+```
+14 項通過，含逐項比對 lock 字面值。畫面在 1280 px 下檢視：三張卡、七個節點
+各三張 fact 表（7/7/6/5/7/7/9 條）、無水平溢出、頁面無任何表單或按鈕。
+
+---
+
 ## NOTE-067 角色隔離要用實際 payload 證明，不能複述契約
 
 **決策日期**：2026-09-04（P2-5，SAI v0.6.0 §20 第三層）

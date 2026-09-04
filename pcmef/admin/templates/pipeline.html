@@ -3,19 +3,23 @@
  #         資料來自 console.pipeline.build_pipeline()。extends _layout.html。
  # 檔案路徑: pcmef/admin/templates/pipeline.html
  # 產生時間: 2026-09-03 10:05 +08:00
- # 版本: v0.1.0
+ # 版本: v0.2.0
  # 功能說明: 研究流程的七個節點與它們之間傳遞什麼。
  # 模組定位: SAI v0.6.0 §20 的 Pipeline 入口，回答「系統怎麼跑」。
  #           **唯讀** —— 這裡不得出現任何可修改研究參數的控制項。
  # 主要責任:
  #   1. 依序列出七個節點，標明每一步交給下一步什麼
- #   2. 在詳細內容尚未接上時，明說目前呈現到哪個層次
+ #   2. 每個節點展開後顯示 Input / Process / Output 的實際值與出處
+ #   3. 讀不到 lock 時說明原因，而不是留白
  # 維護提醒:
  #   - 不得在本頁加入表單或按鈕。Pipeline 說明流程；要開始跑回 Run。
  #   - 不得把節點順序改成非資料流順序。那個順序就是資訊本身。
+ #   - 不得移除每個值旁邊的來源標記。沒有出處的數字讀者無從查證，
+ #     而這一頁的用途正是讓凍結設定可被查證（NOTE-068）。
+ #   - v0.2.0 新增：各節點實際值，對應 P2-3。
  #   - v0.1.0 新增：首版，對應 P2-2。
  # 驗證方式:
- #   - py -3.10 -m pytest tests/console/test_navigation.py -v
+ #   - py -3.10 -m pytest tests/console/test_pipeline.py -v
  # ------------------------------------------------------------ #}
 {% extends "_layout.html" %}
 {% block title %}流程 Pipeline{% endblock %}
@@ -31,6 +35,34 @@
 
 {% if not pipeline.detail_available %}
 <div class="flash warn">{{ pipeline.detail_note }}</div>
+{% elif pipeline.detail_note %}
+<div class="flash warn">{{ pipeline.detail_note }}</div>
+{% endif %}
+
+{% if pipeline.lineage.dir %}
+<section class="card">
+  <h2>這些值出自哪一組 lock
+    <span class="hint">由 ACTIVE_LINEAGE 解析，不是寫死在頁面裡</span>
+  </h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>實際生效的目錄</th>
+            <td class="mono">{{ pipeline.lineage.dir }}</td></tr>
+        <tr><th>pointer</th>
+            <td class="mono">{{ pipeline.lineage.pointer }}</td></tr>
+        <tr><th>取代</th>
+            <td class="mono">{{ pipeline.lineage.supersedes | join('、') or '—' }}</td></tr>
+        <tr><th>狀態</th>
+            <td><span class="badge ok">{{ pipeline.lineage.status }}</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">
+      記的是解析出來的目錄而不是 pointer —— pointer 日後會改指別處，
+      而這一頁描述的是現在實際生效的那一組 lock。
+    </p>
+  </div>
+</section>
 {% endif %}
 
 <section class="card">
@@ -51,11 +83,51 @@
           <span class="note">交給下一步：</span>
           <span class="mono">{{ node.carries }}</span>
         </p>
+        {% if node.detail %}
+        <details class="advanced node-detail">
+          <summary>Input / Process / Output
+            <span class="note">實際值與出處</span></summary>
+          {% for kind, heading in [('inputs', 'Input'), ('process', 'Process'),
+                                   ('outputs', 'Output')] %}
+          {% if node.detail[kind] %}
+          <table class="facts">
+            <thead><tr><th colspan="3">{{ heading }}</th></tr></thead>
+            <tbody>
+            {% for fact in node.detail[kind] %}
+              <tr>
+                <th>{{ fact.label }}</th>
+                <td><span class="mono">{{ fact.value }}</span>
+                  {% if fact.note %}<span class="note">{{ fact.note }}</span>{% endif %}
+                </td>
+                <td class="fact-source">
+                  {% if fact.source != '—' %}
+                    <span class="mono">{{ fact.source }}</span>
+                  {% else %}
+                    <span class="note">推導自上一步</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+          {% endfor %}
+        </details>
+        {% endif %}
       </li>
       {% endfor %}
     </ol>
   </div>
 </section>
+
+{% if pipeline.detail_available %}
+<section class="card">
+  <h2>一個容易拿錯的數字</h2>
+  <div class="body">
+    <p class="note">{{ pipeline.threshold_caveat }}</p>
+  </div>
+</section>
+{% endif %}
 
 <p class="note">
   本頁唯讀。要看某一次執行實際跑出什麼，到
