@@ -1,0 +1,254 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/routes.py 的 case_page 繪製；內容來自
+ #         <run>/artifacts/trace/cases/<case_id>.json。extends _layout.html。
+ # 檔案路徑: pcmef/admin/templates/case_trace.html
+ # 產生時間: 2026-09-03 13:00 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 單一 case 的決策鏈 —— 輸入、兩個模態的分布、品質與可靠度、
+ #           路由與它的理由、五條臂各自的輸出，以及最終結果。
+ # 模組定位: SAI v0.6.0 §20 第三層。**唯讀** ——
+ #           它呈現的是那次執行已經發生的事，不能在這裡重跑或改參數。
+ # 主要責任:
+ #   1. 依資料流順序呈現：輸入 → 感知 → 品質 → 可靠度 → 路由 → 最終
+ #   2. 路由那一段顯示理由，並在推導與記錄不一致時標紅
+ #   3. Multi-Agent 區塊在 P2-5 補完整內容
+ #   4. 前後 case 的翻頁，不必回列表
+ # 維護提醒:
+ #   - 不得在本頁加入任何控制項。這是事後檢視，不是執行介面。
+ #   - 不得只顯示 route 而不顯示理由。「route=escalated」只是複述系統輸出；
+ #     使用者要問的是為什麼（NOTE-064）。
+ #   - 不得在 routing.consistent 為 false 時照唸說明文字。那代表 route 與
+ #     數值矛盾，必須標出來。
+ #   - v0.1.0 新增：決策鏈主體，對應 P2-4。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_run_sections.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}{{ trace.case_id }}{% endblock %}
+
+{% block content %}
+
+<header class="masthead">
+  <h1>{{ trace.case_id }}
+    <span class="badge {{ 'ok' if trace.final.correct else 'bad' }}">
+      {{ '判對' if trace.final.correct else '判錯' }}</span>
+  </h1>
+  <p>
+    {{ trace.condition }} · 真值 <strong>{{ trace.class_label }}</strong> ·
+    family <span class="mono">{{ trace.physical_scene_family }}</span>
+    {% if trace.dry_run %}· <span class="badge warn">DRY RUN</span>{% endif %}
+  </p>
+</header>
+
+<nav class="subnav">
+  {% for tab in subnav %}
+    {% if tab.available %}
+      <a href="{{ tab.href }}" class="{{ 'active' if tab.active else '' }}">{{ tab.label }}</a>
+    {% else %}
+      <span class="disabled">{{ tab.label }}</span>
+    {% endif %}
+  {% endfor %}
+</nav>
+
+<p class="note">
+  {% if neighbours.previous %}
+    <a href="{{ url_for('console.case_page', run_id=record.run_id, case_id=neighbours.previous) }}">← {{ neighbours.previous }}</a>
+  {% endif %}
+  {% if neighbours.previous and neighbours.next %} · {% endif %}
+  {% if neighbours.next %}
+    <a href="{{ url_for('console.case_page', run_id=record.run_id, case_id=neighbours.next) }}">{{ neighbours.next }} →</a>
+  {% endif %}
+</p>
+
+{# ---------- 1. 輸入 ---------- #}
+<section class="card">
+  <h2>1 · 輸入<span class="hint">這一筆實際餵進系統的東西</span></h2>
+  <div class="body">
+    <div class="case-io">
+      <div>
+        {% if trace.inputs.rgb and trace.inputs.rgb.preview_path %}
+        <img class="case-preview"
+             src="{{ url_for('console.trace_preview', run_id=record.run_id,
+                             filename=trace.inputs.rgb.preview_path.split('/')[-1]) }}"
+             alt="RGB preview for {{ trace.case_id }}">
+        <p class="note">
+          RGB {{ trace.inputs.rgb.original_shape | join(' × ') }}<br>
+          <span class="mono">{{ trace.inputs.rgb.sha256[:16] }}…</span>
+        </p>
+        {% else %}
+        <p class="note">沒有 RGB preview。</p>
+        {% endif %}
+      </div>
+      <div>
+        <table>
+          <tbody>
+            <tr><th>ToF</th>
+                <td class="mono">{{ trace.inputs.tof.shape | join(' × ') }}</td></tr>
+            <tr><th>通道</th>
+                <td class="note">{{ trace.inputs.tof.channels | join('、') }}</td></tr>
+            <tr><th>stress_id</th>
+                <td class="mono">{{ trace.inputs.stress_id }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+{# ---------- 2. 感知 ---------- #}
+<section class="card">
+  <h2>2 · 感知<span class="hint">兩個模態各自的四類分布（已溫度校準）</span></h2>
+  <div class="body">
+    <table>
+      <thead>
+        <tr><th>模態</th>
+          {% for name in trace.perception.class_order %}<th>{{ name }}</th>{% endfor %}
+          <th>argmax</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">p_V</td>
+          {% for value in trace.perception.p_vision %}
+          <td>{{ '%.4f' | format(value) }}</td>{% endfor %}
+          <td><strong>{{ trace.perception.vision_argmax }}</strong></td>
+        </tr>
+        <tr>
+          <td class="mono">p_T</td>
+          {% for value in trace.perception.p_tof %}
+          <td>{{ '%.4f' | format(value) }}</td>{% endfor %}
+          <td><strong>{{ trace.perception.tof_argmax }}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">
+      溫度：vision {{ '%.4f' | format(trace.perception.temperatures.vision) }} ·
+      tof {{ '%.4f' | format(trace.perception.temperatures.tof) }}
+      （由路由驗證集求得並凍結）
+    </p>
+  </div>
+</section>
+
+{# ---------- 3. 品質與可靠度 ---------- #}
+<section class="card">
+  <h2>3 · 品質與可靠度
+    <span class="hint">Q 是感測品質，q 是可靠度 —— 兩者都不是預測信心</span>
+  </h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>Q_V（影像清晰度）</th>
+            <td class="mono">{{ '%.4f' | format(trace.quality.Q_vision) }}</td>
+            <th>Q_T（訊號/背景）</th>
+            <td class="mono">{{ '%.4f' | format(trace.quality.Q_tof) }}</td></tr>
+        <tr><th>U_V（預測熵）</th>
+            <td class="mono">{{ '%.4f' | format(trace.quality.U_vision) }}</td>
+            <th>U_T</th>
+            <td class="mono">{{ '%.4f' | format(trace.quality.U_tof) }}</td></tr>
+        <tr><th>D（跨模態分歧）</th>
+            <td class="mono" colspan="3">{{ '%.4f' | format(trace.quality.disagreement) }}</td></tr>
+      </tbody>
+    </table>
+
+    <table>
+      <thead><tr><th>可靠度</th><th>值</th><th>門檻</th><th>是否過關</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">q_V</td>
+          <td>{{ '%.4f' | format(trace.reliability.q_vision) }}</td>
+          <td class="note">{{ trace.reliability.threshold }}</td>
+          <td><span class="badge {{ 'ok' if trace.routing.conditions.vision_quality_passes else 'bad' }}">
+              {{ '過關' if trace.routing.conditions.vision_quality_passes else '不過關' }}</span></td>
+        </tr>
+        <tr>
+          <td class="mono">q_T</td>
+          <td>{{ '%.4f' | format(trace.reliability.q_tof) }}</td>
+          <td class="note">{{ trace.reliability.threshold }}</td>
+          <td><span class="badge {{ 'ok' if trace.routing.conditions.tof_quality_passes else 'bad' }}">
+              {{ '過關' if trace.routing.conditions.tof_quality_passes else '不過關' }}</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">{{ trace.reliability._meaning }}</p>
+  </div>
+</section>
+
+{# ---------- 4. 路由 ---------- #}
+<section class="card">
+  <h2>4 · 路由
+    <span class="hint">為什麼走這一條</span>
+  </h2>
+  <div class="body">
+    <p class="lede">
+      <span class="badge {{ 'warn' if trace.routing.escalated else 'ok' }}">
+        {{ trace.routing.route }}</span>
+      {% if not trace.routing.consistent %}
+        <span class="badge bad">與數值不一致</span>
+      {% endif %}
+    </p>
+    <p{% if not trace.routing.consistent %} class="flash bad"{% endif %}>
+      {{ trace.routing.explanation }}
+    </p>
+    <details class="advanced">
+      <summary>判定條件</summary>
+      <table>
+        <tbody>
+          <tr><th>q_V ≥ 門檻</th>
+              <td>{{ trace.routing.conditions.vision_quality_passes }}</td>
+              <th>q_T ≥ 門檻</th>
+              <td>{{ trace.routing.conditions.tof_quality_passes }}</td></tr>
+          <tr><th>D > δ</th>
+              <td>{{ trace.routing.conditions.exceeds_disagreement_threshold }}</td>
+              <th>δ</th>
+              <td class="mono">{{ '%.6f' | format(trace.routing.conditions.disagreement_threshold) }}</td></tr>
+        </tbody>
+      </table>
+    </details>
+  </div>
+</section>
+
+{# ---------- 5. Multi-Agent（P2-5 補完整內容）---------- #}
+{% include "_case_agents.html" %}
+
+{# ---------- 6. 最終 ---------- #}
+<section class="card">
+  <h2>6 · 最終決策<span class="hint">F(x) 與這一筆的結果</span></h2>
+  <div class="body">
+    <table>
+      <thead>
+        <tr><th></th>
+          {% for name in trace.perception.class_order %}<th>{{ name }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">F(x)</td>
+          {% for value in trace.final.distribution %}
+          <td>{{ '%.4f' | format(value) }}</td>{% endfor %}
+        </tr>
+        {% if trace.final.s_a %}
+        <tr>
+          <td class="mono">s_A</td>
+          {% for value in trace.final.s_a %}
+          <td>{{ '%.4f' | format(value) }}</td>{% endfor %}
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+    <table>
+      <tbody>
+        <tr><th>預測</th><td><strong>{{ trace.final.prediction_label }}</strong></td>
+            <th>真值</th><td><strong>{{ trace.final.truth_label }}</strong></td>
+            <th>結果</th>
+            <td><span class="badge {{ 'ok' if trace.final.correct else 'bad' }}">
+                {{ '對' if trace.final.correct else '錯' }}</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<p class="footnote">
+  trace schema {{ trace.trace_schema_version }} ·
+  code <span class="mono">{{ trace.code_revision[:12] }}</span> ·
+  本頁唯讀
+</p>
+{% endblock %}

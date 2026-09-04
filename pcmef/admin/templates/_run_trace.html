@@ -1,0 +1,93 @@
+{# 由 console_run.html 於 section=trace 時 include。
+   回答「每一筆是怎麼被判斷的」的第一層：case 列表與篩選。
+   單一 case 的完整決策過程在 P2-5 的 case 頁。唯讀。 #}
+
+{% if not trace.available %}
+  <section class="card">
+    <h2>流程追蹤</h2>
+    <div class="body">
+      <p><span class="badge warn">沒有 decision trace</span></p>
+      <p class="note">{{ trace.reason }}</p>
+    </div>
+  </section>
+{% else %}
+
+<section class="card">
+  <h2>逐 case 決策
+    <span class="hint">
+      {{ trace.total }} 筆 · schema {{ trace.schema_version }}
+    </span>
+  </h2>
+  <div class="body">
+    {% if trace.dry_run %}
+    <p class="lede"><span class="badge warn">DRY RUN</span>
+      escalated 的案例停在仲裁邊界，沒有呼叫 provider。</p>
+    {% endif %}
+    {% if trace.run_status != 'complete' %}
+    <p class="lede"><span class="badge bad">{{ trace.run_status }}</span>
+      這次執行沒有跑完，以下只是中止前已寫入的部分。</p>
+    <p class="note">{{ trace.note }}</p>
+    {% endif %}
+
+    <form method="get" class="add-row">
+      <div class="field">
+        <label for="condition">Condition</label>
+        <select id="condition" name="condition">
+          <option value="">全部</option>
+          {% for c in trace.conditions %}
+          <option value="{{ c }}" {% if trace.condition == c %}selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="route">Route</label>
+        <select id="route" name="route">
+          <option value="">全部</option>
+          {% for r in trace.routes %}
+          <option value="{{ r }}" {% if trace.route == r %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button class="btn" type="submit">篩選</button>
+      {% if trace.condition or trace.route %}
+        <a class="btn" href="{{ url_for('console.run_page', run_id=record.run_id, section='trace') }}">清除</a>
+      {% endif %}
+    </form>
+
+    <p class="note" style="margin-top:12px">
+      符合 {{ trace.filtered }} 筆
+      {% if trace.get('accuracy') is not none %}
+        · 其中判對 {{ trace.correct }} 筆（{{ '%.1f' | format(trace.get('accuracy') * 100) }}%）
+      {% endif %}
+      {% if trace.filtered > trace.shown %}
+        · 只列出前 {{ trace.shown }} 筆
+      {% endif %}
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Case</th><th>Condition</th><th>真值</th><th>Route</th>
+            <th>預測</th><th>結果</th></tr>
+      </thead>
+      <tbody>
+      {% for case in trace.cases %}
+        <tr>
+          <td><a class="mono"
+                 href="{{ url_for('console.case_page', run_id=record.run_id, case_id=case.case_id) }}">{{ case.case_id }}</a></td>
+          <td class="note">{{ case.condition }}</td>
+          <td class="note">{{ case.class_label }}</td>
+          <td>
+            <span class="badge {{ 'warn' if case.escalated else '' }}">{{ case.route }}</span>
+          </td>
+          <td class="note">{{ case.prediction }}</td>
+          <td>
+            <span class="badge {{ 'ok' if case.correct else 'bad' }}">
+              {{ '對' if case.correct else '錯' }}</span>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}

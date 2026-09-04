@@ -1,0 +1,55 @@
+{# 由 case_trace.html include，作為決策鏈的第 5 段。
+   P2-4 只呈現「有沒有進仲裁、為什麼」；四個角色實際收到什麼與輸出什麼
+   在 P2-5 補上。未執行時要說明原因，不得留白讓人以為資料漏了。 #}
+
+<section class="card">
+  <h2>5 · 多代理仲裁
+    <span class="hint">只有 escalated 的案例會走這一步</span>
+  </h2>
+  <div class="body">
+    {% set execution = trace.agent_execution %}
+    {% if not execution.invoked %}
+      <p class="lede">
+        <span class="badge {{ 'warn' if execution.reason == 'dry_run' else '' }}">
+          未執行</span>
+      </p>
+      {% if execution.reason == 'not_escalated' %}
+        <p class="note">
+          這一筆的傳統證據足以自行決定（見上一段的路由理由），
+          因此沒有進入仲裁 —— 這正是 selective escalation 的設計：
+          證據夠就不叫 LLM。本筆的 provider 呼叫次數為 <strong>0</strong>。
+        </p>
+      {% elif execution.reason == 'dry_run' %}
+        <p class="note">
+          依 routing，這一筆<strong>應該</strong>進入多代理仲裁，
+          但本次執行是零成本預演，因此停在 escalation 邊界。
+        </p>
+        <p class="note">{{ execution.note }}</p>
+      {% else %}
+        <p class="note">{{ execution.reason }}</p>
+      {% endif %}
+    {% else %}
+      <p class="lede">
+        <span class="badge ok">已執行</span>
+        {{ execution.n_roles }} 個角色 ·
+        本筆 provider 呼叫 {{ execution.artifacts | sum(attribute='attempt_count') }} 次
+      </p>
+      <table>
+        <thead><tr><th>角色</th><th>收到影像</th><th>嘗試次數</th></tr></thead>
+        <tbody>
+        {% for artifact in execution.artifacts %}
+          <tr>
+            <td class="mono">{{ artifact.role }}</td>
+            <td><span class="badge {{ 'ok' if artifact.received_image else '' }}">
+                {{ '是' if artifact.received_image else '否' }}</span></td>
+            <td>{{ artifact.attempt_count }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="note">
+        各角色實際收到哪些欄位、輸出了什麼，以及 s_A 如何形成 —— 下一階段補上。
+      </p>
+    {% endif %}
+  </div>
+</section>

@@ -1,0 +1,43 @@
+{# 由 console_run.html 於 section=artifacts 時 include。
+   回答「檔案落在哪裡」。目錄底下檔案太多時摺成一列並顯示計數 ——
+   trace/previews 有幾百張 PNG，全部列出來只會變成一面檔名牆。 #}
+
+{% if not artifacts.available %}
+  <section class="card">
+    <h2>Artifacts</h2>
+    <div class="body">
+      <p><span class="badge warn">沒有產物</span> {{ artifacts.reason }}</p>
+    </div>
+  </section>
+{% else %}
+<section class="card">
+  <h2>產物
+    <span class="hint">{{ artifacts.total }} 個項目 · {{ artifacts.root }}</span>
+  </h2>
+  <div class="body">
+    <table>
+      <thead><tr><th>路徑</th><th>類型</th><th>大小</th></tr></thead>
+      <tbody>
+      {% for entry in artifacts.entries %}
+        <tr>
+          <td class="mono">{{ entry.path }}</td>
+          <td class="note">
+            {% if entry.kind == 'directory' %}
+              目錄（{{ entry.count }} 個檔案）
+            {% else %}檔案{% endif %}
+          </td>
+          <td class="note">
+            {% if entry.size >= 1048576 %}{{ '%.1f' | format(entry.size / 1048576) }} MB
+            {% elif entry.size >= 1024 %}{{ '%.0f' | format(entry.size / 1024) }} KB
+            {% else %}{{ entry.size }} B{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if artifacts.truncated %}
+    <p class="note">只列出前 {{ artifacts.entries | length }} 項。</p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}

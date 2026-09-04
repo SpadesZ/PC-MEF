@@ -12,10 +12,14 @@
 # 主要責任:
 #   1. NAV_ITEMS 定義五個主入口與各自回答的問題
 #   2. nav_context() 產生 template 需要的 nav_items / nav_active
-#   3. breadcrumb() 組出「PC-MEF > Results > Run ID > ...」這種路徑
+#   3. RUN_SECTIONS 定義單次 run 的六個第二層分頁
+#   4. run_subnav() 產生分頁列，並標出哪些對這次 run 有內容
+#   5. breadcrumb() 組出「PC-MEF > Results > Run ID > ...」這種路徑
 # 維護提醒:
 #   - 不得為了新功能再加第六個頂層項目。五個入口是刻意的收斂；
 #     新功能要歸進其中一個，否則首頁會重新開始堆疊（那正是要修的問題）。
+#   - 不得把「沒有內容」的分頁藏起來。藏起來看起來像系統沒有這個能力，
+#     而事實是「這種 run 不產生那一層」—— 兩者必須在畫面上分得出來。
 #   - 不得把 href 寫成字面路徑。一律用 url_for 的端點名，
 #     改路由時才不會留下指向 404 的導航。
 #   - v0.1.0 新增：首版，對應 P2-2。
@@ -26,9 +30,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
-__all__ = ["NavItem", "NAV_ITEMS", "nav_context", "breadcrumb"]
+__all__ = [
+    "NavItem", "NAV_ITEMS", "nav_context", "breadcrumb",
+    "RunSection", "RUN_SECTIONS", "run_subnav",
+]
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,56 @@ def nav_context(active: str) -> dict[str, Any]:
         ],
         "nav_active": active,
     }
+
+
+@dataclass(frozen=True)
+class RunSection:
+    """單次 run 的第二層分頁。`answers` 同樣是一個問句。"""
+
+    key: str
+    label: str
+    answers: str
+
+
+#: 進入一次 run 之後的六個分頁（SAI v0.6.0 §20 第二層）。
+#:
+#: 順序照資料流：先看整體，再看決策過程，然後才是輸入、中間值、輸出。
+#: Artifacts 放最後 —— 它是「檔案在哪」，不是「發生了什麼」。
+RUN_SECTIONS: tuple[RunSection, ...] = (
+    RunSection("overview", "總覽 Overview", "這次執行整體發生了什麼？"),
+    RunSection("trace", "流程追蹤 Trace", "每一筆是怎麼被判斷的？"),
+    RunSection("inputs", "輸入 Inputs", "餵進去的是什麼？"),
+    RunSection("intermediate", "中間結果 Intermediate", "中途產生了什麼？"),
+    RunSection("outputs", "輸出 Outputs", "得到什麼結論？"),
+    RunSection("artifacts", "Artifacts", "檔案落在哪裡？"),
+)
+
+
+def run_subnav(run_id: str, active: str, available: Mapping[str, bool]) -> list[dict[str, Any]]:
+    """單次 run 的分頁列。
+
+    `available` 標出哪些分頁對這次 run 有內容。**沒有內容的分頁仍然顯示**，
+    只是標成 disabled —— 藏起來會讓人以為系統沒有這個能力，
+    而事實是「這種 run 不產生那一層」。差別在畫面上必須看得出來。
+    """
+    from flask import url_for
+
+    if active not in {section.key for section in RUN_SECTIONS}:
+        raise ValueError(
+            f"unknown run section {active!r}; expected one of "
+            f"{sorted(s.key for s in RUN_SECTIONS)}"
+        )
+    return [
+        {
+            "key": section.key,
+            "label": section.label,
+            "answers": section.answers,
+            "href": url_for("console.run_page", run_id=run_id, section=section.key),
+            "active": section.key == active,
+            "available": bool(available.get(section.key, True)),
+        }
+        for section in RUN_SECTIONS
+    ]
 
 
 def breadcrumb(*crumbs: tuple[str, str | None]) -> list[dict[str, str | None]]:

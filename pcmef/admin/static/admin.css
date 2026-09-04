@@ -163,6 +163,55 @@ ol.pipeline p { margin: 6px 0 0; }
   font-size: 12.5px;
 }
 
+/* 單次 run 的第二層分頁。沒有內容的仍然列出但不可點 ——
+   藏起來看起來像系統沒有這個能力，而事實是「這種 run 不產生那一層」。 */
+.subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  margin: 16px 0 4px;
+}
+.subnav a, .subnav .disabled {
+  padding: 8px 13px;
+  font-size: 13px;
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.subnav a { color: var(--primary); }
+.subnav a:hover { background: var(--panel); }
+.subnav a.active {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--primary);
+}
+/* 不可點的分頁：灰字 + 虛線底線，與「可點但未選中」在視覺上分得開。 */
+.subnav .disabled {
+  color: var(--line);
+  border-bottom-style: dashed;
+  border-bottom-color: var(--line);
+  cursor: not-allowed;
+}
+
+/* case 頁的輸入區：左圖右表。窄螢幕時自動疊成一欄。 */
+.case-io {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+@media (max-width: 720px) { .case-io { grid-template-columns: 1fr; } }
+.case-preview {
+  width: 100%;
+  max-width: 240px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  /* 合成場景的解析度低（64×64），放大時保留像素邊界比模糊插值誠實。 */
+  image-rendering: pixelated;
+  background: var(--panel);
+}
+
 .page {
   /* §42：內容最大寬度約 1000-1200 px。 */
   max-width: 1160px;

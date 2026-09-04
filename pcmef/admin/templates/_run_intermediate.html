@@ -1,0 +1,93 @@
+{# 由 console_run.html 於 section=intermediate 時 include。
+   回答「中途產生了什麼」：stress set 與 routing 的分布。
+   這一層原本完全看不見 —— 使用者只看得到設定與最終指標。 #}
+
+{% if not intermediate.available %}
+  <section class="card">
+    <h2>中間結果</h2>
+    <div class="body">
+      <p><span class="badge warn">沒有中間產物</span>
+         這次執行沒有產生 stress set 或 routing 分布。</p>
+    </div>
+  </section>
+{% else %}
+
+{% if intermediate.stress %}
+<section class="card">
+  <h2>Stress set<span class="hint">四種 condition 的成對案例</span></h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>總列數</th><td>{{ intermediate.stress.n_rows }}</td></tr>
+        {% if intermediate.stress.code_version %}
+        <tr><th>產生時的 code</th>
+            <td class="mono">{{ intermediate.stress.code_version[:12] }}</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    {% if intermediate.stress.counts %}
+    <table>
+      <thead><tr>{% for name in intermediate.stress.counts | sort %}<th>{{ name }}</th>{% endfor %}</tr></thead>
+      <tbody><tr>{% for name in intermediate.stress.counts | sort %}
+        <td>{{ intermediate.stress.counts[name] }}</td>{% endfor %}</tr></tbody>
+    </table>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if intermediate.routing %}
+<section class="card">
+  <h2>路由分布<span class="hint">可靠度評估之後，每一筆走了哪條路</span></h2>
+  <div class="body">
+    <table>
+      <thead><tr>{% for name in intermediate.routing.counts | sort %}<th>{{ name }}</th>{% endfor %}</tr></thead>
+      <tbody><tr>{% for name in intermediate.routing.counts | sort %}
+        <td>{{ intermediate.routing.counts[name] }}</td>{% endfor %}</tr></tbody>
+    </table>
+    <table>
+      <tbody>
+        <tr><th>escalated</th>
+            <td>{{ intermediate.routing.get('escalated_cases', '—') }}
+              {% if intermediate.routing.get('escalation_rate') is not none %}
+                （{{ '%.1f' | format(intermediate.routing.get('escalation_rate') * 100) }}%）
+              {% endif %}</td>
+            <th>呼叫 LLM 的 case</th>
+            <td>{{ intermediate.routing.get('llm_called_cases', '—') }}</td></tr>
+        <tr><th>實際 provider 呼叫</th>
+            <td>{{ intermediate.routing.get('actual_provider_calls')
+                   if intermediate.routing.get('actual_provider_calls') is not none else '—' }}</td>
+            <th>首次 escalation 前的呼叫</th>
+            <td>{{ intermediate.routing.get('provider_calls_before_first_escalation')
+                   if intermediate.routing.get('provider_calls_before_first_escalation') is not none else '—' }}</td></tr>
+      </tbody>
+    </table>
+    {% if intermediate.routing.get('note') %}
+    <p class="note">{{ intermediate.routing.get('note') }}</p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if intermediate.statistics_config %}
+<section class="card">
+  <h2>統計設定<span class="hint">由 statistics_config.lock 還原，不在此決定</span></h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>重抽單位</th>
+            <td class="mono">{{ intermediate.statistics_config.resample_unit }}</td>
+            <th>分層</th>
+            <td class="mono">{{ intermediate.statistics_config.stratification }}</td></tr>
+        <tr><th>replicates</th><td>{{ intermediate.statistics_config.replicates }}</td>
+            <th>seed</th><td class="mono">{{ intermediate.statistics_config.seed }}</td></tr>
+        <tr><th>cluster 數</th><td>{{ intermediate.statistics_config.n_clusters }}</td>
+            <th>每 cluster 列數</th>
+            <td>{{ intermediate.statistics_config.rows_per_cluster }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% endif %}

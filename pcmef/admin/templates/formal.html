@@ -224,8 +224,8 @@
                 <td class="mono">{{ report.family_indices | join(', ') if report.family_indices else '—' }}</td>
                 <th>escalation</th>
                 <td>{{ report.escalated_cases }}
-                    {% if report.escalation_rate is not none %}
-                      ({{ '%.1f' | format(report.escalation_rate * 100) }}%)
+                    {% if report.get('escalation_rate') is not none %}
+                      ({{ '%.1f' | format(report.get('escalation_rate') * 100) }}%)
                     {% endif %}</td></tr>
           </tbody>
         </table>
@@ -262,7 +262,7 @@
         <table>
           <tbody>
             <tr><th>實際呼叫</th>
-                <td>{{ report.provider_calls if report.provider_calls is not none else '—' }}</td>
+                <td>{{ report.get('provider_calls') if report.get('provider_calls') is not none else '—' }}</td>
                 <th>呼叫 LLM 的 case</th><td>{{ report.llm_called_cases }}</td></tr>
             {% if report.skipped_escalated_cases %}
             <tr><th>預演跳過</th><td colspan="3">{{ report.skipped_escalated_cases }} 筆 escalated</td></tr>

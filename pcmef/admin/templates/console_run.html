@@ -1,199 +1,77 @@
 {# PC-MEF Research System source maintenance contract
- # 上下游: 由 pcmef/console/routes.py 的 GET /console/runs/<id> 繪製；
- #         log 由同檔的 SSE 端點推送；圖表由 console.results 產生的 SVG 直接嵌入。
- #         載入 pcmef/admin/static/admin.css。
+ # 上下游: 由 pcmef/console/routes.py 的 GET /console/runs/<id>[/<section>] 繪製；
+ #         內容依 section 分派到 _run_*.html；log 由同檔的 SSE 端點推送。
+ #         extends _layout.html。
  # 檔案路徑: pcmef/admin/templates/console_run.html
  # 產生時間: 2026-08-27 17:25 +08:00
- # 版本: v0.1.0
- # 功能說明: 單次執行的頁面。上方是像終端機一樣即時逐行更新的輸出，
- #           下方是跑完後的曲線、四特徵表與這次用的完整參數。
- # 模組定位: §42 版型規則的延伸。唯一帶腳本的頁面 ——
- #           約三十行原生 JavaScript 做 SSE 接收與自動捲動。
+ # 版本: v0.2.0
+ # 功能說明: 單次執行的外殼：身分與狀態、六個分頁的第二層導覽，以及分派。
+ # 模組定位: SAI v0.6.0 §20 第二層。各分頁只回答自己的問題，全部唯讀 ——
+ #           要刪除紀錄回 Results，要開始執行回 Run。
  # 主要責任:
- #   1. 即時 log 區塊與 EventSource 接收
- #   2. 執行結束時停止串流並更新狀態徽章
- #   3. transient 曲線與能量比較圖
- #   4. 四特徵表與這次執行的完整參數
+ #   1. masthead 顯示 run 身分與狀態徽章（SSE 會即時更新它）
+ #   2. 六個分頁的 subnav；沒有內容的仍顯示但標成不可點
+ #   3. 依 section include 對應的 partial
+ #   4. 只有 overview 載入 SSE script，其餘分頁不開連線
  # 維護提醒:
  #   - 不得為了做即時更新而引入 React/Vue/HTMX。§42 允許 minimal JavaScript，
  #     禁的是大型前端依賴；EventSource 是瀏覽器原生 API，無需任何函式庫。
  #   - 不得把 log 用 innerHTML 塞入。伺服器輸出含使用者可控的檔名與錯誤字串，
  #     必須以 textContent 附加，否則就是 XSS。
- #   - 不得在執行結束後仍保持 EventSource 開著；每個忘記關的分頁都是一條連線。
+ #   - 不得在 overview 以外的分頁載入 SSE script。那條連線是為了看即時輸出
+ #     而開的；在靜態分頁上開它只會多一條不會關的連線。
+ #   - 不得把「沒有內容」的分頁藏起來。藏起來看起來像系統沒有這個能力，
+ #     而事實是「這種 run 不產生那一層」（NOTE-066）。
+ #   - v0.2.0 修訂：拆成六個分頁（P2-4）。
  #   - v0.1.0 新增：首版。
  # 驗證方式:
  #   - py -3.10 -m pytest tests/console/test_console_routes.py -v
+ #   - py -3.10 -m pytest tests/console/test_run_sections.py -v
  # ------------------------------------------------------------ #}
 {% extends "_layout.html" %}
-{% block title %}執行紀錄{% endblock %}
+{% block title %}{{ record.run_id }}{% endblock %}
 
 {% block content %}
-
 
   <header class="masthead">
     <h1>執行 <span class="mono">{{ record.run_id }}</span></h1>
     <p>
-      <a href="{{ url_for('console.page') }}">← 回執行台</a> ·
       {{ record.kind }} · {{ record.label }} ·
       <span id="run-badge" class="badge {{ 'ok' if record.status == 'succeeded' else ('bad' if record.status == 'failed' else 'warn') }}">{{ record.status }}</span>
+      {% if record.exit_code is not none %}<span class="note">exit {{ record.exit_code }}</span>{% endif %}
     </p>
   </header>
 
-  {# ---------------- 即時輸出 ---------------- #}
-  <section class="card" id="live-log">
-    <h2>執行輸出<span class="hint" id="stream-hint">連線中…</span></h2>
-    <div class="body">
-      <pre id="log" class="log">{{ initial_log }}</pre>
-      {% if record.note %}
-      <p class="note" style="margin-top:10px">{{ record.note }}</p>
+  {# 第二層分頁。沒有內容的仍然列出但不可點 —— 見檔頭。 #}
+  <nav class="subnav">
+    {% for tab in subnav %}
+      {% if tab.available %}
+        <a href="{{ tab.href }}" class="{{ 'active' if tab.active else '' }}"
+           title="{{ tab.answers }}">{{ tab.label }}</a>
+      {% else %}
+        <span class="disabled" title="這次執行沒有產生這一層">{{ tab.label }}</span>
       {% endif %}
-    </div>
-  </section>
+    {% endfor %}
+  </nav>
 
-  {# ---------------- 結果 ---------------- #}
-  {% if bundle.curves %}
-  <section class="card" id="transient">
-    <h2>Optical transient<span class="hint">訊號從 0 長起來、何時到峰值、再衰減回去</span></h2>
-    <div class="body">
-      {{ curves_svg | safe }}
-      <p class="note">
-        <strong>怎麼看這張圖：</strong>兩軸都自 0 起，所以曲線離開基線那一點就是
-        最早回波到達的時間；圓點標的是峰值，虛線落在時間軸上的位置就是峰值時間。
-        <br>
-        <strong>要檢查什麼：</strong>峰值應該遠離時間窗右緣。貼在右緣代表回波被
-        截斷，那次模擬的總能量會偏低而且不可用 —— 這是這張圖唯一的科學檢查。
-        時間軸由場景幾何推導，不沿用 cornell_box 預設（NOTE-013）。
-      </p>
-    </div>
-  </section>
-
-  <section class="card" id="energy">
-    <h2>各場景總能量<span class="hint">同一次執行內比較四類；跨執行不可比</span></h2>
-    <div class="body">
-      {{ energy_svg | safe }}
-      <table style="margin-top:14px">
-        <thead><tr><th>場景</th><th>總能量</th><th>峰值時間 (ns)</th><th>bin 寬 (s)</th></tr></thead>
-        <tbody>
-        {% for curve in bundle.curves %}
-          <tr>
-            <td class="mono">{{ curve.scenario_id }}</td>
-            <td>{{ '%.1f'|format(curve.total_energy) }}</td>
-            <td>{{ '%.3f'|format(curve.peak_time_ns) }}</td>
-            <td class="mono">{{ '%.3e'|format(curve.bin_width_s) }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      <p class="note" style="margin-top:12px">
-        <strong>y 軸刻意不截斷。</strong>四類的總能量本來就只差不到 1%，
-        零起點的柱子必然看起來等高 —— 那是事實不是缺陷。差多少請看柱子下方
-        相對平均的百分比，以及上表的數值。截掉 y 軸起點能讓 0.3% 的差看起來
-        像三倍，那在論文裡是造假。
-        <br>
-        <strong>不同執行之間不可比。</strong>總能量隨解析度與 spp 縮放，
-        換一個 preset 數字就整個平移；只有同一次執行內的四類才互相可比。
-      </p>
-    </div>
-  </section>
+  {% if section == 'overview' %}
+    {% include "_run_overview.html" %}
+  {% elif section == 'trace' %}
+    {% include "_run_trace.html" %}
+  {% elif section == 'inputs' %}
+    {% include "_run_inputs.html" %}
+  {% elif section == 'intermediate' %}
+    {% include "_run_intermediate.html" %}
+  {% elif section == 'outputs' %}
+    {% include "_run_outputs.html" %}
+  {% else %}
+    {% include "_run_artifacts.html" %}
   {% endif %}
 
-  {% if bundle.surrogate_rows %}
-  <section class="card" id="surrogate">
-    <h2>Surrogate 四特徵<span class="hint">校準常數仍為 placeholder，數值不帶 fidelity 主張</span></h2>
-    <div class="body">
-      <table>
-        <thead>
-          <tr>{% for key in bundle.surrogate_rows[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr>
-        </thead>
-        <tbody>
-        {% for row in bundle.surrogate_rows %}
-          <tr>{% for value in row.values() %}<td class="mono">{{ value }}</td>{% endfor %}</tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
-  {% endif %}
+  <p class="footnote">本頁唯讀。探索用執行不產生任何 formal identity。</p>
 
-  {% if bundle.gate_report %}
-  <section class="card" id="gates">
-    <h2>E1 Gate 稽核</h2>
-    <div class="body">
-      <table>
-        <thead><tr><th>Gate</th><th>狀態</th><th>說明</th></tr></thead>
-        <tbody>
-        {% for check in bundle.gate_report.checks %}
-          <tr>
-            <td class="mono">{{ check.id }}</td>
-            <td><span class="badge {{ 'ok' if check.status == 'PASS' else ('bad' if check.status == 'FAIL' else 'warn') }}">{{ check.status }}</span></td>
-            <td class="note">{{ check.detail }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
-  {% endif %}
-
-  {# ---------------- 這次用的參數 ---------------- #}
-  <section class="card" id="params">
-    <h2>這次執行的完整設定<span class="hint">日後看到這張圖時，能完整回答它是怎麼跑出來的</span></h2>
-    <div class="body snapshot">
-      <dl>
-        <dt>指令</dt><dd class="mono">{{ record.command | join(' ') }}</dd>
-        <dt>參數</dt><dd class="mono">{{ record.params }}</dd>
-        <dt>開始 / 結束</dt><dd>{{ record.started_at[:19] }} → {{ (record.finished_at or '執行中')[:19] }}</dd>
-        <dt>Exit code</dt><dd class="mono">{{ record.exit_code if record.exit_code is not none else '—' }}</dd>
-      </dl>
-    </div>
-  </section>
-
-  <p class="footnote">探索用執行台 · 本次執行不產生任何 formal identity</p>
-
-<script>
-// SSE 即時接收。約三十行原生 JavaScript —— §42 允許 minimal JS，
-// 禁的是 React/Vue 這類大型前端依賴，而 EventSource 是瀏覽器原生 API。
-(function () {
-  var log = document.getElementById('log');
-  var badge = document.getElementById('run-badge');
-  var hint = document.getElementById('stream-hint');
-  var finished = {{ 'true' if record.finished else 'false' }};
-
-  if (finished) { hint.textContent = '已結束'; return; }
-
-  var source = new EventSource('{{ url_for("console.stream", run_id=record.run_id) }}');
-
-  source.onmessage = function (event) {
-    var payload = JSON.parse(event.data);
-    // 一律用 textContent 附加：伺服器輸出含檔名與錯誤字串，
-    // 用 innerHTML 就是把它們當成 HTML 執行。
-    log.appendChild(document.createTextNode(payload.line + '\n'));
-    log.scrollTop = log.scrollHeight;
-  };
-
-  source.addEventListener('done', function (event) {
-    var payload = JSON.parse(event.data);
-    badge.textContent = payload.status;
-    badge.className = 'badge ' + (payload.status === 'succeeded' ? 'ok' : 'bad');
-    source.close();
-
-    // 圖表由伺服器端算好後嵌在 HTML 裡，因此跑完必須重新載入才看得到。
-    // 原本是請使用者自己按 F5 —— 但畫面在那一刻看起來已經「跑完了」，
-    // 沒有任何東西提示還缺一步，於是圖等於不存在。
-    // 只在成功時自動重載：失敗時本來就沒有圖，而把 log 捲掉會讓人
-    // 看不到剛才那幾行錯誤訊息。
-    if (payload.status === 'succeeded') {
-      hint.textContent = '已結束（exit ' + payload.exit_code + '）· 正在載入圖表…';
-      window.setTimeout(function () { window.location.reload(); }, 800);
-    } else {
-      hint.textContent = '已結束（exit ' + payload.exit_code + '）· 錯誤請見上方輸出';
-    }
-  });
-
-  source.onerror = function () {
-    hint.textContent = '串流中斷 —— 重新整理頁面即可續看';
-    source.close();
-  };
-}());
-</script>
+{# SSE 只在 overview 需要：它是為了看即時輸出而開的連線。 #}
+{% if section == 'overview' %}
+{% include "_run_script.html" %}
+{% endif %}
 {% endblock %}

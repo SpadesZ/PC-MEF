@@ -1,0 +1,112 @@
+{# 由 console_run.html 於 section=overview 時 include。
+   內容是原本 run 詳情頁的全部卡片，未改動。 #}
+  {# ---------------- 即時輸出 ---------------- #}
+  <section class="card" id="live-log">
+    <h2>執行輸出<span class="hint" id="stream-hint">連線中…</span></h2>
+    <div class="body">
+      <pre id="log" class="log">{{ initial_log }}</pre>
+      {% if record.note %}
+      <p class="note" style="margin-top:10px">{{ record.note }}</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {# ---------------- 結果 ---------------- #}
+  {% if bundle.curves %}
+  <section class="card" id="transient">
+    <h2>Optical transient<span class="hint">訊號從 0 長起來、何時到峰值、再衰減回去</span></h2>
+    <div class="body">
+      {{ curves_svg | safe }}
+      <p class="note">
+        <strong>怎麼看這張圖：</strong>兩軸都自 0 起，所以曲線離開基線那一點就是
+        最早回波到達的時間；圓點標的是峰值，虛線落在時間軸上的位置就是峰值時間。
+        <br>
+        <strong>要檢查什麼：</strong>峰值應該遠離時間窗右緣。貼在右緣代表回波被
+        截斷，那次模擬的總能量會偏低而且不可用 —— 這是這張圖唯一的科學檢查。
+        時間軸由場景幾何推導，不沿用 cornell_box 預設（NOTE-013）。
+      </p>
+    </div>
+  </section>
+
+  <section class="card" id="energy">
+    <h2>各場景總能量<span class="hint">同一次執行內比較四類；跨執行不可比</span></h2>
+    <div class="body">
+      {{ energy_svg | safe }}
+      <table style="margin-top:14px">
+        <thead><tr><th>場景</th><th>總能量</th><th>峰值時間 (ns)</th><th>bin 寬 (s)</th></tr></thead>
+        <tbody>
+        {% for curve in bundle.curves %}
+          <tr>
+            <td class="mono">{{ curve.scenario_id }}</td>
+            <td>{{ '%.1f'|format(curve.total_energy) }}</td>
+            <td>{{ '%.3f'|format(curve.peak_time_ns) }}</td>
+            <td class="mono">{{ '%.3e'|format(curve.bin_width_s) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="note" style="margin-top:12px">
+        <strong>y 軸刻意不截斷。</strong>四類的總能量本來就只差不到 1%，
+        零起點的柱子必然看起來等高 —— 那是事實不是缺陷。差多少請看柱子下方
+        相對平均的百分比，以及上表的數值。截掉 y 軸起點能讓 0.3% 的差看起來
+        像三倍，那在論文裡是造假。
+        <br>
+        <strong>不同執行之間不可比。</strong>總能量隨解析度與 spp 縮放，
+        換一個 preset 數字就整個平移；只有同一次執行內的四類才互相可比。
+      </p>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if bundle.surrogate_rows %}
+  <section class="card" id="surrogate">
+    <h2>Surrogate 四特徵<span class="hint">校準常數仍為 placeholder，數值不帶 fidelity 主張</span></h2>
+    <div class="body">
+      <table>
+        <thead>
+          <tr>{% for key in bundle.surrogate_rows[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+        {% for row in bundle.surrogate_rows %}
+          <tr>{% for value in row.values() %}<td class="mono">{{ value }}</td>{% endfor %}</tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if bundle.gate_report %}
+  <section class="card" id="gates">
+    <h2>E1 Gate 稽核</h2>
+    <div class="body">
+      <table>
+        <thead><tr><th>Gate</th><th>狀態</th><th>說明</th></tr></thead>
+        <tbody>
+        {% for check in bundle.gate_report.checks %}
+          <tr>
+            <td class="mono">{{ check.id }}</td>
+            <td><span class="badge {{ 'ok' if check.status == 'PASS' else ('bad' if check.status == 'FAIL' else 'warn') }}">{{ check.status }}</span></td>
+            <td class="note">{{ check.detail }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  {# ---------------- 這次用的參數 ---------------- #}
+  <section class="card" id="params">
+    <h2>這次執行的完整設定<span class="hint">日後看到這張圖時，能完整回答它是怎麼跑出來的</span></h2>
+    <div class="body snapshot">
+      <dl>
+        <dt>指令</dt><dd class="mono">{{ record.command | join(' ') }}</dd>
+        <dt>參數</dt><dd class="mono">{{ record.params }}</dd>
+        <dt>開始 / 結束</dt><dd>{{ record.started_at[:19] }} → {{ (record.finished_at or '執行中')[:19] }}</dd>
+        <dt>Exit code</dt><dd class="mono">{{ record.exit_code if record.exit_code is not none else '—' }}</dd>
+      </dl>
+    </div>
+  </section>
+
+  <p class="footnote">探索用執行台 · 本次執行不產生任何 formal identity</p>

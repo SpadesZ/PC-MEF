@@ -116,40 +116,132 @@ def page():
 
 
 @blueprint.get("/console/runs/<run_id>")
-def run_page(run_id: str):
-    from flask import render_template, session
+@blueprint.get("/console/runs/<run_id>/<section>")
+def run_page(run_id: str, section: str = "overview"):
+    """單次 run 的六個分頁（SAI §20 第二層）。
+
+    一個 view 分派六個 section，而不是六個 view：它們共用同一份
+    record、availability 與 breadcrumb，拆開只會讓那三件事複製六份。
+    """
+    from flask import abort, render_template, session
+
+    from pcmef.console import run_view
+    from pcmef.console.navigation import RUN_SECTIONS, run_subnav
+
+    if section not in {s.key for s in RUN_SECTIONS}:
+        abort(404)
 
     runner = _runner()
     record = runner.get(run_id)
-    bundle = load_results(runner.run_dir(run_id) / "artifacts", run_id)
+    run_dir = runner.run_dir(run_id)
+    available = run_view.availability(run_dir, record.kind)
 
-    curves_svg = ""
-    energy_svg = ""
-    if bundle.curves:
-        curves_svg = line_chart_svg(
-            [(c.scenario_id, c.times_ns, c.energy) for c in bundle.curves],
-            x_label="time (ns)", y_label="energy per bin",
-        )
-        energy_svg = bar_chart_svg(
-            [c.scenario_id.replace("smoke_", "") for c in bundle.curves],
-            [c.total_energy for c in bundle.curves],
-            y_label="total energy",
-        )
+    context: dict = {
+        "record": record,
+        "section": section,
+        "subnav": run_subnav(run_id, section, available),
+        "available": available,
+    }
 
+    if section == "overview":
+        bundle = load_results(run_dir / "artifacts", run_id)
+        curves_svg = energy_svg = ""
+        if bundle.curves:
+            curves_svg = line_chart_svg(
+                [(c.scenario_id, c.times_ns, c.energy) for c in bundle.curves],
+                x_label="time (ns)", y_label="energy per bin",
+            )
+            energy_svg = bar_chart_svg(
+                [c.scenario_id.replace("smoke_", "") for c in bundle.curves],
+                [c.total_energy for c in bundle.curves],
+                y_label="total energy",
+            )
+        context.update(
+            bundle=bundle, curves_svg=curves_svg, energy_svg=energy_svg,
+            initial_log=runner.tail(run_id)[0],
+        )
+    elif section == "trace":
+        context["trace"] = run_view.trace_view(
+            run_dir,
+            condition=request.args.get("condition", "").strip(),
+            route=request.args.get("route", "").strip(),
+        )
+    elif section == "inputs":
+        context["inputs"] = run_view.inputs_view(run_dir, record)
+    elif section == "intermediate":
+        context["intermediate"] = run_view.intermediate_view(run_dir)
+    elif section == "outputs":
+        context["outputs"] = run_view.outputs_view(run_dir)
+    else:
+        context["artifacts"] = run_view.artifacts_view(run_dir)
+
+    label = next(s.label for s in RUN_SECTIONS if s.key == section)
     return render_template(
         "console_run.html",
         **nav_context("results"),
         breadcrumb=breadcrumb(
             ("結果 Results", url_for("results.page")),
-            (run_id, None),
+            (run_id, url_for("console.run_page", run_id=run_id)),
+            (label, None),
         ),
         csrf_token=session.get(CSRF_SESSION_KEY, ""),
-        record=record,
-        bundle=bundle,
-        curves_svg=curves_svg,
-        energy_svg=energy_svg,
-        initial_log=runner.tail(run_id)[0],
+        **context,
     )
+
+
+@blueprint.get("/console/runs/<run_id>/trace/<case_id>")
+def case_page(run_id: str, case_id: str):
+    """單一 case 的完整 decision trace（SAI §20 第三層）。**唯讀。**"""
+    from flask import abort, render_template
+
+    from pcmef.console import run_view
+    from pcmef.console.navigation import run_subnav
+
+    runner = _runner()
+    record = runner.get(run_id)
+    run_dir = runner.run_dir(run_id)
+    trace = run_view.case_view(run_dir, case_id)
+    if trace is None:
+        abort(404)
+
+    return render_template(
+        "case_trace.html",
+        **nav_context("results"),
+        breadcrumb=breadcrumb(
+            ("結果 Results", url_for("results.page")),
+            (run_id, url_for("console.run_page", run_id=run_id)),
+            ("流程追蹤 Trace",
+             url_for("console.run_page", run_id=run_id, section="trace")),
+            (case_id, None),
+        ),
+        record=record,
+        section="trace",
+        subnav=run_subnav(
+            run_id, "trace", run_view.availability(run_dir, record.kind)
+        ),
+        trace=trace,
+        neighbours=run_view.case_neighbours(run_dir, case_id),
+    )
+
+
+@blueprint.get("/console/runs/<run_id>/trace/previews/<filename>")
+def trace_preview(run_id: str, filename: str):
+    """提供某次 run 的 RGB preview PNG。
+
+    只服務該 run 自己的 `artifacts/trace/previews/`，且檔名經過白名單 ——
+    這個端點吃 URL 參數，沒有限制的話就是一條讀取任意檔案的路徑。
+    preview 是 run 當下產生的 artifact，不是對正式資料集的存取。
+    """
+    import re
+
+    from flask import abort, send_from_directory
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.png", filename):
+        abort(404)
+    folder = _runner().run_dir(run_id) / "artifacts" / "trace" / "previews"
+    if not folder.is_dir():
+        abort(404)
+    return send_from_directory(folder.resolve(), filename)
 
 
 # ---------------------------------------------------------------------------

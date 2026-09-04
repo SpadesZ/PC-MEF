@@ -1,0 +1,146 @@
+{# 由 console_run.html 於 section=outputs 時 include。
+   回答「得到什麼結論」：五條臂的指標、primary endpoint 與成對 CI。
+   dry run 的報告必須帶明確標記，且 pcmef_full 那一列本來就不存在。 #}
+
+{% if not outputs.available %}
+  <section class="card">
+    <h2>輸出</h2>
+    <div class="body">
+      <p><span class="badge warn">沒有報告</span> {{ outputs.reason }}</p>
+    </div>
+  </section>
+{% else %}
+
+<section class="card">
+  <h2>報告身分<span class="hint">{{ outputs.filename }}</span></h2>
+  <div class="body">
+    {% if outputs.dry_run %}
+    <p class="lede"><span class="badge warn">DRY RUN — 不是正式結果</span></p>
+    {% endif %}
+    <table>
+      <tbody>
+        <tr><th>report_id</th><td class="mono">{{ outputs.report_id }}</td>
+            <th>scientific_result</th>
+            <td><span class="badge {{ 'ok' if outputs.scientific_result else 'warn' }}">
+                {{ outputs.scientific_result }}</span></td></tr>
+        <tr><th>llm_arm_evaluated</th>
+            <td><span class="badge {{ 'ok' if outputs.llm_arm_evaluated else 'bad' }}">
+                {{ outputs.llm_arm_evaluated }}</span></td>
+            <th></th><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>各方法
+    <span class="hint">worst-condition macro-F1 是主要穩健性指標</span>
+  </h2>
+  <div class="body">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>accuracy</th><th>macro-F1</th>
+            <th>worst macro-F1</th><th>最弱條件</th></tr>
+      </thead>
+      <tbody>
+      {% for name, block in outputs.results | dictsort %}
+        <tr>
+          <td class="mono">{{ name }}</td>
+          <td>{{ '%.4f' | format(block.accuracy) }}</td>
+          <td>{{ '%.4f' | format(block.macro_f1) }}</td>
+          <td>{% if outputs.worst_condition.get(name) is not none %}
+                <strong>{{ '%.4f' | format(outputs.worst_condition[name]) }}</strong>
+              {% else %}—{% endif %}</td>
+          <td class="note">{{ outputs.worst_condition_at.get(name, '—') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if outputs.dry_run %}
+    <p class="note">
+      預演不輸出 <span class="mono">pcmef_full</span>：那一欄的填位值會恰好等於
+      fixed fusion，讀起來像「PC-MEF 沒有比較好」，而它其實從未執行。
+    </p>
+    {% endif %}
+  </div>
+</section>
+
+{% if outputs.arm_definitions %}
+<section class="card">
+  <h2>各方法的定義<span class="hint">讀者不必回去翻程式</span></h2>
+  <div class="body">
+    <table>
+      <tbody>
+      {% for name, text in outputs.arm_definitions | dictsort %}
+        <tr><td class="mono">{{ name }}</td><td class="note">{{ text }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if outputs.per_condition %}
+<section class="card">
+  <h2>分條件表現</h2>
+  <div class="body">
+    {% set conditions = (outputs.per_condition.values() | list | first).keys() | sort %}
+    <table>
+      <thead>
+        <tr><th>方法</th>{% for c in conditions %}<th>{{ c }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+      {% for name, block in outputs.per_condition | dictsort %}
+        <tr>
+          <td class="mono">{{ name }}</td>
+          {% for c in conditions %}
+            <td {% if outputs.worst_condition_at.get(name) == c %}class="mono"{% endif %}>
+              {{ '%.4f' | format(block[c].macro_f1) }}
+              {% if outputs.worst_condition_at.get(name) == c %}
+                <span class="badge warn">最弱</span>{% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if outputs.worst_condition_statistics and outputs.worst_condition_statistics.comparisons %}
+<section class="card">
+  <h2>Primary endpoint 的成對 CI
+    <span class="hint">{{ outputs.worst_condition_statistics.estimator }}</span>
+  </h2>
+  <div class="body">
+    <table>
+      <thead><tr><th>比較</th><th>Δ</th><th>95% CI</th><th>顯著</th></tr></thead>
+      <tbody>
+      {% for name, c in outputs.worst_condition_statistics.comparisons | dictsort %}
+        <tr>
+          <td class="mono">{{ name }}</td>
+          <td>{{ '%+.4f' | format(c.delta) }}</td>
+          <td class="mono">[{{ '%+.4f' | format(c.ci_lower) }}, {{ '%+.4f' | format(c.ci_upper) }}]</td>
+          <td><span class="badge {{ 'ok' if c.significant_at_95 else '' }}">
+              {{ c.significant_at_95 }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="note">
+      最弱條件會隨 replicate 換人，因此 worst-condition 的 CI 不等於任何
+      單一 condition 的 CI —— 它由專用 estimator 在每個 replicate 內取 min。
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% if outputs.claim_boundary %}
+<section class="card">
+  <h2>Claim boundary</h2>
+  <div class="body"><p class="note">{{ outputs.claim_boundary }}</p></div>
+</section>
+{% endif %}
+
+{% endif %}

@@ -1,0 +1,70 @@
+{# 由 console_run.html 於 section=inputs 時 include。
+   回答「餵進去的是什麼」：執行參數、實際指令、資料來源與劣化強度。
+   唯讀；參數來自 run.json 與報告，不在這裡修改。 #}
+
+<section class="card">
+  <h2>執行參數<span class="hint">這次按下去時實際帶的值</span></h2>
+  <div class="body">
+    {% if not inputs.params %}
+      <p class="note">這次執行沒有帶任何參數。</p>
+    {% else %}
+    <table>
+      <thead><tr><th>參數</th><th>值</th></tr></thead>
+      <tbody>
+      {% for key, value in inputs.params | dictsort %}
+        <tr><td class="mono">{{ key }}</td><td class="mono">{{ value }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <p class="note" style="margin-top:12px">
+      <strong>實際指令：</strong><br>
+      <span class="mono">{{ inputs.command | join(' ') }}</span>
+    </p>
+  </div>
+</section>
+
+{% if inputs.dataset %}
+<section class="card">
+  <h2>資料來源<span class="hint">這次讀的是哪一批場景</span></h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>base manifest</th>
+            <td class="mono">{{ inputs.dataset.base }}</td></tr>
+        <tr><th>family indices</th>
+            <td class="mono">{{ inputs.dataset.family_indices | join(', ') if inputs.dataset.family_indices else '—' }}</td></tr>
+        <tr><th>總列數</th><td>{{ inputs.dataset.total_rows }}</td></tr>
+      </tbody>
+    </table>
+    {% if inputs.dataset.counts %}
+    <details class="advanced">
+      <summary>各 condition 的列數</summary>
+      <table>
+        <thead><tr>{% for name in inputs.dataset.counts | sort %}<th>{{ name }}</th>{% endfor %}</tr></thead>
+        <tbody><tr>{% for name in inputs.dataset.counts | sort %}
+          <td>{{ inputs.dataset.counts[name] }}</td>{% endfor %}</tr></tbody>
+      </table>
+    </details>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if inputs.severity %}
+<section class="card">
+  <h2>劣化強度<span class="hint">由路由驗證集事先選定並凍結，執行時不重選</span></h2>
+  <div class="body">
+    <table>
+      <tbody>
+      {% for modality, value in inputs.severity | dictsort %}
+        <tr><th>{{ modality }}</th><td class="mono">{{ value }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if inputs.severity_source %}
+    <p class="note">{{ inputs.severity_source }}</p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}

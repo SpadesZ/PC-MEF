@@ -324,6 +324,90 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-066 Run 的第二層：沒有內容的分頁要顯示，不要藏
+
+**決策日期**：2026-09-03（P2-4，SAI v0.6.0 §20 第二層）
+
+**適用範圍**：`pcmef/console/run_view.py`；`navigation.RUN_SECTIONS`；
+`console_run.html` 與五個 `_run_*.html` partial；`case_trace.html`。
+
+**決策**：
+
+1. 進入一次 run 後六個分頁：Overview / Trace / Inputs / Intermediate /
+   Outputs / Artifacts，每個同樣對應一個問句。
+2. **沒有內容的分頁仍然列出**，只是標成不可點。
+3. 一個 view 分派六個 section，不是六個 view。
+4. SSE script **只在 Overview** 載入。
+5. 新增 case 頁 `/console/runs/<id>/trace/<case_id>`，六段決策鏈。
+
+**原因**：
+
+### 1. 為什麼不藏起來
+
+一次 `sim_smoke` 沒有 decision trace，一次 `formal_e2` 有。若把沒有內容的
+分頁隱藏，畫面會讓人以為**系統沒有這個能力**；而事實是「這種 run
+不產生那一層」。兩者必須分得出來，所以不可點的分頁用灰字加虛線底線，
+與「可點但未選中」在視覺上不同。
+
+同理，各分頁在無內容時給的是**原因**而不是空白：
+「只有 Full PC-MEF 的 E2 執行才會逐 case 記錄決策過程」。
+
+### 2. 一個 view 而不是六個
+
+六個 section 共用同一份 record、availability 與 breadcrumb。
+拆成六個 view 會讓那三件事複製六份，而它們遲早會不一致。
+
+### 3. SSE 只在 Overview
+
+那條連線是為了看**即時輸出**而開的。在靜態分頁上開它只會多一條
+不會關的連線。測試逐 section 數 `<script`：Overview 必須是 1，其餘必須是 0。
+
+### 4. 兩個實作上的坑
+
+**Jinja 的 `Undefined is not none` 是 True。** 報告缺欄位時
+`{% if report.escalation_rate is not none %}` 會進入分支，然後在
+`format()` 爆炸。舊報告與不同 run kind 都會踩到。凡是讀檔來的 dict
+一律改用 `.get()`。
+
+**`preview` 端點吃 URL 參數。** 沒有限制就是一條讀取任意檔案的路徑。
+檔名以 `[A-Za-z0-9_.-]+\.png` 白名單過濾，且只服務該 run 自己的
+`artifacts/trace/previews/`。測試涵蓋 `../run.json`、URL 編碼的穿越、
+以及 `.json` / `.txt` / `.png.txt` 五種嘗試。
+
+**`case_id` 同樣來自 URL**，因此 `case_view()` 會剝掉路徑分隔與 `..`。
+
+### 5. Artifacts 的摺疊
+
+`trace/previews` 有 384 張 PNG。目錄底下檔案超過 12 個就摺成一列並顯示
+計數 —— 全部列出來只會讓頁面變成一面檔名牆。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/console/test_run_sections.py -v   # 29 條
+```
+
+實際渲染確認（1280 px，一個帶完整 trace 的 dry-run）：
+
+```
+分頁        active 正確   卡片
+overview    ✓            執行輸出 / 這次執行的完整設定        script 1
+trace       ✓            逐 case 決策                        script 0
+inputs      ✓            執行參數 / 資料來源 / 劣化強度       script 0
+intermediate ✓           Stress set / 路由分布 / 統計設定     script 0
+outputs     ✓            報告身分 / 各方法 / 定義 / 分條件     script 0
+artifacts   ✓            產物                                script 0
+```
+
+breadcrumb 四層：`PC-MEF › 結果 Results › <run_id> › <分頁>`。
+case 頁六段鏈齊全，RGB preview 真的載入（64×64 放大到 240 且
+`image-rendering: pixelated` —— 合成場景解析度低，保留像素邊界比模糊插值誠實）。
+
+**維護邊界**：不得把「沒有內容」的分頁藏起來。不得在 Overview 以外的
+分頁載入 SSE。不得放寬 preview 端點的檔名白名單。
+
+---
+
 ## NOTE-065 五個主入口：一頁只回答一個問題
 
 **決策日期**：2026-09-03（P2-2，SAI v0.6.0 §20）
