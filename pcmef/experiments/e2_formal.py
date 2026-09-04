@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.6.0
+# 版本: v0.7.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -25,6 +25,7 @@
 #   7. worst_condition_macro_f1() primary endpoint 的點估計與最弱 condition
 #   8. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
 #   9. _worst_condition_statistics() primary endpoint 的成對 CI（AMD-009）
+#  10. emit_trace() 旁路寫出 decision trace，決策完成後才呼叫（NOTE-064）
 # 維護提醒:
 #   - 不得在本檔重新擬合任何東西。門檻、溫度、anchors 一律由 lock 還原；
 #     refit 一次就等於 Formal E2 自己決定了自己的判準。
@@ -41,6 +42,9 @@
 #     讀起來像「PC-MEF 沒有比固定融合好」，而它其實從未執行（NOTE-056）。
 #   - 不得只報 worst-condition 的最小值而不報它落在哪個 condition。
 #     不同方法的最弱條件可能不同，那個對比本身就是結果（NOTE-062）。
+#   - 不得讓 decision trace 的任何回傳值進入決策路徑。它在決策完成之後
+#     才被呼叫，例外一律吞掉 —— 寫不出 trace 只損失可讀性，不該讓一次
+#     formal run 失敗（NOTE-064）。
 #   - 不得改用 scenario-level bootstrap。statistics_config.lock 凍的是
 #     physical_scene_family cluster，且所有方法共用同一組 cluster。
 #   - 不得在別處另寫一份等價的執行迴圈。execute_full_pcmef_cases() 抽出來
@@ -52,6 +56,7 @@
 #   - v0.4.0 新增：G4 reliability_routing 臂與其成對統計（NOTE-061）。
 #   - v0.5.0 新增：worst-condition macro-F1 點估計與 primary_endpoint（NOTE-062）。
 #   - v0.6.0 新增：primary endpoint 的成對 CI（NOTE-063 / AMD-009）。
+#   - v0.7.0 新增：decision trace 旁路輸出（NOTE-064）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
 #   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
@@ -59,6 +64,7 @@
 #   - py -3.10 -m pytest tests/e2/test_reliability_routing_arm.py -v
 #   - py -3.10 -m pytest tests/e2/test_worst_condition_endpoint.py -v
 #   - py -3.10 -m pytest tests/e2/test_worst_condition_bootstrap.py -v
+#   - py -3.10 -m pytest tests/e2/test_decision_trace.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -394,6 +400,7 @@ def execute_full_pcmef_cases(
     agent_runner: Any = None,
     formal: bool = True,
     llm_mode: str = LLM_MODE_EXECUTE,
+    trace_sink: Callable[[dict[str, Any]], None] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """**唯一**的 Full PC-MEF 執行迴圈。逐 case 決策並回傳 F(x) 與 trace。
@@ -457,6 +464,13 @@ def execute_full_pcmef_cases(
             escalated_cases += 1
             if calls_before_first_escalation is None and counter is not None:
                 calls_before_first_escalation = counter.calls
+        # 這個 case 開始前 call_log 的長度，供旁路 trace 取出「本 case 新增的」。
+        calls_before = (
+            len(agent_runner.call_log)
+            if agent_runner is not None and hasattr(agent_runner, "call_log")
+            else 0
+        )
+
         if escalated and not skipping:
             # 證據只在真的要送出去時才組裝：non-escalated 與 dry run 連 payload
             # 都不建，因此不可能不小心送出去。
@@ -488,6 +502,38 @@ def execute_full_pcmef_cases(
         finals[index] = decision.final
         if decision.llm_called:
             llm_called_cases += 1
+
+        # --- 旁路觀測。決策**已經完成**，以下任何失敗都不得回頭影響它。---
+        if trace_sink is not None:
+            try:
+                trace_sink(
+                    {
+                        "row_index": index,
+                        "row": row,
+                        "p_vision": p_vision[index],
+                        "p_tof": p_tof[index],
+                        "signals": {k: float(v[index]) for k, v in signals.items()},
+                        "q_vision": float(q["q_vision"][index]),
+                        "q_tof": float(q["q_tof"][index]),
+                        "route": route,
+                        "rule": rule,
+                        "decision": decision,
+                        # 只取這個 case 新增的幾筆 —— call_log 是 runner 級的，
+                        # 跨 case 累積；用長度差而不是清空它，避免動到 runner 狀態。
+                        "agent_calls": (
+                            list(agent_runner.call_log[calls_before:])
+                            if agent_runner is not None
+                            and hasattr(agent_runner, "call_log")
+                            else []
+                        ),
+                        "dry_run": llm_mode == LLM_MODE_SKIP,
+                    }
+                )
+            except Exception as error:  # noqa: BLE001
+                # trace 是觀測，不是決策。寫不出來只損失可讀性，
+                # 不該讓一次 formal run 失敗（NOTE-064）。
+                say(f"  warning: trace for row {index} failed: {type(error).__name__}")
+
         trace = {"stress_id": row["stress_id"], **decision.to_trace()}
         if skipping:
             skipped_escalated_cases += 1
@@ -570,10 +616,72 @@ def run_formal_e2_full(
     p_vision, p_tof = prepared["p_vision"], prepared["p_tof"]
     signals, q, routes = prepared["signals"], prepared["q"], prepared["routes"]
 
-    executed = execute_full_pcmef_cases(
-        rows, p_vision, p_tof, q, signals, routes, rule,
-        agent_runner=agent_runner, formal=formal, llm_mode=llm_mode, progress=say,
+    # --- decision trace（旁路觀測，NOTE-064）-------------------------------
+    from pcmef.experiments.decision_trace import TraceWriter, build_case_trace
+
+    fused_all = rule.fusion_weight * p_vision + (1.0 - rule.fusion_weight) * p_tof
+    writer = TraceWriter(
+        out, run_id=Path(out_dir).name, code_revision=code_version,
+        runtime_identity=stack["lock_hashes"], dry_run=dry_run,
     )
+
+    def emit_trace(payload: dict[str, Any]) -> None:
+        """把一個 case 的決策落盤。由 executor 在決策完成後呼叫。
+
+        這個函式的例外由呼叫端吞掉 —— 它是觀測，不是決策路徑的一環。
+        """
+        index = payload["row_index"]
+        row = payload["row"]
+        case_id = f"case_{index:04d}"
+
+        # preview 由**這次 run 記憶體裡**的 RGB 產生，不讓 Web 之後回頭讀
+        # dataset：那會多開一條對正式資料集的存取路徑。
+        rgb_array = np.load(row["rgb_path"])
+        preview_path, shape = writer.write_preview(case_id, rgb_array)
+        from pcmef.agents.pcmef_agents import rgb_to_png_bytes
+        from pcmef.core.hash import hash_object
+        import base64 as _b64
+
+        digest = hash_object(
+            _b64.b64encode(rgb_to_png_bytes(rgb_array)).decode("ascii")
+        )
+        tof_shape = list(np.load(row["tof_path"]).shape)
+
+        writer.write_case(
+            build_case_trace(
+                row=row, row_index=index, case_id=case_id,
+                p_vision=payload["p_vision"], p_tof=payload["p_tof"],
+                signals=payload["signals"],
+                q_vision=payload["q_vision"], q_tof=payload["q_tof"],
+                route=payload["route"], rule=payload["rule"],
+                decision=payload["decision"], agent_calls=payload["agent_calls"],
+                class_order=CLASS_ORDER,
+                arms={
+                    "vision_only": p_vision[index],
+                    "tof_only": p_tof[index],
+                    "fixed_fusion": fused_all[index],
+                },
+                rgb_preview={
+                    "sha256": digest,
+                    "original_shape": shape,
+                    "preview_path": preview_path,
+                },
+                tof_shape=tof_shape,
+                dry_run=payload["dry_run"],
+            )
+        )
+
+    try:
+        executed = execute_full_pcmef_cases(
+            rows, p_vision, p_tof, q, signals, routes, rule,
+            agent_runner=agent_runner, formal=formal, llm_mode=llm_mode,
+            trace_sink=emit_trace, progress=say,
+        )
+    except BaseException as error:
+        # run 中止時仍要留下已寫的 case，但 index 必須明說它不完整 ——
+        # 一份看起來完整的 index 比沒有 index 更糟。
+        writer.abort(f"{type(error).__name__}: {error}")
+        raise
     finals = executed["finals"]
     traces = executed["traces"]
     escalated_cases = executed["escalated_cases"]
@@ -826,4 +934,8 @@ def run_formal_e2_full(
         encoding="utf-8",
     )
     document["report_path"] = (out / filename).as_posix()
+
+    # trace 的 index 最後才寫，而且只在 run 真的跑完之後。中途失敗時
+    # 上面的 except 已經寫過一份 aborted index。
+    document["trace_index_path"] = writer.finalise().as_posix()
     return document

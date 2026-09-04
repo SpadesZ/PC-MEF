@@ -324,6 +324,105 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-064 Decision trace：旁路、fail-safe，且說明必須由數值推導
+
+**決策日期**：2026-09-02（P2-1）
+
+**適用範圍**：`pcmef/experiments/decision_trace.py`；
+`AgentRunner.call_log`；`e2_formal` 的 `trace_sink`。
+
+**決策**：
+
+1. 每次 run 在 `<out>/trace/` 落盤 `trace_index.json` + `cases/*.json`
+   + `previews/*.png`。
+2. Agent 的 `input_payload` 記**實際送出的那一份**，不由契約事後重建。
+3. trace 在**決策完成之後**寫入；例外一律吞掉，不回頭影響決策。
+4. `trace_index.json` 只在 run 跑完才寫；中止時寫 `run_status=aborted`。
+5. 路由說明由**當下數值推導**，並驗證與記錄到的 route 一致。
+
+**原因**：
+
+### 1. 為什麼說明不能照 route 挑模板
+
+第一版是照 route 標籤選模板。用不匹配的數值一測就露出問題：
+`trust_tof` 那行輸出「ToF 品質過關（q_T=0.310 ≥ 0.500）」—— 那不成立。
+
+若哪天 route 與數值不一致（上游有 bug），說明會**編造一個不成立的理由**，
+而且看起來非常有說服力。那比沒有說明更糟。
+
+改成由數值推導應走哪一條，再與記錄到的 route 比對；不一致時
+`consistent=false` 並直說矛盾。實測 384 個 case **全部一致**——
+這順帶獨立驗證了 `reliability_route` 的實作與門檻推導相符。
+
+### 2. 為什麼 payload 不能事後重建
+
+要回答「physics agent 這一筆到底收到哪些欄位」，只有記下**真正遞給
+adapter 的那一份**算數。由 `ROLE_EVIDENCE_CONTRACT_V2` 重建出來的
+是「契約說它應該收到什麼」，而那正是需要被證明的東西，不是證據。
+
+記錄點在 `AgentRunner.run()` 成功回傳前，`body` 就是實際送出的證據。
+實測一個 escalated case：
+
+```
+observation  : tof_summary + sensing_quality_cues，有圖，無分類器輸出
+physics      : tof_summary + 自己的數值，無圖，無 vision 側
+visual       : vision 側數值，有圖，無 tof_summary
+arbitration  : anonymous_proposals + cross_modal(D)，無圖，無 raw evidence
+```
+
+### 3. preview 與 agent 證據走同一條編碼路徑
+
+`rgb_to_png_bytes()` 從 `encode_image_evidence()` 抽出，兩邊共用。
+各寫一份的話，preview 上宣稱「這就是 agent 看到的圖」就只是巧合 ——
+任一邊的正規化改了，那句話會悄悄變成假的。
+
+實測 preview 的 sha256 與 agent 收到的 `image_digests[0]` 相同。
+
+### 4. 旁路與 fail-safe
+
+trace 是**觀測**，不是決策。它在 `decide_case` 回來之後才被呼叫，
+例外由呼叫端吞掉並印一行警告。一旦決策依賴它，「寫 trace 失敗」
+就會變成「實驗失敗」。
+
+`call_log` 是 runner 級、跨 case 累積的，因此用**長度差**取出本 case
+新增的幾筆，而不是清空它 —— 清空會動到 runner 狀態。
+
+### 5. index 的原子性
+
+半寫入的 index 比沒有 index 更糟：它看起來是完整的。因此先寫
+`.partial` 再 `os.replace`，而且只在 run 真的跑完才寫。
+
+實測中途失敗（第 21 次 provider 呼叫起持續 503）：
+
+```
+run_status        = aborted
+已寫入的 case 數  = 57
+formal report     不存在
+殘留 .partial     無
+```
+
+### 6. dry run 的 escalated case 不留 null
+
+明確寫 `{"invoked": false, "reason": "dry_run", "note": "...stopped at the
+escalation boundary"}`，讓畫面能說「依 routing 應進仲裁，但本次為零成本
+預演」，而不是看起來像資料漏掉。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/e2/test_decision_trace.py -v      # 17 條
+py -3.10 -m pcmef.cli formal run-e2 --mode dry-run --base outputs/perception/gate_validation
+```
+
+實測體積（384 列）：cases 3.2 MB、previews 3.3 MB、index 132 KB。
+
+**維護邊界**：`DISAGREEMENT_KEY = "D"` 寫成常數而不是字面值 ——
+`duq_signals()` 用的是 `"D"`，拼成 `"disagreement"` 時 `.get()` 會安靜地
+回 NaN，而 NaN 在比較裡一律 False，路由說明會悄悄走錯分支。
+這個 bug 在第一次實跑時就是這樣被 trace 自己抓到的。
+
+---
+
 ## NOTE-063 Primary endpoint 有自己的 CI：新增 estimator，不動舊的
 
 **決策日期**：2026-09-02（P1-4，AMD-009）

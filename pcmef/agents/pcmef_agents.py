@@ -5,7 +5,7 @@
 #         被未來的 experiments.e2_formal 呼叫；本檔**不**讀取任何 dataset。
 # 檔案路徑: pcmef/agents/pcmef_agents.py
 # 產生時間: 2026-08-31 20:05 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 四個正式 Agent（observation / physics / visual_semantic / arbitration）
 #           的執行體。負責把一個 escalated case 的證據組成 FIXED_SUMMARY payload、
 #           送進 provider、把回應 parse 成 schema-valid 物件，並在重試耗盡時
@@ -22,6 +22,7 @@
 #   5. 重試耗盡拋 RetryExhaustedError（ABORT_FORMAL_RUN），不得回傳 None
 #   5b. assert_support_is_usable() 在 schema 之後擋下全零 class_support
 #   6. run_pcmef_case() 串起四個 agent，產出 cache 要的六份 artifact
+#   7. AgentCallRecord 旁路記下每個角色**實際**送出／收回的內容
 # 維護提醒:
 #   - 不得在本模組直接呼叫 httpx / google.generativeai / openai。所有外呼
 #     一律經過 LLMProviderAdapter；否則 NOTE-007 的 URL 洩漏防護、
@@ -36,11 +37,14 @@
 #   - 不得在重試耗盡時 drop case。少算一個 case 會讓分母悄悄變小，
 #     而那正是 bounded retry 要防的事（SRC-SAI §28 / FR-013）。
 #   - 不得讓 stub_offline 的輸出進入任何 formal 結果。它只證明工程路徑走得通。
+#   - 不得由 ROLE_EVIDENCE_CONTRACT_V2 事後重建 call_log 的 input_payload。
+#     要證明某個角色實際收到什麼，只有記下真正送出的那一份算數（NOTE-064）。
 #   - 不得把全零 class_support 救成 25/25/25/25。均分是一個合法的分布，
 #     會進 F(x)、會被 argmax 取走 CLASS_ORDER[0]、會進統計，而它實際
 #     代表「仲裁者什麼都沒說」—— 下游無法區分兩者（NOTE-060）。
 #   - v0.1.0 新增：首版四 agent 實作，決策見 NOTE-047。
 #   - v0.2.0 新增：全零 class_support 改判 semantic failure（NOTE-060）。
+#   - v0.3.0 新增：call_log 旁路記錄；抽出 rgb_to_png_bytes（NOTE-064）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/agents/test_pcmef_agents.py -v
 # ------------------------------------------------------------
@@ -79,6 +83,7 @@ __all__ = [
     "REPRESENTATION_MODE",
     "MAX_ATTEMPTS",
     "RELIABILITY_CLAUSE",
+    "rgb_to_png_bytes",
     "encode_image_evidence",
     "tof_fixed_summary",
     "build_case_evidence",
@@ -342,12 +347,12 @@ def assert_registry_consistent() -> None:
 # ---------------------------------------------------------------------------
 
 
-def encode_image_evidence(rgb: np.ndarray, mime_type: str = "image/png") -> dict[str, str]:
-    """把 RGB 陣列編成 PNG bytes 再 base64。
+def rgb_to_png_bytes(rgb: np.ndarray) -> bytes:
+    """把 RGB 陣列轉成 PNG bytes。
 
-    刻意接受**陣列**而不是路徑：路徑會把 class 與 condition 寫進 payload
-    （NOTE-003 / NOTE-004 的 opaque-evidence 紅線），而且 provider 收到
-    一個路徑字串也看不到影像。
+    抽出來是為了讓 **decision trace 的 preview 與送給 agent 的證據走同一條
+    編碼路徑**。兩邊各寫一份的話，preview 上宣稱「這就是 agent 看到的圖」
+    就只是巧合 —— 任何一邊的正規化改了，那句話就悄悄變成假的（NOTE-064）。
     """
     from PIL import Image
 
@@ -370,7 +375,17 @@ def encode_image_evidence(rgb: np.ndarray, mime_type: str = "image/png") -> dict
 
     buffer = io.BytesIO()
     Image.fromarray(pixels, mode="RGB").save(buffer, format="PNG")
-    payload = buffer.getvalue()
+    return buffer.getvalue()
+
+
+def encode_image_evidence(rgb: np.ndarray, mime_type: str = "image/png") -> dict[str, str]:
+    """把 RGB 陣列編成 PNG bytes 再 base64。
+
+    刻意接受**陣列**而不是路徑：路徑會把 class 與 condition 寫進 payload
+    （NOTE-003 / NOTE-004 的 opaque-evidence 紅線），而且 provider 收到
+    一個路徑字串也看不到影像。
+    """
+    payload = rgb_to_png_bytes(rgb)
     return {
         "mime_type": mime_type,
         "data_b64": base64.b64encode(payload).decode("ascii"),
@@ -663,6 +678,39 @@ class AttemptLog:
 
 
 @dataclass
+class AgentCallRecord:
+    """一個角色**實際送出與收回**的東西。供 decision trace 使用。
+
+    `input_payload` 是真正遞給 adapter 的那一份，不是事後由
+    `ROLE_EVIDENCE_CONTRACT_V2` 重建的。兩者理論上相同，但「理論上相同」
+    正是黑箱感的來源：要證明 physics agent 這一筆到底收到哪些欄位，
+    只有記下實際送出的內容才算數（NOTE-064）。
+
+    影像**不進這裡**。只留 sha256 —— base64 是每張 16 KB，
+    143 個 escalated case 會讓 trace 膨脹到 2 MB 以上，而 UI 要的是
+    「有沒有送圖、送的是哪一張」，那個 digest 就夠了。
+    """
+
+    role: str
+    input_payload: dict[str, Any]
+    image_digests: list[str] = field(default_factory=list)
+    raw_output: dict[str, Any] | None = None
+    validated_output: dict[str, Any] | None = None
+    attempt_count: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "input_payload": self.input_payload,
+            "image_digests": list(self.image_digests),
+            "received_image": bool(self.image_digests),
+            "raw_output": self.raw_output,
+            "validated_output": self.validated_output,
+            "attempt_count": int(self.attempt_count),
+        }
+
+
+@dataclass
 class AgentRunner:
     """把 adapter、connection、model 綁在一起執行四個角色。"""
 
@@ -673,6 +721,9 @@ class AgentRunner:
     max_attempts: int = MAX_ATTEMPTS
     temperature: float = FORMAL_TEMPERATURE
     attempts: list[AttemptLog] = field(default_factory=list)
+    #: 每次成功呼叫實際送出／收回的內容，供 decision trace 使用。
+    #: **純旁路**：只被 append，決策路徑不讀它（NOTE-064）。
+    call_log: list[AgentCallRecord] = field(default_factory=list)
     #: 逐角色的 (adapter, connection, model)。用於把四個角色分散到多把
     #: API key —— 同一個 model_id + provider_revision，不同 connection。
     #: 空的時候四個角色共用上面那一組。
@@ -790,6 +841,17 @@ class AgentRunner:
                 )
                 continue
             self.attempts.append(AttemptLog(spec.task_code, attempt, ok=True))
+            # 旁路記錄。`body` 就是真正遞出去的證據（`request` 只多了固定的
+            # system prompt，它的雜湊已在 llm_runtime.lock）。影像只留 digest。
+            self.call_log.append(
+                AgentCallRecord(
+                    role=spec.task_code,
+                    input_payload=json.loads(json.dumps(body, default=str)),
+                    image_digests=[str(i.get("sha256", "")) for i in supplied],
+                    raw_output=parsed,
+                    attempt_count=attempt,
+                )
+            )
             return parsed, response
 
         raise RetryExhaustedError(
@@ -1099,6 +1161,19 @@ def run_pcmef_case(runner: AgentRunner, evidence: Mapping[str, Any]) -> AgentBun
         "support_sum_before_normalisation": round(raw_sum, 6),
         "support_sum_within_tolerance": abs(raw_sum - 100.0) <= SUPPORT_SUM_TOLERANCE,
     }
+
+    # 旁路：把 validated 版本補回 call_log。raw 已在 runner 記過，
+    # validated 只有在這一層才存在（正規化發生在這裡）。
+    # 失敗不得影響回傳 —— 這是觀測，不是決策（NOTE-064）。
+    validated_by_role = {
+        "observation_agent": observation,
+        "physics_agent": physics,
+        "visual_semantic_agent": visual,
+        "arbitration_agent": arbitration_validated,
+    }
+    for record in getattr(runner, "call_log", []):
+        if record.validated_output is None:
+            record.validated_output = validated_by_role.get(record.role)
 
     return AgentBundle(
         artifacts={
