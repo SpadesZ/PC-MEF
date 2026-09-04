@@ -3,7 +3,7 @@
  *         因此涵蓋所有頁面；不被任何 Python 模組讀取，也不產生 artifact。
  * 檔案路徑: pcmef/admin/static/admin.css
  * 產生時間: 2026-08-27 00:30 +08:00
- * 版本: v0.2.0
+ * 版本: v0.3.0
  * 功能說明: 管理頁面的版面與配色。白底、內容置中、最大寬度 1160px，
  *           狀態與能力用小徽章，危險操作紅色、主要操作深藍青色。
  * 模組定位: §42 視覺規則的實作。它「不是」元件庫，也不引入任何前端框架。
@@ -429,3 +429,40 @@ td .note.mono { margin-left: 6px; }
 .chart .peak-line { stroke-width: 1; stroke-dasharray: 3 3; opacity: .55; }
 /* 長條圖的平均參考線。y 軸不截斷時，柱高差看不出來，靠它給出比較基準。 */
 .chart .mean-line { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 5 4; opacity: .5; }
+
+/* ---------- Case trace：角色隔離與 payload ---------- */
+/* 隔離矩陣。四個角色一列，欄位垂直排 —— 反過來（角色當列）會讓
+   「同一個欄位在四個角色間的差異」需要橫向掃視才看得出來，
+   而那個差異正是這張表存在的理由。 */
+.isolation { table-layout: auto; }
+.isolation th { text-align: left; vertical-align: top; }
+.isolation thead th { white-space: nowrap; }
+.isolation tbody th { font-weight: 600; width: 34%; }
+.isolation tbody th .note { display: block; font-weight: 400; margin-top: 1px; }
+.isolation td { text-align: center; vertical-align: middle; }
+/* 缺席用淡點而不是紅色 X：沒收到某個欄位是正確行為，不是錯誤。
+   用告警色會讓一張「隔離成功」的表看起來像壞掉了。 */
+.cell-absent { color: var(--muted); opacity: .45; font-size: 15px; }
+
+.role-detail > summary .mono { font-size: 13px; }
+.role-detail h4 { margin: 16px 0 6px; font-size: 13px; }
+.payload { table-layout: fixed; margin-top: 12px; }
+.payload th { text-align: left; vertical-align: top; width: 30%; font-weight: 600; }
+.payload th .note { display: block; font-weight: 400; margin-top: 2px; }
+.payload td { vertical-align: top; }
+/* payload 的值可能是很長的一行 JSON。允許在任意字元斷行，否則單一
+   欄位就會把表格撐寬到整頁橫向捲動。 */
+.payload code {
+  display: block; font-size: 12px; color: var(--ink);
+  word-break: break-all; line-height: 1.5;
+}
+.payload details.advanced { margin-top: 6px; border-top: 0; padding-top: 0; }
+.payload details.advanced > summary { font-size: 12px; font-weight: 400; }
+.payload pre, .role-detail > pre {
+  margin: 6px 0 0; padding: 9px 11px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 5px;
+  font-size: 12px; line-height: 1.5; overflow-x: auto; max-height: 320px;
+}
+
+.support-chain th { text-align: left; white-space: nowrap; }
+.support-chain td { text-align: right; }

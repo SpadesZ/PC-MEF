@@ -324,6 +324,76 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-067 角色隔離要用實際 payload 證明，不能複述契約
+
+**決策日期**：2026-09-04（P2-5，SAI v0.6.0 §20 第三層）
+
+**適用範圍**：`pcmef/console/run_view.py` 的 `agent_isolation()` /
+`role_detail()` / `support_chain()` / `agents_view()`；
+`pcmef/admin/templates/_case_agents.html`。
+
+**決策**：case 頁的多代理段落用一張矩陣呈現四個角色各自收到哪些欄位，
+而矩陣的每一格只由 `agent_execution.artifacts[*].input_payload` 算出。
+不得改成查 `ROLE_EVIDENCE_CONTRACT_V2`。
+
+**原因**：契約說某個角色不該看到什麼，那是宣告；使用者要知道的是它**實際上**
+有沒有看到。這兩者一致時矩陣看起來只是把契約重寫一次，不一致時矩陣才是唯一
+會說話的東西 —— 而後者正是它存在的理由。改成查契約的話，矩陣會變成契約自我
+證明，永遠不可能顯示違規，也就永遠沒有資訊量。
+
+`tests/console/test_case_agents.py::test_isolation_reads_the_payload_not_the_contract`
+把 `cross_modal` 從 arbitration 的 payload 拿掉，斷言該格必須翻成 absent。
+查契約的實作會在這裡仍然顯示「有」。
+
+模態限定的欄位顯示實際帶了哪一側（`tof` / `vision` / `vision、tof`），
+不是只顯示「有」。「physics 收到 p(y|x)」與「physics 只收到 ToF 那一側的
+p(y|x)」是兩件不同的事，混成同一格就看不出隔離。
+
+實測一筆 escalated case 的結果：
+
+| 欄位 | observation | physics | visual | arbitration |
+|---|---|---|---|---|
+| RGB 影像 | 有 | · | 有 | · |
+| ToF 摘要 | 有 | 有 | · | · |
+| p(y\|x) | · | tof | vision | vision、tof |
+| D | · | · | · | 有 |
+| 匿名意見 | · | · | · | 有 |
+| route | · | · | · | · |
+
+三件事因此變成看得見的：observation 拿得到原始證據但拿不到分類器的意見，
+所以它的觀察不是在覆述模型；arbitration 反過來只看衍生量與兩份匿名意見，
+拿不到影像也拿不到 ToF 摘要；`gate_route` 整列皆空，代表 benchmark metadata
+沒有洩漏到任何角色。全空的那一列必須保留 —— 那一列的空白就是它要證明的事。
+
+**s_A 的三段鏈**：① 模型原始 support、② 正規化後、③ 加 ε_s 的機率。
+③ 原本是照 `class_order` 排的向量，而畫面欄位依類別名排序，直接並排會得到
+一張欄位對不上標頭的表（Bubbly 欄會顯示 Empty 的機率）。因此在
+`support_chain()` 內先改以類別名為鍵。fixture 的 `CLASS_ORDER` 刻意不是字典序，
+否則兩種做法結果相同，測試就失去意義。
+
+ε_s 造成的位移實測約 `1.3e-08`，在六位小數下 ② 與 ③ 完全一樣。直接把量到的
+位移印出來，比讓人以為那一步沒發生誠實。
+
+**沒有呼叫過就回 `None`**：未 escalate 與 dry-run 都沒有 artifacts。這時湊一張
+全部 absent 的矩陣，看起來會像隔離失敗，而事實是它根本沒有發生 —— 兩者必須
+可區分，因此由樣板說明原因。
+
+**順帶修掉的當頁 500**：`case_trace.html` 原本對 `trace.perception.temperatures.vision`
+等欄位直接套 `format()`。Jinja 的 `Undefined is not none` 回 True，所以缺鍵時
+分支照樣進去再於 `format()` 內炸掉，一個溫度缺席會讓整條決策鏈都看不到。
+改為全部經過 `num()` macro，缺值顯示破折號。`num()` 內必須把 `is defined`
+排在 `is not none` 前面。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/console/test_case_agents.py -v
+```
+19 項通過。畫面在 1280 px 下以一筆真實 escalated case 檢視：矩陣 10 列 4 欄、
+四個角色的欄位數 2/6/5/7 與矩陣相符、s_A 三列對齊、`details` 預設收合、
+無水平溢出（1265 ≤ 1280）。
+
+---
+
 ## NOTE-066 Run 的第二層：沒有內容的分頁要顯示，不要藏
 
 **決策日期**：2026-09-03（P2-4，SAI v0.6.0 §20 第二層）

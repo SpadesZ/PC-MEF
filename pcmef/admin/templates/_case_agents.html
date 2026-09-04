@@ -1,6 +1,6 @@
 {# 由 case_trace.html include，作為決策鏈的第 5 段。
-   P2-4 只呈現「有沒有進仲裁、為什麼」；四個角色實際收到什麼與輸出什麼
-   在 P2-5 補上。未執行時要說明原因，不得留白讓人以為資料漏了。 #}
+   回答「四個角色各自看到什麼、說了什麼，以及 s_A 怎麼來的」。
+   隔離矩陣的每一格都由實際送出的 payload 算出，不是複述契約。唯讀。 #}
 
 <section class="card">
   <h2>5 · 多代理仲裁
@@ -8,7 +8,7 @@
   </h2>
   <div class="body">
     {% set execution = trace.agent_execution %}
-    {% if not execution.invoked %}
+    {% if not agents %}
       <p class="lede">
         <span class="badge {{ 'warn' if execution.reason == 'dry_run' else '' }}">
           未執行</span>
@@ -31,25 +31,162 @@
     {% else %}
       <p class="lede">
         <span class="badge ok">已執行</span>
-        {{ execution.n_roles }} 個角色 ·
-        本筆 provider 呼叫 {{ execution.artifacts | sum(attribute='attempt_count') }} 次
+        {{ agents.roles | length }} 個角色 ·
+        本筆 provider 呼叫 {{ agents.total_attempts }} 次
       </p>
-      <table>
-        <thead><tr><th>角色</th><th>收到影像</th><th>嘗試次數</th></tr></thead>
-        <tbody>
-        {% for artifact in execution.artifacts %}
+
+      <h3>角色隔離</h3>
+      <p class="note">
+        每一格都是從<strong>實際送出的 payload</strong> 讀出來的，
+        不是查 <span class="mono">ROLE_EVIDENCE_CONTRACT</span>。
+        契約說某個角色看不到什麼是宣告；這張表是實際發生的事。
+        模態限定的欄位會顯示它真的帶了哪一側。
+      </p>
+      <table class="isolation">
+        <thead>
           <tr>
-            <td class="mono">{{ artifact.role }}</td>
-            <td><span class="badge {{ 'ok' if artifact.received_image else '' }}">
-                {{ '是' if artifact.received_image else '否' }}</span></td>
-            <td>{{ artifact.attempt_count }}</td>
+            <th>欄位</th>
+            {% for role in agents.isolation.roles %}
+              <th class="mono">{{ role | replace('_agent', '') }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in agents.isolation.rows %}
+          <tr>
+            <th>{{ row.label }}
+              <span class="note">{{ row.meaning }}</span></th>
+            {% for cell in row.cells %}
+              <td>
+                {% if cell == 'absent' %}
+                  <span class="cell-absent" title="沒有出現在 payload 裡">·</span>
+                {% elif cell == 'present' %}
+                  <span class="badge ok">有</span>
+                {% else %}
+                  <span class="badge ok">{{ cell }}</span>
+                {% endif %}
+              </td>
+            {% endfor %}
           </tr>
         {% endfor %}
         </tbody>
       </table>
+
+      <h3>各角色收到什麼、回了什麼</h3>
+      {% for role in agents.roles %}
+      <details class="advanced role-detail">
+        <summary>
+          <span class="mono">{{ role.role }}</span>
+          <span class="note">
+            {{ role.n_fields }} 個證據欄位 ·
+            {{ '收到影像' if role.received_image else '沒有影像' }} ·
+            {{ role.attempt_count }} 次呼叫
+          </span>
+        </summary>
+        <table>
+          <tbody>
+            <tr><th>contract</th><td class="mono">{{ role.contract_version }}</td>
+                <th>representation</th>
+                <td class="mono">{{ role.representation_mode }}</td></tr>
+            <tr><th>class_order</th>
+                <td class="mono" colspan="3">{{ role.class_order | join(' · ') }}</td></tr>
+            {% if role.image_digests %}
+            <tr><th>影像 sha256</th>
+                <td class="mono" colspan="3">{{ role.image_digests | join(', ') }}</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+        <table class="payload">
+          <thead><tr><th>欄位</th><th>值</th></tr></thead>
+          <tbody>
+          {% for field in role.fields %}
+            <tr>
+              {# mono 只套在欄位名上。meaning 是 payload 自帶的敘述文字，
+                 用等寬字排長句會難讀，而且會讓人以為它也是資料。 #}
+              <th><span class="mono">{{ field.key }}</span>
+                {% if field.meaning %}<span class="note">{{ field.meaning }}</span>{% endif %}
+              </th>
+              <td>
+                <code>{{ field.compact }}</code>
+                <details class="advanced">
+                  <summary>完整值</summary>
+                  <pre>{{ field.full }}</pre>
+                </details>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <h4>輸出</h4>
+        <pre>{{ role.output }}</pre>
+      </details>
+      {% endfor %}
+
+      {% if agents.support %}
+      <h3>s<sub>A</sub> 怎麼形成</h3>
       <p class="note">
-        各角色實際收到哪些欄位、輸出了什麼，以及 s_A 如何形成 —— 下一階段補上。
+        分三步顯示，因為每一步都可能出問題：原始總和偏離 100 代表模型沒有
+        照指示配額，正規化之後才是 s<sub>A</sub> 的尺度，而 core layer 的
+        ε<sub>s</sub> 只穩定合法的非零 support ——
+        全零會被當成語意失敗擋下來，不會被補成均勻分布。
       </p>
+      <table class="support-chain">
+        <thead>
+          <tr><th>步驟</th>
+            {% for name in agents.support.normalised | sort %}
+              <th>{{ name }}</th>
+            {% endfor %}
+            <th>合計</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>① 模型原始輸出</th>
+            {% for name in agents.support.normalised | sort %}
+              <td class="mono">{{ agents.support.raw.get(name, '—') }}</td>
+            {% endfor %}
+            <td class="mono">
+              {{ agents.support.raw_sum if agents.support.raw_sum is not none else '—' }}
+              {% if agents.support.within_tolerance is not none %}
+                <span class="badge {{ 'ok' if agents.support.within_tolerance else 'warn' }}">
+                  {{ '在容差內' if agents.support.within_tolerance else '超出容差' }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th>② 正規化後</th>
+            {% for name in agents.support.normalised | sort %}
+              <td class="mono">{{ '%.4f' | format(agents.support.normalised[name]) }}</td>
+            {% endfor %}
+            <td class="mono">100</td>
+          </tr>
+          {% if agents.support.s_a %}
+          <tr>
+            <th>③ s<sub>A</sub>（機率）</th>
+            {% for name in agents.support.normalised | sort %}
+              <td class="mono">
+                {{ '%.6f' | format(agents.support.s_a[name])
+                   if name in agents.support.s_a else '—' }}</td>
+            {% endfor %}
+            <td class="mono">1</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      <p class="note">
+        ③ 原本是照 <span class="mono">class_order</span> 排的向量，
+        這裡已改以類別名對齊，因此三列可以直接上下比對。
+        {% if agents.support.eps_shift is not none %}
+        ②→③ 之間 ε<sub>s</sub> 造成的最大位移是
+        <span class="mono">{{ '%.2e' | format(agents.support.eps_shift) }}</span>，
+        在六位小數下看不出來 —— 兩列數字相同不代表沒有經過那一步。
+        {% endif %}
+        {% if agents.support.conflict_tag %}
+        本筆的 <span class="mono">conflict_tag</span> 為
+        <span class="badge {{ 'ok' if agents.support.conflict_tag == 'none' else 'warn' }}">{{ agents.support.conflict_tag }}</span>，
+        僅供報告分層，不參與最終決策。
+        {% endif %}
+      </p>
+      {% endif %}
     {% endif %}
   </div>
 </section>

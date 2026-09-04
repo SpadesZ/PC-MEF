@@ -3,7 +3,7 @@
  #         <run>/artifacts/trace/cases/<case_id>.json。extends _layout.html。
  # 檔案路徑: pcmef/admin/templates/case_trace.html
  # 產生時間: 2026-09-03 13:00 +08:00
- # 版本: v0.1.0
+ # 版本: v0.2.0
  # 功能說明: 單一 case 的決策鏈 —— 輸入、兩個模態的分布、品質與可靠度、
  #           路由與它的理由、五條臂各自的輸出，以及最終結果。
  # 模組定位: SAI v0.6.0 §20 第三層。**唯讀** ——
@@ -11,7 +11,7 @@
  # 主要責任:
  #   1. 依資料流順序呈現：輸入 → 感知 → 品質 → 可靠度 → 路由 → 最終
  #   2. 路由那一段顯示理由，並在推導與記錄不一致時標紅
- #   3. Multi-Agent 區塊在 P2-5 補完整內容
+ #   3. Multi-Agent 區塊委由 _case_agents.html 呈現
  #   4. 前後 case 的翻頁，不必回列表
  # 維護提醒:
  #   - 不得在本頁加入任何控制項。這是事後檢視，不是執行介面。
@@ -19,12 +19,25 @@
  #     使用者要問的是為什麼（NOTE-064）。
  #   - 不得在 routing.consistent 為 false 時照唸說明文字。那代表 route 與
  #     數值矛盾，必須標出來。
+ #   - 不得繞過 num() 直接對 trace 的數值套 format。缺一個欄位
+ #     不該讓整頁 500，其他五段仍然要看得到。
+ #   - v0.2.0 新增：num() macro 與多代理段落，對應 P2-5。
  #   - v0.1.0 新增：決策鏈主體，對應 P2-4。
  # 驗證方式:
  #   - py -3.10 -m pytest tests/console/test_run_sections.py -v
  # ------------------------------------------------------------ #}
 {% extends "_layout.html" %}
 {% block title %}{{ trace.case_id }}{% endblock %}
+
+{# 數值一律經過這個 macro。trace 的欄位理論上由 build_case_trace 保證，
+   但「理論上一定在」的東西缺席時，整頁 500 是最糟的失敗方式 ——
+   讀不到一個數字不該讓其他五段也看不到。
+   `is defined` 必須排在最前面：Undefined is not none 會回 True。 #}
+{% macro num(value, fmt='%.4f') -%}
+  {%- if value is defined and value is not none -%}
+    {{ fmt | format(value) }}
+  {%- else -%}<span class="note">—</span>{%- endif -%}
+{%- endmacro %}
 
 {% block content %}
 
@@ -120,11 +133,16 @@
         </tr>
       </tbody>
     </table>
+    {# 溫度不一定在 —— 舊的 trace 與其他 run kind 都可能缺。缺了就不印
+       這一行，而不是讓 format() 對 Undefined 爆掉整頁。 #}
+    {% set temps = trace.perception.get('temperatures') or {} %}
+    {% if temps.get('vision') is not none and temps.get('tof') is not none %}
     <p class="note">
-      溫度：vision {{ '%.4f' | format(trace.perception.temperatures.vision) }} ·
-      tof {{ '%.4f' | format(trace.perception.temperatures.tof) }}
+      溫度：vision {{ num(temps.get('vision')) }} ·
+      tof {{ num(temps.get('tof')) }}
       （由路由驗證集求得並凍結）
     </p>
+    {% endif %}
   </div>
 </section>
 
@@ -137,15 +155,15 @@
     <table>
       <tbody>
         <tr><th>Q_V（影像清晰度）</th>
-            <td class="mono">{{ '%.4f' | format(trace.quality.Q_vision) }}</td>
+            <td class="mono">{{ num(trace.quality.get('Q_vision')) }}</td>
             <th>Q_T（訊號/背景）</th>
-            <td class="mono">{{ '%.4f' | format(trace.quality.Q_tof) }}</td></tr>
+            <td class="mono">{{ num(trace.quality.get('Q_tof')) }}</td></tr>
         <tr><th>U_V（預測熵）</th>
-            <td class="mono">{{ '%.4f' | format(trace.quality.U_vision) }}</td>
+            <td class="mono">{{ num(trace.quality.get('U_vision')) }}</td>
             <th>U_T</th>
-            <td class="mono">{{ '%.4f' | format(trace.quality.U_tof) }}</td></tr>
+            <td class="mono">{{ num(trace.quality.get('U_tof')) }}</td></tr>
         <tr><th>D（跨模態分歧）</th>
-            <td class="mono" colspan="3">{{ '%.4f' | format(trace.quality.disagreement) }}</td></tr>
+            <td class="mono" colspan="3">{{ num(trace.quality.get('disagreement')) }}</td></tr>
       </tbody>
     </table>
 
@@ -154,21 +172,21 @@
       <tbody>
         <tr>
           <td class="mono">q_V</td>
-          <td>{{ '%.4f' | format(trace.reliability.q_vision) }}</td>
-          <td class="note">{{ trace.reliability.threshold }}</td>
-          <td><span class="badge {{ 'ok' if trace.routing.conditions.vision_quality_passes else 'bad' }}">
-              {{ '過關' if trace.routing.conditions.vision_quality_passes else '不過關' }}</span></td>
+          <td>{{ num(trace.reliability.get('q_vision')) }}</td>
+          <td class="note">{{ num(trace.reliability.get('threshold'), '%.3f') }}</td>
+          <td><span class="badge {{ 'ok' if trace.routing.conditions.get('vision_quality_passes') else 'bad' }}">
+              {{ '過關' if trace.routing.conditions.get('vision_quality_passes') else '不過關' }}</span></td>
         </tr>
         <tr>
           <td class="mono">q_T</td>
-          <td>{{ '%.4f' | format(trace.reliability.q_tof) }}</td>
-          <td class="note">{{ trace.reliability.threshold }}</td>
-          <td><span class="badge {{ 'ok' if trace.routing.conditions.tof_quality_passes else 'bad' }}">
-              {{ '過關' if trace.routing.conditions.tof_quality_passes else '不過關' }}</span></td>
+          <td>{{ num(trace.reliability.get('q_tof')) }}</td>
+          <td class="note">{{ num(trace.reliability.get('threshold'), '%.3f') }}</td>
+          <td><span class="badge {{ 'ok' if trace.routing.conditions.get('tof_quality_passes') else 'bad' }}">
+              {{ '過關' if trace.routing.conditions.get('tof_quality_passes') else '不過關' }}</span></td>
         </tr>
       </tbody>
     </table>
-    <p class="note">{{ trace.reliability._meaning }}</p>
+    <p class="note">{{ trace.reliability.get('_meaning', '') }}</p>
   </div>
 </section>
 
@@ -193,13 +211,13 @@
       <table>
         <tbody>
           <tr><th>q_V ≥ 門檻</th>
-              <td>{{ trace.routing.conditions.vision_quality_passes }}</td>
+              <td>{{ trace.routing.conditions.get('vision_quality_passes') }}</td>
               <th>q_T ≥ 門檻</th>
-              <td>{{ trace.routing.conditions.tof_quality_passes }}</td></tr>
+              <td>{{ trace.routing.conditions.get('tof_quality_passes') }}</td></tr>
           <tr><th>D > δ</th>
-              <td>{{ trace.routing.conditions.exceeds_disagreement_threshold }}</td>
+              <td>{{ trace.routing.conditions.get('exceeds_disagreement_threshold') }}</td>
               <th>δ</th>
-              <td class="mono">{{ '%.6f' | format(trace.routing.conditions.disagreement_threshold) }}</td></tr>
+              <td class="mono">{{ num(trace.routing.conditions.get('disagreement_threshold'), '%.6f') }}</td></tr>
         </tbody>
       </table>
     </details>

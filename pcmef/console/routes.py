@@ -221,6 +221,10 @@ def case_page(run_id: str, case_id: str):
         ),
         trace=trace,
         neighbours=run_view.case_neighbours(run_dir, case_id),
+        # 只有真的呼叫過 agent 才算得出隔離矩陣。未 escalate 或 dry-run
+        # 的 artifacts 是空的，這時給 None 讓樣板說明原因，而不是渲染一張
+        # 全部 absent 的表 —— 那看起來會像隔離失敗，而不是沒有發生。
+        agents=run_view.agents_view(trace),
     )
 
 
