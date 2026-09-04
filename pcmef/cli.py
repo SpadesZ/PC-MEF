@@ -3261,6 +3261,41 @@ def cmd_regression_verify(args: argparse.Namespace) -> int:
     return 0 if report["identical"] else 2
 
 
+def cmd_figures_export(args: argparse.Namespace) -> int:
+    """由一份 formal report 產出論文用圖。
+
+    只讀 report，不碰資料集也不重算 —— 圖上的每個數字都必須能在 report
+    裡逐字找到，否則「圖上的」與「凍結的」會分岔。
+    """
+    try:
+        from pcmef.reporting import figures
+    except ImportError as error:  # matplotlib 未安裝
+        print(f"error: {error}\n  pip install -e '.[figures]'", file=sys.stderr)
+        return 2
+
+    report_path = Path(args.report)
+    if not report_path.exists():
+        print(f"error: 找不到 {report_path}", file=sys.stderr)
+        return 2
+
+    report = figures.load_report(report_path)
+    formats = tuple(args.format) if args.format else figures.FORMATS
+    result = figures.export_all(report, args.out, formats=formats)
+
+    print(f"  report     {report_path}")
+    print(f"  report_id  {report.get('report_id', '—')}")
+    print(f"  out        {result['out_dir']}\n")
+    for name in result["written"]:
+        print(f"    {name}")
+    if result["skipped"]:
+        # 少一張圖不是錯誤，但必須說出少的是哪一張、缺什麼欄位 ——
+        # 靜靜少產一張，使用者會以為那張圖不存在。
+        print("\n  未產出：")
+        for name, reason in result["skipped"].items():
+            print(f"    {name}: {reason}")
+    return 0
+
+
 def cmd_corrective_freeze_formal_config(args: argparse.Namespace) -> int:
     """最後一步：凍結更正後的 formal_config。"""
     import subprocess
@@ -4446,6 +4481,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="允許工作目錄有未提交變更（formal 模式預設拒絕）",
     )
     formal_run.set_defaults(func=cmd_formal_run_e2)
+
+    figures_parser = subparsers.add_parser("figures", help="論文用圖")
+    figures_sub = figures_parser.add_subparsers(
+        dest="figures_command", required=True
+    )
+    figures_export = figures_sub.add_parser(
+        "export", help="由 formal report 產出論文用圖（唯讀，不重算）"
+    )
+    figures_export.add_argument(
+        "--report", required=True,
+        help="formal_e2_report.json 或 formal_e2_dry_run.json 的路徑",
+    )
+    figures_export.add_argument("--out", default="outputs/figures")
+    figures_export.add_argument(
+        "--format", action="append", choices=list(("pdf", "svg", "png")),
+        help="可重複指定；預設三種都產",
+    )
+    figures_export.set_defaults(func=cmd_figures_export)
 
     regression_parser = subparsers.add_parser(
         "regression",

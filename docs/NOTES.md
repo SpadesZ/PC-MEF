@@ -324,6 +324,72 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-069 論文圖不截軸，且同一份 report 產兩次要逐 byte 相同
+
+**決策日期**：2026-09-04（P2-6，FR-020 thesis-ready figure）
+
+**適用範圍**：`pcmef/reporting/style.py`、`pcmef/reporting/figures.py`；
+`pcmef figures export`；`pyproject.toml` 的 `figures` extra。
+
+**決策**：新增 `pcmef/reporting/`，由 `pcmef figures export` 把一份 formal
+report 轉成五張論文圖（PDF / SVG / PNG）。比例類指標一律 0–1 完整比例尺；
+臂固定 G1→G5；輸出可逐 byte 重現；只讀 report，不重算任何指標。
+matplotlib 補進 `pyproject.toml` 的獨立 `figures` extra。
+
+**原因**：分四點。
+
+**其一，與 figures4papers 的一處刻意分歧**。參考來源
+（<https://github.com/ChenLiu-1996/figures4papers>）的 design-theory 建議
+"Manual Y-limits tightened to emphasize comparative differences"。**本專案不採**。
+理由與 `console/results.py` 早已寫下的同一條相同：截軸能讓 0.02 的差看起來像
+兩倍，那在論文裡是造假。本次資料最大值只有 0.534，自動縮放會把上界拉到 0.55
+左右 —— 正是要防的那種圖。forest plot 是差值圖，零線是參照而不是截軸，不在此限。
+
+其餘慣例照採：`svg.fonttype = 'none'`（文字可編輯）、`pdf.fonttype = 42`、
+frameless legend、去右上框線、dpi 300、`bbox_inches='tight'`、黑色柱邊。
+`text.usetex` **不開** —— 它需要機器上有 LaTeX，缺了會在投稿前一晚才炸，
+數學符號一律走 mathtext。字型 stack 結尾放 DejaVu Sans，因為 Arial/Helvetica
+在多數 Linux 與 CI 上不存在。
+
+**其二，臂的順序固定為 G1→G5**，不得依數值重排。依高低排的話，本次資料會變成
+G1, G4, G3, G2, G5，而下一次 run 又是另一個順序，兩張圖無法並排比較。
+
+**其三，顏色只給 G4 與 G5**，G1–G3 用中性灰。把自己的方法塗成最鮮豔、baseline
+全部灰掉是常見的視覺取巧；這裡讓 G4/G5 帶色是因為那兩條正是論文要對比的
+（G4 隔離路由、G5 加上仲裁），G1–G3 是參照物。
+
+**其四，輸出必須可逐 byte 重現**。三件事會破壞它：PDF 的 `CreationDate`、
+SVG 的 `Date`，以及 SVG 的 `clip-path` id —— 後者預設由物件位址雜湊而來，
+同一份 report 產兩次得到不同 id。前兩個用 `savefig(metadata=...)` 清掉，
+第三個靠 `svg.hashsalt`。修正前 PDF 與 PNG 已相同、五個 SVG 全部不同；
+修正後 15 個檔案全部相同。沒有這一條就無法用 hash 確認圖與報告對得上。
+
+**只讀 report，不重算**。圖上每個數字都要能在 report 裡逐字找到。
+`test_figures_do_not_recompute_anything` 把 report 裡的值改成 0.4242，
+斷言圖上的標註跟著變 —— 若圖自己從 `per_condition` 重算 worst-condition，
+這個測試會失敗。理由與 `results.py` 相同：圖與凍結結果分岔時沒有人會發現。
+
+**缺欄位跳過單張而非整批失敗**。舊報告與 dry-run 少幾個欄位是常態
+（dry-run 沒有 `pcmef_full`，也沒有 paired statistics）。少一張就整批不產出，
+只會逼人回頭手動畫。跳過時必須指名是哪一張、缺哪個欄位。實測一份舊的
+dry-run 報告：產出 2 張、跳過 3 張並列出缺的欄位名。
+
+**matplotlib 補宣告**：本機早已裝 3.10.8 卻不在 `pyproject.toml` 裡，
+與 NOTE-051 的 tensorflow/torch 同一類缺陷。獨立成 `figures` extra 而不併進
+`admin`，因為 console 的圖是伺服器端 SVG，admin 那組不該為了出圖被迫裝
+一個重套件。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/reporting/test_figures.py -v
+py -3.10 -m pcmef.cli figures export --report <report.json> --out outputs/figures
+```
+16 項通過。以一份真實的 full report 產出五張圖並逐張目視：0–1 比例尺、
+G1→G5 順序、每根柱標出最弱 condition、forest plot 的註記排成固定一欄
+（跟著各自 CI 走會把窄區間的文字推到零線上）。
+
+---
+
 ## NOTE-068 Pipeline 頁的每個數字都要帶出處，且不得照欄位名顯示門檻
 
 **決策日期**：2026-09-04（P2-3，SAI v0.6.0 §20 Pipeline 入口）
