@@ -324,6 +324,92 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-065 五個主入口：一頁只回答一個問題
+
+**決策日期**：2026-09-03（P2-2，SAI v0.6.0 §20）
+
+**適用範圍**：`pcmef/admin/templates/_layout.html`；
+`pcmef/console/navigation.py`；`workspace_routes.py` 的三個新入口。
+
+**決策**：
+
+1. 固定頂部導航，**五個**主入口，每個對應一個問句：
+
+   ```
+   實驗 Run        我要跑什麼？
+   流程 Pipeline   系統怎麼跑？
+   結果 Results    跑出了什麼？
+   研究狀態 Status  研究目前做到哪裡？
+   LLM 設定        provider / model / binding
+   ```
+
+2. E1 十二道 gate 由 Run 首頁移到 Status；執行紀錄（含搜尋與摺疊）
+   移到 Results。
+3. Status 與 Pipeline **完全唯讀**；Results 唯一允許的寫入是刪除執行紀錄。
+
+**原因**：
+
+### 1. 首頁原本同時回答三個問題
+
+console 首頁有四張卡片：跑模擬、系統狀態（G01–G12）、產生正式設定檔、
+執行紀錄。也就是它同時要回答「我要跑什麼」「研究做到哪」「跑出了什麼」。
+
+功能一多就往首頁加，是因為沒有別的地方可放。**先給每個問題一個地方，
+堆疊才會停**。分類的判準是「它回答哪一個問句」，不是「它在哪個模組實作」。
+
+### 2. 為什麼是五個而不是更多
+
+Formal Research Workspace 沒有自己的頂層項目 —— 它回答的是「我要跑什麼」，
+所以歸在 Run 底下，breadcrumb 顯示
+`PC-MEF › 實驗 Run › Formal Research Workspace`。
+
+第六個項目意味著某個功能沒有被歸類進既有問句，那是要重新想的訊號，
+不是加一個 tab。測試把 `len(NAV_ITEMS) == 5` 釘住。
+
+### 3. 順帶修掉一句已經變假的話
+
+Run 首頁的 masthead 寫著「正式實驗（formal run）本身仍然一律走 CLI，
+這個頁面跑不了」。AMD-008 之後前半句已經不對。
+
+那段文字自己的註解就寫著「這段話務必與畫面上實際做得到的事一致」，
+而它是**第二次**因為同一個理由被改：第一次是它宣稱不能產生 lock
+而下面就有凍結鈕。現在改成準確的版本，並在註解裡記下兩次都是同一種錯。
+
+**驗證**：
+
+```
+py -3.10 -m pytest tests/console/test_navigation.py -v   # 24 條
+```
+
+實際渲染確認（1280 與 900 兩個寬度）：五個入口在每一頁一致、
+active 只有一項且正確、breadcrumb 從單一根開始、
+**Pipeline 與 Status 的 form 數為 0**、無水平溢出、導航不換行。
+
+搬移後各頁的卡片：
+
+```
+Run       跑一次模擬 / 正式實驗 / 產生正式設定檔
+Pipeline  Simulation → Final Decision（七節點）
+Results   最近一次 E2 報告 / 執行紀錄
+Status    E1 關卡 / 正式執行身分
+```
+
+### 4. 測試也跟著搬，而不是放寬
+
+四條原本指向 `/console` 的測試改指向新位置（gate → `/status`，
+搜尋與摺疊 → `/results`）。摺疊沒有被拿掉：「跑久了累積上百筆」
+這個顧慮沒有消失，只是換了頁面。
+
+其中一條斷言原本寫 `"執行紀錄" not in run`，那太粗糙 —— Run 頁的
+snapshot 卡片仍會提到「會留下一筆執行紀錄」，那是說明文字不是表格。
+改用 `id="run-history"` 與表頭比對。
+
+**維護邊界**：不得加第六個頂層項目。導航負責**去哪裡**，
+Pipeline 負責怎麼做，Run 負責開始做，Results 負責做出什麼，
+Status 負責研究進度。
+
+---
+
 ## NOTE-064 Decision trace：旁路、fail-safe，且說明必須由數值推導
 
 **決策日期**：2026-09-02（P2-1）

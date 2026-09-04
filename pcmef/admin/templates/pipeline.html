@@ -1,0 +1,65 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/workspace_routes.py 的 GET /pipeline 繪製；
+ #         資料來自 console.pipeline.build_pipeline()。extends _layout.html。
+ # 檔案路徑: pcmef/admin/templates/pipeline.html
+ # 產生時間: 2026-09-03 10:05 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 研究流程的七個節點與它們之間傳遞什麼。
+ # 模組定位: SAI v0.6.0 §20 的 Pipeline 入口，回答「系統怎麼跑」。
+ #           **唯讀** —— 這裡不得出現任何可修改研究參數的控制項。
+ # 主要責任:
+ #   1. 依序列出七個節點，標明每一步交給下一步什麼
+ #   2. 在詳細內容尚未接上時，明說目前呈現到哪個層次
+ # 維護提醒:
+ #   - 不得在本頁加入表單或按鈕。Pipeline 說明流程；要開始跑回 Run。
+ #   - 不得把節點順序改成非資料流順序。那個順序就是資訊本身。
+ #   - v0.1.0 新增：首版，對應 P2-2。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_navigation.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}流程 Pipeline{% endblock %}
+
+{% block content %}
+<header class="masthead">
+  <h1>研究流程</h1>
+  <p>
+    輸入如何一步步變成輸出。每一個節點都標明它<strong>交給下一步什麼</strong> ——
+    黑箱感來自看不見中間傳遞的東西，而不是看不見步驟的名稱。
+  </p>
+</header>
+
+{% if not pipeline.detail_available %}
+<div class="flash warn">{{ pipeline.detail_note }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>Simulation → Final Decision
+    <span class="hint">共 {{ pipeline.nodes | length }} 個節點，順序即資料流順序</span>
+  </h2>
+  <div class="body">
+    <ol class="pipeline">
+      {% for node in pipeline.nodes %}
+      <li>
+        <div class="pipeline-head">
+          <span class="pipeline-index">{{ node.index }}</span>
+          <span class="pipeline-label">{{ node.label }}</span>
+          <span class="pipeline-en mono">{{ node.english }}</span>
+        </div>
+        <p class="note">{{ node.summary }}</p>
+        <p class="pipeline-carries">
+          <span class="note">交給下一步：</span>
+          <span class="mono">{{ node.carries }}</span>
+        </p>
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+</section>
+
+<p class="note">
+  本頁唯讀。要看某一次執行實際跑出什麼，到
+  <a href="{{ url_for('results.page') }}">結果 Results</a>；
+  要開始一次執行，到 <a href="{{ url_for('console.page') }}">實驗 Run</a>。
+</p>
+{% endblock %}

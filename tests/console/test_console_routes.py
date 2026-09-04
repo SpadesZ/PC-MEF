@@ -104,11 +104,12 @@ def test_console_page_shows_all_three_presets(client):
         assert label in html
 
 
-def test_console_page_shows_the_gate_lights(client):
-    html = client.get("/console").get_data(as_text=True)
-    assert 'class="gate-grid"' in html
+def test_the_gate_lights_moved_to_status(client):
+    """E1 十二道 gate 自 P2-2 起屬 Status —— Run 首頁只回答「我要跑什麼」。"""
+    html = client.get("/status").get_data(as_text=True)
     for gate in ("G01", "G06", "G12"):
         assert gate in html
+    assert 'class="gate-grid"' not in client.get("/console").get_data(as_text=True)
 
 
 def test_console_page_states_that_formal_runs_go_through_the_cli(client):
@@ -211,7 +212,7 @@ def test_the_history_is_searchable(app, client):
     _finish(app, 1, preset="preview")
     _finish(app, 1, preset="quality")
 
-    html = client.get("/console?q=quality").get_data(as_text=True)
+    html = client.get("/results?q=quality").get_data(as_text=True)
     assert "preset=quality" not in html  # 參數本身不印在畫面上
     assert "高品質" in html
     assert "快速預覽" not in html.split('id="run-history"')[1]
@@ -225,8 +226,8 @@ def test_search_reaches_runs_beyond_the_display_limit(app, client):
     oldest = _finish(app, 1, preset="quality")[0]
     _finish(app, RECENT_RUN_COUNT + 3, preset="preview")
 
-    plain = client.get("/console").get_data(as_text=True)
-    searched = client.get("/console?q=quality").get_data(as_text=True)
+    plain = client.get("/results").get_data(as_text=True)
+    searched = client.get("/results?q=quality").get_data(as_text=True)
 
     # 沒搜尋時它被推進摺疊區（"還有 N 筆" 之後）。
     assert oldest.run_id in plain
@@ -241,7 +242,9 @@ def test_older_runs_are_collapsed_so_the_table_stays_short(app, client):
     from pcmef.console.routes import RECENT_RUN_COUNT
 
     _finish(app, RECENT_RUN_COUNT + 2)
-    html = client.get("/console").get_data(as_text=True)
+    # 摺疊隨執行紀錄一起搬到 Results（P2-2）。顧慮沒有消失 ——
+    # 跑久了仍會累積上百筆 —— 只是換了頁面。
+    html = client.get("/results").get_data(as_text=True)
 
     assert "還有 2 筆較早的紀錄" in html
 

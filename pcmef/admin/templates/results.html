@@ -1,0 +1,144 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/workspace_routes.py 的 GET /results 繪製；
+ #         執行紀錄來自 console.runner，formal 摘要來自
+ #         experiments.formal_service.latest_report。extends _layout.html。
+ # 檔案路徑: pcmef/admin/templates/results.html
+ # 產生時間: 2026-09-03 10:25 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 跑出了什麼 —— 探索性執行的紀錄，以及最近一次正式／預演報告。
+ # 模組定位: SAI v0.6.0 §20 的 Results 入口。這些內容原本堆在 Run 首頁。
+ # 主要責任:
+ #   1. 最近一次 formal / dry-run 報告的摘要與入口
+ #   2. 探索性執行紀錄，含搜尋、摺疊與刪除
+ #   3. dry run 的結果必須帶明確標記，不得與正式結果混淆
+ # 維護提醒:
+ #   - 唯一允許的寫入是刪除執行紀錄。不得在本頁加入任何會影響研究決策的
+ #     控制項；要啟動什麼一律回 Run。
+ #   - 不得把執行紀錄的表格標記複製成兩份（攤開的與摺疊的）；
+ #     用 run_table macro，否則只會有一份被改到。
+ #   - 不得把 dry run 的摘要顯示成正式結果。dry_run 為真時整張卡片必須
+ #     帶標記，而 pcmef_full 那一列本來就不存在（NOTE-056）。
+ #   - v0.1.0 新增：首版，對應 P2-2。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_navigation.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}結果 Results{% endblock %}
+
+{% block content %}
+
+{# 攤開的那幾筆與摺疊起來的那些用同一個 macro 繪製。
+   複製兩份表格標記的話，之後只會有一份被改到，而畫面上摺疊區裡的那份
+   看起來只是「舊版的樣子」，不像 bug。 #}
+{% macro run_table(rows) %}
+<table>
+  <thead>
+    <tr><th>執行編號</th><th>種類</th><th>設定</th><th>狀態</th>
+        <th>開始時間</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for run in rows %}
+    <tr>
+      <td><a class="mono" href="{{ url_for('console.run_page', run_id=run.run_id) }}">{{ run.run_id }}</a></td>
+      <td>{{ run.kind }}</td>
+      <td class="note">{{ run.label }}</td>
+      <td>
+        <span class="badge {{ 'ok' if run.status == 'succeeded' else ('bad' if run.status == 'failed' else 'warn') }}">
+          {{ run.status }}</span>
+        {% if run.exit_code is not none %}<span class="note">exit {{ run.exit_code }}</span>{% endif %}
+      </td>
+      <td class="note">{{ run.started_at[:19] }}</td>
+      <td class="actions">
+        <form class="inline" method="post"
+              action="{{ url_for('console.delete_run', run_id=run.run_id) }}"
+              onsubmit="return confirm('刪除 {{ run.run_id }}？\n輸出、設定與產物會一起刪掉。');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn danger" type="submit"
+                  {% if not run.finished %}disabled{% endif %}
+                  title="{% if run.finished %}刪掉這次執行的紀錄與產物{% else %}執行中，跑完才能刪{% endif %}">刪除</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+
+<header class="masthead">
+  <h1>結果</h1>
+  <p>跑出了什麼。正式實驗的起跑前檢查與即時狀態在
+    <a href="{{ url_for('formal.page') }}">Formal Research Workspace</a>。</p>
+</header>
+
+<section class="card">
+  <h2>最近一次 E2 報告
+    <span class="hint">{{ formal_out }}</span>
+  </h2>
+  <div class="body">
+    {% if not formal_report %}
+      <p><span class="badge warn">尚未執行</span>
+         這個位置還沒有任何 E2 報告。</p>
+    {% else %}
+      {% if formal_report.dry_run %}
+      <p class="lede"><span class="badge warn">DRY RUN — 不是正式結果</span></p>
+      {% endif %}
+      <table>
+        <tbody>
+          <tr><th>report_id</th><td class="mono">{{ formal_report.report_id }}</td>
+              <th>產生時間</th><td class="note">{{ formal_report.created_at[:19] }}</td></tr>
+          <tr><th>scientific_result</th>
+              <td><span class="badge {{ 'ok' if formal_report.scientific_result else 'warn' }}">
+                  {{ formal_report.scientific_result }}</span></td>
+              <th>列數</th><td>{{ formal_report.total_rows }}</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead><tr><th>方法</th><th>accuracy</th><th>macro-F1</th></tr></thead>
+        <tbody>
+        {% for name, block in formal_report.results | dictsort %}
+          <tr>
+            <td class="mono">{{ name }}</td>
+            <td>{{ '%.4f' | format(block.accuracy) }}</td>
+            <td>{{ '%.4f' | format(block.macro_f1) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="note">完整報告：<span class="mono">{{ formal_report.path }}</span></p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card" id="run-history">
+  <h2>執行紀錄
+    <span class="hint">每次執行都保存了完整參數與輸出</span>
+  </h2>
+  <div class="body">
+    <form method="get" class="add-row">
+      <div class="field">
+        <label for="q">搜尋</label>
+        <input id="q" name="q" value="{{ query }}"
+               placeholder="編號、種類、狀態或參數值">
+      </div>
+      <button class="btn" type="submit">搜尋</button>
+      {% if query %}<a class="btn" href="{{ url_for('results.page') }}">清除</a>{% endif %}
+    </form>
+
+    {% if not runs %}
+      <p class="note">
+        {% if query %}沒有符合「{{ query }}」的紀錄。{% else %}還沒有任何執行紀錄。{% endif %}
+      </p>
+    {% else %}
+      {% if query %}<p class="note">符合「{{ query }}」的紀錄共 {{ runs|length }} 筆。</p>{% endif %}
+      {{ run_table(runs[:recent_count]) }}
+      {% if runs|length > recent_count %}
+      <details class="advanced">
+        <summary>還有 {{ runs|length - recent_count }} 筆較早的紀錄</summary>
+        {{ run_table(runs[recent_count:]) }}
+      </details>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

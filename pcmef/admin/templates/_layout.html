@@ -1,0 +1,70 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 admin/templates 下的每一個頁面 extends；提供固定頂部導航與
+ #         breadcrumb 區塊。載入 pcmef/admin/static/admin.css。
+ #         不發出任何對外請求，也不含任何表單。
+ # 檔案路徑: pcmef/admin/templates/_layout.html
+ # 產生時間: 2026-09-03 09:10 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 全站共用版型。五個主入口固定在頂端，讓「現在在哪、還能去哪」
+ #           在每一頁都看得到。
+ # 模組定位: SAI v0.6.0 §20 的資訊架構落點。導航只負責**去哪裡**；
+ #           Pipeline 負責怎麼做、Run 負責開始做、Results 負責做出什麼、
+ #           Status 負責研究進度。
+ # 主要責任:
+ #   1. NAV_ITEMS 由 view 傳入 active 鍵，決定哪一項高亮
+ #   2. breadcrumb 區塊，讓第二層頁面能標出上下層關係
+ #   3. {% block content %} 給各頁填內容
+ # 維護提醒:
+ #   - 不得在本檔加入任何表單或寫入端點。它是每一頁都會載入的骨架；
+ #     一個放在這裡的按鈕會出現在包含 read-only 頁面在內的所有位置。
+ #   - 不得讓導航項目數量隨頁面增加。五個入口是刻意的收斂：
+ #     Run / Pipeline / Results / Status / LLM Settings。新功能要歸進其中一個，
+ #     而不是再長一個頂層項目。
+ #   - v0.1.0 新增：首版，對應 P2-2。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_navigation.py -v
+ # ------------------------------------------------------------ #}
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC-MEF · {% block title %}{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <span class="brand">PC-MEF</span>
+    <ul>
+      {% for item in nav_items %}
+      <li>
+        <a href="{{ item.href }}"
+           class="{{ 'active' if item.key == nav_active else '' }}"
+           title="{{ item.hint }}">{{ item.label }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</nav>
+
+<div class="page">
+  {% if breadcrumb %}
+  <nav class="breadcrumb" aria-label="breadcrumb">
+    {% for crumb in breadcrumb %}
+      {% if crumb.href and not loop.last %}
+        <a href="{{ crumb.href }}">{{ crumb.label }}</a>
+      {% else %}
+        <span aria-current="page">{{ crumb.label }}</span>
+      {% endif %}
+      {% if not loop.last %}<span class="sep">›</span>{% endif %}
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  {% block content %}{% endblock %}
+</div>
+
+</body>
+</html>

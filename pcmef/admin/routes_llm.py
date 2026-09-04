@@ -44,6 +44,7 @@ from flask import (
     url_for,
 )
 
+from pcmef.console.navigation import breadcrumb, nav_context
 from pcmef.admin.auth import (
     ADMIN_TOKEN_ENV,
     AdminSecurityError,
@@ -215,6 +216,8 @@ def page():
     category = session.pop("flash_category", "ok")
     return render_template(
         "llm_setup.html",
+        **nav_context("llm"),
+        breadcrumb=breadcrumb(("LLM 設定", None)),
         csrf_token=_csrf_token(),
         connections=service.connection_views(),
         bindings=service.binding_views(),

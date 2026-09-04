@@ -24,16 +24,11 @@
  # 驗證方式:
  #   - py -3.10 -m pytest tests/console/test_console_routes.py -v
  # ------------------------------------------------------------ #}
-<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PC-MEF · {{ record.run_id }}</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
-</head>
-<body>
-<div class="page">
+{% extends "_layout.html" %}
+{% block title %}執行紀錄{% endblock %}
+
+{% block content %}
+
 
   <header class="masthead">
     <h1>執行 <span class="mono">{{ record.run_id }}</span></h1>
@@ -154,7 +149,6 @@
   </section>
 
   <p class="footnote">探索用執行台 · 本次執行不產生任何 formal identity</p>
-</div>
 
 <script>
 // SSE 即時接收。約三十行原生 JavaScript —— §42 允許 minimal JS，
@@ -202,5 +196,4 @@
   };
 }());
 </script>
-</body>
-</html>
+{% endblock %}

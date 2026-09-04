@@ -144,11 +144,20 @@ def _register_console(app, run_root, audit_paths) -> None:
     app.config["PCMEF_CONSOLE_GATE_SUMMARY"] = gate_summary
     app.register_blueprint(console_blueprint)
 
-    # Formal Research Workspace（SAI v0.6.0 §19）。**唯讀** —— 它沒有任何
-    # POST 端點，因此不需要 CSRF，也不動到 _assert_not_formal() 那條線。
+    # Formal Research Workspace（SAI v0.6.0 §19）。
     from pcmef.console.formal_routes import blueprint as formal_blueprint
 
     app.register_blueprint(formal_blueprint)
+
+    # 資訊架構的另外三個主入口（SAI v0.6.0 §20）。Status 與 Pipeline 唯讀；
+    # Results 只允許刪除執行紀錄這一種管理寫入。
+    from pcmef.console.workspace_routes import (
+        pipeline_blueprint, results_blueprint, status_blueprint,
+    )
+
+    app.register_blueprint(status_blueprint)
+    app.register_blueprint(results_blueprint)
+    app.register_blueprint(pipeline_blueprint)
 
 
 def serve(

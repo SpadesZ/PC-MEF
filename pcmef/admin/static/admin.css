@@ -1,9 +1,9 @@
 /* PC-MEF Research System source maintenance contract
- * 上下游: 由 pcmef/admin/templates/llm_setup.html 以 <link> 載入；
- *         不被任何 Python 模組讀取，也不產生任何 artifact。
+ * 上下游: 由 pcmef/admin/templates/_layout.html 以 <link> 載入，
+ *         因此涵蓋所有頁面；不被任何 Python 模組讀取，也不產生 artifact。
  * 檔案路徑: pcmef/admin/static/admin.css
  * 產生時間: 2026-08-27 00:30 +08:00
- * 版本: v0.1.0
+ * 版本: v0.2.0
  * 功能說明: 管理頁面的版面與配色。白底、內容置中、最大寬度 1160px，
  *           狀態與能力用小徽章，危險操作紅色、主要操作深藍青色。
  * 模組定位: §42 視覺規則的實作。它「不是」元件庫，也不引入任何前端框架。
@@ -13,6 +13,8 @@
  *   3. .badge 系列提供 status 與 capability 的 compact 呈現
  *   4. .btn 系列以顏色區分主要操作與危險操作
  *   5. .grid / .field 提供表單欄位的兩欄排版
+ *   6. .topnav / .breadcrumb 全站導航（SAI §20）
+ *   7. ol.pipeline 七節點流程的縱向鏈結
  * 維護提醒:
  *   - 不得引入 Tailwind/Bootstrap 等外部樣式表或 CDN 連結；§42 明訂第一版
  *     採 server-rendered HTML + minimal JavaScript，不引入大型前端依賴，
@@ -54,6 +56,111 @@ body {
   background: var(--bg);
   color: var(--ink);
   font: 14px/1.55 "Segoe UI", "Noto Sans TC", system-ui, sans-serif;
+}
+
+/* 固定頂部導航（SAI §20）。五個主入口，每一個回答一個問題：
+   Run「我要跑什麼」/ Pipeline「系統怎麼跑」/ Results「跑出了什麼」/
+   Status「研究做到哪」/ LLM「provider 與 binding」。
+   收斂成五個是刻意的 —— 先前所有功能都往首頁堆，於是首頁誰都不負責。 */
+.topnav {
+  background: var(--ink);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.topnav-inner {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+.topnav .brand {
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: .6px;
+  font-size: 14px;
+  padding: 11px 0;
+  white-space: nowrap;
+}
+.topnav ul {
+  list-style: none;
+  display: flex;
+  margin: 0;
+  padding: 0;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.topnav a {
+  display: block;
+  padding: 11px 13px;
+  color: #c8d3de;
+  text-decoration: none;
+  font-size: 13.5px;
+  border-bottom: 2px solid transparent;
+}
+.topnav a:hover { color: #fff; background: rgba(255, 255, 255, .06); }
+/* 目前位置用底線而不是只換文字顏色：色弱者也分得出來。 */
+.topnav a.active {
+  color: #fff;
+  border-bottom-color: var(--accent);
+  background: rgba(255, 255, 255, .08);
+}
+
+/* breadcrumb：回答「我在哪、上一層是什麼」。最後一項不是連結。 */
+.breadcrumb {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 0 0 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.breadcrumb a { color: var(--primary); text-decoration: none; }
+.breadcrumb a:hover { text-decoration: underline; }
+.breadcrumb .sep { color: var(--line); }
+.breadcrumb [aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+/* 流程節點。用有序清單而不是畫布：七個節點是**線性**的資料流，
+   而線性關係用清單表達得比方框連線更準，也不需要任何 JavaScript。
+   左側縱線把「這是一條鏈」畫出來，最後一個節點不再往下延伸。 */
+ol.pipeline { list-style: none; margin: 0; padding: 0; }
+ol.pipeline > li {
+  position: relative;
+  padding: 0 0 22px 46px;
+  border-left: 2px solid var(--line);
+  margin-left: 15px;
+}
+ol.pipeline > li:last-child { border-left-color: transparent; padding-bottom: 0; }
+.pipeline-index {
+  position: absolute;
+  left: -16px;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+.pipeline-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.pipeline-label { font-weight: 600; font-size: 15px; }
+.pipeline-en { color: var(--muted); font-size: 12.5px; }
+ol.pipeline p { margin: 6px 0 0; }
+/* 「交給下一步什麼」是這一頁的重點，給它自己的底色。 */
+.pipeline-carries {
+  margin-top: 8px !important;
+  padding: 7px 10px;
+  background: var(--panel);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  font-size: 12.5px;
 }
 
 .page {

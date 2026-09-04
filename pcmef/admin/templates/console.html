@@ -4,89 +4,53 @@
  #         載入 pcmef/admin/static/admin.css。不發出任何對外請求。
  # 檔案路徑: pcmef/admin/templates/console.html
  # 產生時間: 2026-08-27 17:10 +08:00
- # 版本: v0.1.0
- # 功能說明: 執行台首頁。上半是三個 preset 一鍵開跑（進階參數摺疊），
- #           下半是系統狀態燈號與歷史執行紀錄。
+ # 版本: v0.3.0
+ # 功能說明: 實驗 Run 首頁。專注回答「我要跑什麼」——
+ #           三個 preset 一鍵開跑，以及正式實驗的入口。
+ #           系統狀態移至 Status、執行紀錄移至 Results（P2-2）。
  # 模組定位: §42 版型規則的延伸（白底、1000-1200px、compact badge）。
  #           它「不是」formal experiment 的入口 —— formal run 一律走 CLI。
  # 主要責任:
  #   1. Card A 三個 preset 與摺疊的進階參數
- #   2. Card B 系統狀態：E1 gate 燈號與待裁決數
+ #   2. Card B 正式實驗入口（啟動與 pre-flight 在 Formal Workspace）
  #   3. Card C 觸發 llm snapshot（可選 --freeze），准駁由 CLI 判定
- #   4. Card D 歷史執行紀錄，含搜尋、摺疊與刪除
- #   5. 以 <details> 做進階摺疊，不需要任何 JavaScript
+ #   4. 以 <details> 做進階摺疊，不需要任何 JavaScript
  # 維護提醒:
- #   - 不得加入任何啟動 formal experiment 的控制項。凍結設定與跑實驗
- #     是兩件事，runner._assert_not_formal() 的說明寫了這條線在哪。
+ #   - 不得在本頁直接啟動 formal experiment。正式實驗的啟動與 pre-flight
+ #     集中在 Formal Research Workspace，那裡的白名單只收 mode 與
+ #     confirm，零科學參數（AMD-008）。
  #   - 不得讓頁面上的文字宣稱本頁「不能產生 lock」。它能觸發凍結；
  #     真正成立的說法是「寫不寫入由 CLI 判定」，兩者不可混為一談。
  #   - 不得用 JavaScript 做摺疊；<details> 是原生元素，無腳本即可運作。
- #   - 不得把執行紀錄的表格標記複製成兩份（攤開的與摺疊的）；
- #     用 run_table macro，否則只會有一份被改到。
+ #   - v0.3.0 修訂：系統狀態移至 Status、執行紀錄移至 Results（P2-2）。
  #   - v0.2.0 修訂：新增 llm snapshot 卡片、執行紀錄的搜尋／摺疊／刪除。
  #   - v0.1.0 新增：首版。
  # 驗證方式:
  #   - py -3.10 -m pytest tests/console/test_console_routes.py -v
  # ------------------------------------------------------------ #}
-<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PC-MEF · 執行台</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
-</head>
-<body>
-{# 攤開的那幾筆與摺疊起來的那些用同一個 macro 繪製。
-   複製兩份表格標記的話，之後只會有一份被改到，而畫面上摺疊區裡的那份
-   看起來只是「舊版的樣子」，不像 bug。 #}
-{% macro run_table(rows) %}
-<table>
-  <thead>
-    <tr>
-      <th>執行編號</th><th>種類</th><th>設定</th><th>狀態</th><th>開始時間</th><th></th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for run in rows %}
-    <tr>
-      <td><a class="mono" href="{{ url_for('console.run_page', run_id=run.run_id) }}">{{ run.run_id }}</a></td>
-      <td>{{ run.kind }}</td>
-      <td class="note">{{ run.label }}</td>
-      <td>
-        <span class="badge {{ 'ok' if run.status == 'succeeded' else ('bad' if run.status == 'failed' else 'warn') }}">
-          {{ run.status }}</span>
-        {% if run.exit_code is not none %}<span class="note">exit {{ run.exit_code }}</span>{% endif %}
-      </td>
-      <td class="note">{{ run.started_at[:19] }}</td>
-      <td class="actions">
-        <form class="inline" method="post"
-              action="{{ url_for('console.delete_run', run_id=run.run_id) }}"
-              onsubmit="return confirm('刪除 {{ run.run_id }}？\n輸出、設定與產物會一起刪掉。');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="btn danger" type="submit"
-                  {% if not run.finished %}disabled{% endif %}
-                  title="{% if run.finished %}刪掉這次執行的紀錄與產物{% else %}執行中，跑完才能刪{% endif %}">刪除</button>
-        </form>
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endmacro %}
-<div class="page">
+{% extends "_layout.html" %}
+{% block title %}實驗 Run{% endblock %}
 
-  {# 這段話務必與畫面上實際做得到的事一致。2026-08-31 之前寫的是
-     「這個頁面不會、也不能產生任何 freeze/*.lock.json」，而下面就有一顆
-     「凍結」按鈕 —— 頁面自己打自己的臉，比講得含糊更糟。 #}
+{% block content %}
+
+
+  {# 這段話務必與畫面上實際做得到的事一致。它被改過兩次，兩次都是因為
+     頁面自己打自己的臉：
+       2026-08-31 前寫「不能產生任何 freeze/*.lock.json」，而下面就有凍結鈕；
+       AMD-008 前寫「正式實驗一律走 CLI」，而 Formal Workspace 已經能啟動。
+     含糊比講錯好，但講對比兩者都好。 #}
   <header class="masthead">
-    <h1>PC-MEF · 主控台</h1>
+    <h1>實驗 Run</h1>
     <p>
-      這裡跑<strong>探索用</strong>模擬、看結果，並在設定齊備時把它凍結成正式設定檔。
-      <strong>正式實驗（formal run）本身仍然一律走 CLI</strong>，這個頁面跑不了；
-      而按下「凍結」時，能不能寫入是
-      <span class="mono">pcmef llm snapshot</span> 自己判定的，不是這個頁面。
-      <a href="{{ url_for('llm_admin.page') }}">前往 LLM 設定 →</a>
+      這一頁回答「<strong>我要跑什麼</strong>」：跑探索用模擬，
+      或前往正式實驗。研究做到哪裡看
+      <a href="{{ url_for('status.page') }}">研究狀態</a>，
+      跑出了什麼看 <a href="{{ url_for('results.page') }}">結果</a>。
+    </p>
+    <p class="note">
+      本頁只跑<strong>探索用</strong>模擬。正式實驗的啟動與起跑前檢查集中在
+      <a href="{{ url_for('formal.page') }}">Formal Research Workspace</a>；
+      按鈕在那裡也只決定「跑不跑」，所有科學參數都來自已凍結的 lock。
     </p>
   </header>
 
@@ -181,23 +145,21 @@
     </div>
   </section>
 
-  {# ---------------- Card B. 系統狀態 ---------------- #}
-  <section class="card" id="system-status">
-    <h2>系統狀態<span class="hint">E1 開跑前的十二道關卡</span></h2>
+  {# ---------------- Card B. 正式實驗入口 ---------------- #}
+  <section class="card" id="formal-entry">
+    <h2>正式實驗<span class="hint">一次性；起跑前檢查與啟動都在專屬工作區</span></h2>
     <div class="body">
-      <div class="gate-grid">
-        {% for gate in gate_summary.gates %}
-        <div class="gate {{ gate.css }}" title="{{ gate.requirement }}">
-          <span class="gate-id">{{ gate.id }}</span>
-          <span class="gate-status">{{ gate.status }}</span>
-        </div>
-        {% endfor %}
-      </div>
-      <p class="note" style="margin-top:12px">
-        <strong>{{ gate_summary.counts.PASS }}</strong> 通過 ·
-        <strong>{{ gate_summary.counts.FAIL }}</strong> 不符 ·
-        <strong>{{ gate_summary.counts.NOT_PRODUCED }}</strong> 尚未產出。
-        「尚未產出」是正確狀態而非失敗 —— 稽核器刻意先於被稽核的產物存在。
+      <p class="lede">
+        Formal E2 是<strong>一次性</strong>的：跑完就是結論，不能重跑。
+        因此它的啟動與起跑前檢查集中在一處，而不是混在探索用的按鈕之間。
+      </p>
+      <p class="note">
+        那裡也提供<strong>零成本預演</strong> —— 資料生成、routing 與統計形狀
+        照跑，但完全不呼叫 provider，可以先確認整條路徑沒問題再花錢。
+      </p>
+      <p style="margin:16px 0 0">
+        <a class="btn primary" href="{{ url_for('formal.page') }}">
+          前往 Formal Research Workspace →</a>
       </p>
     </div>
   </section>
@@ -233,40 +195,10 @@
     </div>
   </section>
 
-  {# ---------------- Card D. 歷史 ---------------- #}
-  <section class="card" id="run-history">
-    <h2>執行紀錄<span class="hint">每次執行都保存了完整參數與輸出</span></h2>
-    <div class="body">
-      <form class="search-row" method="get" action="{{ url_for('console.page') }}">
-        <input name="q" value="{{ query }}" placeholder="搜尋編號、種類、標籤、狀態或參數（例如 spp=64）">
-        <button class="btn" type="submit">搜尋</button>
-        {% if query %}<a class="btn" href="{{ url_for('console.page') }}">清除</a>{% endif %}
-      </form>
-
-      {% if not runs %}
-        {% if query %}
-          <p class="empty">沒有符合「{{ query }}」的紀錄。</p>
-        {% else %}
-          <p class="empty">還沒有任何執行紀錄。用上面的按鈕跑第一次。</p>
-        {% endif %}
-      {% else %}
-        {% if query %}<p class="note">符合「{{ query }}」的紀錄共 {{ runs|length }} 筆。</p>{% endif %}
-        {{ run_table(runs[:recent_count]) }}
-        {% if runs|length > recent_count %}
-        <details class="advanced">
-          <summary>還有 {{ runs|length - recent_count }} 筆較早的紀錄</summary>
-          {{ run_table(runs[recent_count:]) }}
-        </details>
-        {% endif %}
-      {% endif %}
-    </div>
-  </section>
-
   <p class="footnote">
-    SRC-SAI v0.5.0 · formal run 一律走 CLI（§208）。本頁可觸發
-    <span class="mono">llm snapshot</span>，但寫不寫入由該指令自己判定。
+    本頁跑探索用模擬並可觸發 <span class="mono">llm snapshot</span>，
+    但寫不寫入由該指令自己判定。正式實驗在
+    <a href="{{ url_for('formal.page') }}">Formal Research Workspace</a>
+    啟動，UI 在那裡也只能決定「跑不跑」與模式（AMD-008）。
   </p>
-
-</div>
-</body>
-</html>
+{% endblock %}

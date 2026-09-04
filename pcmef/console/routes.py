@@ -37,6 +37,7 @@ from flask import Blueprint, Response, current_app, jsonify, redirect, request, 
 
 from pcmef.admin.auth import AdminSecurityError, check_csrf
 from pcmef.admin.routes_llm import ADMIN_TOKEN_HEADER, CSRF_FORM_FIELD, CSRF_SESSION_KEY
+from pcmef.console.navigation import breadcrumb, nav_context
 from pcmef.console.results import bar_chart_svg, line_chart_svg, load_results
 from pcmef.console.runner import PRESETS, FormalRunRefused, RunnerError, RunSpec
 
@@ -100,21 +101,16 @@ def page():
         token = new_csrf_token()
         session[CSRF_SESSION_KEY] = token
 
-    runner = _runner()
-    query = request.args.get("q", "").strip()
-    runs = runner.list_runs(query=query)
-    # active 一律看全部，不受搜尋影響：「有東西正在跑」不該因為使用者
-    # 剛好搜了別的關鍵字就從畫面上消失。
-    active = next((r for r in runner.list_runs() if not r.finished), None)
+    # 執行紀錄與搜尋已移到 Results（P2-2）：Run 首頁只回答「我要跑什麼」。
+    # active 仍留在這裡 —— 「有東西正在跑」是決定要不要再按一次的必要資訊。
+    active = next((r for r in _runner().list_runs() if not r.finished), None)
     return render_template(
         "console.html",
+        **nav_context("run"),
+        breadcrumb=breadcrumb(("實驗 Run", None)),
         csrf_token=token,
         presets=PRESETS,
-        runs=runs,
-        query=query,
-        recent_count=RECENT_RUN_COUNT,
         classes=current_app.config.get("PCMEF_CONSOLE_CLASSES", []),
-        gate_summary=current_app.config["PCMEF_CONSOLE_GATE_SUMMARY"](),
         active=active,
     )
 
@@ -142,6 +138,11 @@ def run_page(run_id: str):
 
     return render_template(
         "console_run.html",
+        **nav_context("results"),
+        breadcrumb=breadcrumb(
+            ("結果 Results", url_for("results.page")),
+            (run_id, None),
+        ),
         csrf_token=session.get(CSRF_SESSION_KEY, ""),
         record=record,
         bundle=bundle,

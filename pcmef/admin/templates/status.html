@@ -1,0 +1,97 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/workspace_routes.py 的 GET /status 繪製；
+ #         gate 燈號來自 audit.e1_gates，lineage 來自 core.active_lineage。
+ #         extends _layout.html。
+ # 檔案路徑: pcmef/admin/templates/status.html
+ # 產生時間: 2026-09-03 10:15 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 研究目前做到哪裡 —— E1 的十二道 gate 與 formal lock 的狀態。
+ # 模組定位: SAI v0.6.0 §20 的 Status 入口。這些內容原本堆在 Run 首頁，
+ #           讓首頁同時要回答「我要跑什麼」與「研究做到哪」兩個問題。
+ # 主要責任:
+ #   1. E1 十二道 gate 的燈號與通過數
+ #   2. active lineage 解析結果與這條路徑會讀的 lock
+ #   3. 解析不出 lineage 時明說，而不是留白
+ # 維護提醒:
+ #   - 不得在本頁加入任何寫入端點。研究狀態是被觀測的，不是在這裡改的。
+ #   - 不得自己重算 lock 狀態。一律經 active_lineage，否則畫面會顯示
+ #     與 CLI 不同的「研究進度」，而那種不一致沒有症狀。
+ #   - v0.1.0 新增：首版，對應 P2-2。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_navigation.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}研究狀態 Status{% endblock %}
+
+{% block content %}
+<header class="masthead">
+  <h1>研究狀態</h1>
+  <p>研究目前做到哪裡。本頁<strong>唯讀</strong>：狀態由稽核與 lock 決定，不在這裡設定。</p>
+</header>
+
+<section class="card">
+  <h2>E1 關卡
+    <span class="hint">
+      {% set counts = gate_summary.counts %}
+      通過 {{ counts.get('PASS', 0) }} / 共 {{ gate_summary.gates | length }}
+    </span>
+  </h2>
+  <div class="body">
+    <table>
+      <thead><tr><th>Gate</th><th>狀態</th><th>要求</th></tr></thead>
+      <tbody>
+      {% for gate in gate_summary.gates %}
+        <tr>
+          <td class="mono">{{ gate.id }}</td>
+          <td><span class="badge {{ gate.css }}">{{ gate.status }}</span></td>
+          <td class="note">{{ gate.requirement }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>正式執行身分
+    <span class="hint">lineage 是解析器，真正的身分是它解析到的目錄與雜湊</span>
+  </h2>
+  <div class="body">
+    {% if lineage.error %}
+      <p><span class="badge bad">無法解析</span> {{ lineage.error }}</p>
+      <p class="note">正式執行在這個狀態下一律拒絕啟動。</p>
+    {% else %}
+      <table>
+        <tbody>
+          <tr><th>ACTIVE_LINEAGE</th>
+              <td class="mono">{{ lineage.resolved.pointer_path }}</td></tr>
+          <tr><th>解析到</th>
+              <td class="mono"><strong>{{ lineage.resolved.resolved_freeze_dir }}</strong></td></tr>
+          <tr><th>取代</th>
+              <td class="mono">{{ lineage.resolved.supersedes | join(', ') or '—' }}</td></tr>
+          <tr><th>狀態</th>
+              <td><span class="badge ok">{{ lineage.resolved.status }}</span></td></tr>
+        </tbody>
+      </table>
+      <p class="note">{{ lineage.resolved.reason }}</p>
+
+      <details class="advanced">
+        <summary>正式執行會讀的 {{ lineage.locks | length }} 個 lock</summary>
+        <table>
+          <thead><tr><th>lock</th><th>payload hash</th></tr></thead>
+          <tbody>
+          {% for lock in lineage.locks %}
+            <tr><td>{{ lock.name }}</td><td class="mono">{{ lock.hash[:32] }}…</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </details>
+    {% endif %}
+  </div>
+</section>
+
+<p class="note">
+  正式實驗的起跑前檢查與即時狀態在
+  <a href="{{ url_for('formal.page') }}">Formal Research Workspace</a>。
+</p>
+{% endblock %}

@@ -42,6 +42,7 @@ from flask import (
 
 from pcmef.admin.auth import AdminSecurityError, check_csrf, new_csrf_token
 from pcmef.admin.routes_llm import ADMIN_TOKEN_HEADER, CSRF_FORM_FIELD, CSRF_SESSION_KEY
+from pcmef.console.navigation import breadcrumb, nav_context
 from pcmef.console.runner import (
     FORMAL_CONFIRM_PHRASE, FormalRunRefused, RunnerError, RunSpec,
 )
@@ -121,6 +122,11 @@ def page():
     )
     return render_template(
         "formal.html",
+        **nav_context("run"),
+        breadcrumb=breadcrumb(
+            ("實驗 Run", url_for("console.page")),
+            ("Formal Research Workspace", None),
+        ),
         formal=formal["preflight"],
         dry=dry["preflight"],
         report=formal["report"],

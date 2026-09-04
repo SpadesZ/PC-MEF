@@ -26,16 +26,11 @@
  # 驗證方式:
  #   - py -3.10 -m pytest tests/console/test_formal_routes.py -v
  # ------------------------------------------------------------ #}
-<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PC-MEF · 正式實驗</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
-</head>
-<body>
-<div class="page">
+{% extends "_layout.html" %}
+{% block title %}正式實驗 Formal{% endblock %}
+
+{% block content %}
+
 
   <h1>Formal Research Workspace</h1>
   <p class="lede">
@@ -326,7 +321,4 @@
     <span class="mono">pcmef formal run-e2</span> 子行程，與在終端機打完全同一條路徑。
     UI 不傳任何科學參數：lineage 由 ACTIVE_LINEAGE 解析，其餘來自已凍結的 lock。
   </p>
-
-</div>
-</body>
-</html>
+{% endblock %}
