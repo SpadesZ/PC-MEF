@@ -7,7 +7,7 @@
 #         **不重訓、不重搜門檻、不改溫度、不改 severity。**
 # 檔案路徑: pcmef/experiments/e2_formal.py
 # 產生時間: 2026-09-01 15:30 +08:00
-# 版本: v0.7.0
+# 版本: v0.8.0
 # 功能說明: Full PC-MEF 的 Formal E2 執行器。完整走已凍結的決策架構 ——
 #           frozen CNN -> frozen 溫度 -> D/U/Q 與獨立 q_v/q_t ->
 #           reliability_route -> 四個真 agent -> arbitration_support_bridge ->
@@ -26,6 +26,7 @@
 #   8. _cluster_statistics() 以 family cluster bootstrap 產出成對比較
 #   9. _worst_condition_statistics() primary endpoint 的成對 CI（AMD-009）
 #  10. emit_trace() 旁路寫出 decision trace，決策完成後才呼叫（NOTE-064）
+#  11. artifact_cache_root 接上 content-addressed cache（§48 / FR-031）
 # 維護提醒:
 #   - 不得在本檔重新擬合任何東西。門檻、溫度、anchors 一律由 lock 還原；
 #     refit 一次就等於 Formal E2 自己決定了自己的判準。
@@ -56,7 +57,13 @@
 #   - v0.4.0 新增：G4 reliability_routing 臂與其成對統計（NOTE-061）。
 #   - v0.5.0 新增：worst-condition macro-F1 點估計與 primary_endpoint（NOTE-062）。
 #   - v0.6.0 新增：primary endpoint 的成對 CI（NOTE-063 / AMD-009）。
+#   - 不得把 agent cache 當成旁路。它**會**改變是否呼叫 provider，
+#     因此讀寫失敗不得被吞掉 —— 這一點與 decision trace 正好相反
+#     （NOTE-070）。dry run 不接快取：那一模式本來就不呼叫 provider。
+#   - 不得在四個角色綁到不同 model/revision 時仍然啟用快取。cache key
+#     只有一個 provider_model_id，命中時會安靜地服務另一個模型的答案。
 #   - v0.7.0 新增：decision trace 旁路輸出（NOTE-064）。
+#   - v0.8.0 新增：content-addressed agent cache 接線（NOTE-070）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/e2/test_formal_executor.py -v
 #   - py -3.10 -m pytest tests/e2/test_execute_full_pcmef_cases.py -v
@@ -65,6 +72,7 @@
 #   - py -3.10 -m pytest tests/e2/test_worst_condition_endpoint.py -v
 #   - py -3.10 -m pytest tests/e2/test_worst_condition_bootstrap.py -v
 #   - py -3.10 -m pytest tests/e2/test_decision_trace.py -v
+#   - py -3.10 -m pytest tests/cache/test_cached_case.py -v
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -402,6 +410,7 @@ def execute_full_pcmef_cases(
     llm_mode: str = LLM_MODE_EXECUTE,
     trace_sink: Callable[[dict[str, Any]], None] | None = None,
     progress: Callable[[str], None] | None = None,
+    case_arbiter: Any = None,
 ) -> dict[str, Any]:
     """**唯一**的 Full PC-MEF 執行迴圈。逐 case 決策並回傳 F(x) 與 trace。
 
@@ -424,9 +433,23 @@ def execute_full_pcmef_cases(
     **呼叫端必須據 `skipped_escalated_cases > 0` 把 pcmef_full 整條臂排除**，
     否則那一欄會等於 fixed_fusion，看起來像「PC-MEF 沒有比固定融合好」——
     一個從未執行過的方法不該有數字（見 `run_formal_e2_full` 的處理）。
+
+    `case_arbiter` 傳入時取代預設的 `run_pcmef_case`，例如接上
+    content-addressed artifact cache。預設 None 代表完全不介入。
     """
     from pcmef.agents.pcmef_agents import RetryExhaustedError, build_case_evidence
     from pcmef.perception.pcmef_orchestrator import decide_case
+
+    def _cache_outcome(arbiter: Any) -> dict[str, Any] | None:
+        """把 arbiter 這一 case 的命中結果取出來給 trace。
+
+        用 getattr 而不是 isinstance：case_arbiter 的契約只有「同介面的
+        callable」，測試也可以傳一個裸函式進來，那時就沒有 last。
+        """
+        outcome = getattr(arbiter, "last", None)
+        if outcome is None:
+            return None
+        return {"cache_key": outcome.cache_key, "hit": outcome.hit}
 
     if llm_mode not in LLM_MODES:
         raise FormalE2Error(
@@ -492,6 +515,7 @@ def execute_full_pcmef_cases(
                 evidence=evidence,
                 agent_runner=None if skipping else agent_runner,
                 formal=formal,
+                case_arbiter=None if skipping else case_arbiter,
             )
         except RetryExhaustedError as error:
             # 明確不 drop：整場 run 中止。
@@ -527,6 +551,13 @@ def execute_full_pcmef_cases(
                             else []
                         ),
                         "dry_run": llm_mode == LLM_MODE_SKIP,
+                        # 命中時 call_log 不會有新紀錄 —— 那些角色投影根本
+                        # 沒有發生。trace 必須說是命中，而不是顯示成沒有
+                        # 呼叫過 agent（NOTE-070）。
+                        "cache": (
+                            _cache_outcome(case_arbiter)
+                            if escalated and not skipping else None
+                        ),
                     }
                 )
             except Exception as error:  # noqa: BLE001
@@ -567,6 +598,46 @@ def execute_full_pcmef_cases(
     }
 
 
+def _cache_identity_from_locks(freeze_dir: str | Path) -> Any:
+    """由 llm_runtime.lock 組出 cache 鑰匙裡與 case 無關的那幾項。
+
+    四個角色可以綁不同的 API key，但**必須指向同一個 model 與 revision**。
+    cache key 只有一個 `provider_model_id` 欄位；角色之間若真的用了不同模型，
+    同一把鑰匙就會同時代表兩套答案，而命中時不會有任何症狀。因此這裡
+    fail-closed，不取「第一個」或「多數決」。
+    """
+    from pcmef.agents.cached_case import CacheIdentity
+    from pcmef.core.locks import LockStore
+
+    store = LockStore(freeze_dir)
+    store.require("llm_runtime")
+    runtime = store.load("llm_runtime")
+    bindings = runtime.get("bindings") or {}
+    if not bindings:
+        raise FormalE2Error(
+            "llm_runtime.lock has no bindings; the agent cache key needs the "
+            "model identity and must not guess it"
+        )
+
+    identities = {
+        (str(b.get("model_id", "")), str(b.get("provider_revision", "")))
+        for b in bindings.values()
+    }
+    if len(identities) != 1:
+        raise FormalE2Error(
+            "the four roles are bound to different model/revision pairs "
+            f"({sorted(identities)}); a single agent cache key cannot represent "
+            "two different models, and a hit would silently serve the wrong one. "
+            "Multiple API keys are fine; multiple models are not."
+        )
+    model_id, revision = identities.pop()
+    return CacheIdentity(
+        model_id=model_id,
+        provider_revision=revision,
+        runtime_config_hash=str(runtime.get("runtime_config_hash", "")),
+    )
+
+
 def run_formal_e2_full(
     base_manifest_dir: str | Path,
     out_dir: str | Path,
@@ -580,6 +651,7 @@ def run_formal_e2_full(
     code_version: str = "",
     is_final_formal_e2: bool = False,
     progress: Callable[[str], None] | None = None,
+    artifact_cache_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Full PC-MEF 的 Formal E2。
 
@@ -615,6 +687,24 @@ def run_formal_e2_full(
     labels = prepared["labels"]
     p_vision, p_tof = prepared["p_vision"], prepared["p_tof"]
     signals, q, routes = prepared["signals"], prepared["q"], prepared["routes"]
+
+    # --- content-addressed agent cache（在決策路徑上，NOTE-070）------------
+    #
+    # 與 decision trace 相反：這一段**會**改變是否呼叫 provider，因此它的
+    # 錯誤不得被吞掉。cache root 沒給就完全不介入，行為與接線前相同。
+    arbiter = None
+    cache_summary: dict[str, Any] = {"enabled": False}
+    if artifact_cache_root is not None and llm_mode == LLM_MODE_EXECUTE:
+        from pcmef.agents.cache import AgentArtifactCache
+        from pcmef.agents.cached_case import CachedArbiter, CacheIdentity
+
+        binding = _cache_identity_from_locks(freeze_dir)
+        arbiter = CachedArbiter(
+            cache=AgentArtifactCache(root=artifact_cache_root),
+            identity=binding,
+        )
+        say(f"agent artifact cache at {artifact_cache_root} "
+            f"(model {binding.model_id})")
 
     # --- decision trace（旁路觀測，NOTE-064）-------------------------------
     from pcmef.experiments.decision_trace import TraceWriter, build_case_trace
@@ -668,6 +758,7 @@ def run_formal_e2_full(
                 },
                 tof_shape=tof_shape,
                 dry_run=payload["dry_run"],
+                cache=payload.get("cache"),
             )
         )
 
@@ -675,7 +766,7 @@ def run_formal_e2_full(
         executed = execute_full_pcmef_cases(
             rows, p_vision, p_tof, q, signals, routes, rule,
             agent_runner=agent_runner, formal=formal, llm_mode=llm_mode,
-            trace_sink=emit_trace, progress=say,
+            trace_sink=emit_trace, progress=say, case_arbiter=arbiter,
         )
     except BaseException as error:
         # run 中止時仍要留下已寫的 case，但 index 必須明說它不完整 ——
@@ -873,6 +964,11 @@ def run_formal_e2_full(
                 None if counter is None else dict(counter.calls_by_task)
             ),
             "provider_calls_before_first_escalation": calls_before_first_escalation,
+            # 命中不算 provider 呼叫，因此 actual_provider_calls 會低於
+            # escalated_cases * 4。少了這一段，那個落差看起來會像漏計。
+            "agent_cache": (
+                arbiter.summary() if arbiter is not None else cache_summary
+            ),
             "note": (
                 "escalated_cases counts cases that routed to the arbiter; "
                 "actual_provider_calls counts requests actually sent, which is "

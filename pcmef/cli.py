@@ -3148,6 +3148,7 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
             code_version=commit,
             is_final_formal_e2=not dry_run,
             progress=say,
+            artifact_cache_root=args.agent_cache,
         )
     except FormalE2Error as error:
         print(f"\nerror: {error}", file=sys.stderr)
@@ -4479,6 +4480,14 @@ def build_parser() -> argparse.ArgumentParser:
     formal_run.add_argument(
         "--allow-dirty", action="store_true",
         help="允許工作目錄有未提交變更（formal 模式預設拒絕）",
+    )
+    formal_run.add_argument(
+        "--agent-cache", default=None, metavar="DIR",
+        help=(
+            "content-addressed agent artifact cache 的根目錄。同一份證據配同一組"
+            "模型/prompt/schema/runtime 只問一次；中斷後 resume 不會重複付費。"
+            "不指定就完全不使用快取。dry-run 下無效（本來就不呼叫 provider）。"
+        ),
     )
     formal_run.set_defaults(func=cmd_formal_run_e2)
 

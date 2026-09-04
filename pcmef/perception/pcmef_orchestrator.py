@@ -4,7 +4,7 @@
 #         不做任何 I/O，不讀 dataset。
 # 檔案路徑: pcmef/perception/pcmef_orchestrator.py
 # 產生時間: 2026-09-01 03:10 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: Full PC-MEF 的最終決策路徑。把「要不要問 LLM」與「問完之後怎麼算」
 #           收斂成一個具名函式，公式不散落在 runner 裡。
 # 模組定位: selective_escalation_bridge_v1 的唯一執行入口。
@@ -15,6 +15,7 @@
 #   2. formal 模式拒絕 deterministic substitute，非 formal 才允許
 #   3. non-escalated 保證 **零次** provider 呼叫
 #   4. 回傳的 trace 記下 route、e(x)、是否呼叫 LLM、s_A 與 F
+#   5. case_arbiter 讓呼叫端替換仲裁執行方式（例如接上 artifact cache）
 # 維護提醒:
 #   - 不得在 formal 模式讓 deterministic arbiter 頂替 LLM。那會讓
 #     「PC-MEF 的 LLM 臂」在報告上成立而實際從未執行（gate_rule.json 的
@@ -23,6 +24,10 @@
 #     論點就是「傳統證據足夠就不叫 LLM」，多叫一次就推翻了那個論點。
 #   - 不得把 fusion_weight 當成 agent weight；它是 Vision<->ToF 的權重。
 #   - 不得把 s_A 當 calibrated posterior 報 NLL/ECE（NOTE-049）。
+#   - 不得在本檔判斷快取命中與否。case_arbiter 是一個同介面的 callable，
+#     決定「什麼時候該問模型」的邏輯只能有一處；在這裡再加一個 if，
+#     兩處判斷遲早會分岔（NOTE-070）。
+#   - v0.2.0 新增：case_arbiter 接縫，對應 P3-1。
 #   - v0.1.0 新增：首版 orchestrator，決策見 NOTE-049。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/unit/test_pcmef_orchestrator.py -v
@@ -94,11 +99,16 @@ def decide_case(
     agent_runner: Any = None,
     formal: bool = True,
     fallback_arbiter: Callable[..., np.ndarray] | None = None,
+    case_arbiter: Callable[[Any, Mapping[str, Any]], Any] | None = None,
 ) -> CaseDecision:
     """回傳 F(x)，並保證「非 escalated 不呼叫 LLM」。
 
     formal=True 時 escalated case **必須**有真正的 agent runner；沒有就中止。
     fallback_arbiter 只在 formal=False 時可用，供 pilot/診斷重現舊行為。
+
+    `case_arbiter` 預設為 `run_pcmef_case`。content-addressed cache 由呼叫端
+    包成同介面的 callable 傳進來，本函式因此不需要知道有沒有快取 ——
+    也就不會有第二處決定「什麼時候該問模型」。
     """
     e = escalation_indicator(route)
 
@@ -133,7 +143,7 @@ def decide_case(
             raise FormalArbiterRequired(
                 "an escalated case needs its evidence payload to run the agents"
             )
-        bundle = run_pcmef_case(agent_runner, evidence)
+        bundle = (case_arbiter or run_pcmef_case)(agent_runner, evidence)
         s_a = arbitration_support_bridge(bundle.artifacts["arbitration_validated"])
         attempts = [a.ok for a in getattr(agent_runner, "attempts", [])]
 

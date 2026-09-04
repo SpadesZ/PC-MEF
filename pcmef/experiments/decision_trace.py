@@ -209,6 +209,7 @@ def build_case_trace(
     rgb_preview: Mapping[str, Any] | None,
     tof_shape: Sequence[int] | None,
     dry_run: bool,
+    cache: Mapping[str, Any] | None = None,
 ) -> CaseTrace:
     """把一個 case 的決策過程組成 CaseTrace。**純資料轉換，不做決策。**"""
     labels = list(class_order)
@@ -239,6 +240,25 @@ def build_case_trace(
             ),
             "artifacts": [],
         }
+    elif cache is not None and cache.get("hit"):
+        # 命中時四次角色投影根本沒有發生，call_log 因此是空的。照原樣渲染
+        # 會顯示成「escalated 但沒有呼叫過任何角色」—— 那看起來像 bug。
+        # cache 依 §48 只存六份 artifact，不存 role-projected payload，
+        # 所以這裡誠實地說 payload 在原本那次 run（NOTE-070）。
+        agent_execution = {
+            "invoked": True,
+            "reason": "cache_hit",
+            "cache_key": cache.get("cache_key"),
+            "note": (
+                "Served from the content-addressed agent cache: the same "
+                "evidence, model, prompts, schema and runtime were already "
+                "answered, so no provider call was made. The per-role payloads "
+                "were not re-projected and therefore are not recorded here; "
+                "they belong to the run that first produced this cache key."
+            ),
+            "artifacts": [call.to_json() for call in agent_calls],
+            "n_roles": len(agent_calls),
+        }
     else:
         agent_execution = {
             "invoked": True,
@@ -246,6 +266,10 @@ def build_case_trace(
             "artifacts": [call.to_json() for call in agent_calls],
             "n_roles": len(agent_calls),
         }
+        if cache is not None:
+            # 未命中也要記 key：下一次 resume 靠它認出這一筆已經問過。
+            agent_execution["cache_key"] = cache.get("cache_key")
+            agent_execution["cache_hit"] = False
 
     return CaseTrace(
         case_id=case_id,

@@ -324,6 +324,61 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-070 Agent cache 接上正式路徑：它在決策路徑上，不是旁路
+
+**決策日期**：2026-09-04（P3-1，SRC-SAI §48 / FR-031 / LLM-RESUME-01）
+
+**適用範圍**：`pcmef/agents/cached_case.py`（新增）；
+`pcmef/perception/pcmef_orchestrator.py` 的 `case_arbiter` 參數；
+`pcmef/experiments/e2_formal.py` 的 `artifact_cache_root`；
+CLI `pcmef formal run-e2 --agent-cache`。
+
+**決策**：把早就存在但沒有任何 production 呼叫者的兩塊接起來 ——
+`AgentArtifactCache`（`agents/cache.py`）與 `case_cache_key`
+（`pcmef_agents.py`）。接線點是 `decide_case(case_arbiter=...)`：一個與
+`run_pcmef_case` 同介面的 callable。未指定 cache root 時完全不介入。
+
+**原因**：分四點。
+
+**其一，接縫放在 callable 而不是 if**。`decide_case` 不需要知道有沒有快取
+這回事；決定「什麼時候該問模型」的邏輯只能有一處。在 orchestrator 內再加
+一個 `if cache and cache.get(...)`，就會有兩處判斷，而它們遲早分岔。
+命中不呼叫 producer 這件事由 `AgentArtifactCache.resolve()` 保證，
+不是由接線層的一個條件式保證。
+
+**其二，這一層在決策路徑上，與 decision trace 相反**。trace 是旁路，寫失敗
+只損失可讀性，因此例外一律吞掉（NOTE-064）。快取**會改變是否呼叫
+provider**，所以讀寫失敗不得被吞。半套的目錄與對不上的 manifest 一律視為
+未命中並重新呼叫 —— 服務一份錯的答案，比多花一次錢嚴重得多。
+
+**其三，四個角色必須綁同一個 model 與 revision**。cache key 只有一個
+`provider_model_id` 欄位。角色之間若真的用了不同模型，同一把鑰匙就同時代表
+兩套答案，而命中時不會有任何症狀。因此 `_cache_identity_from_locks()` 在
+`llm_runtime.lock` 的 bindings 不一致時 fail-closed，不取第一個也不做多數決。
+多把 API key 沒問題，多個模型不行。
+
+**其四，命中時 trace 不得看起來像沒有呼叫過 agent**。命中時四次角色投影
+根本沒有發生，`AgentRunner.call_log` 因此是空的。照原樣渲染會顯示成
+「escalated 但 n_roles = 0」，那看起來像 bug。§48 固定六份 artifact 且
+**不含** role-projected payload，所以不能從快取補出那些投影 —— 誠實的做法是
+標成 `reason: "cache_hit"`、附上 cache_key，並說明那些 payload 屬於最初
+產生這把鑰匙的那次 run。未命中也記 key：下一次 resume 靠它認出這一筆問過。
+
+`routing.agent_cache` 進報告，因為命中不計入 `actual_provider_calls`，
+少了這一段，`actual_provider_calls < escalated_cases * 4` 的落差看起來像漏計。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/cache/test_cached_case.py -v
+py -3.10 -m pcmef.cli regression verify
+```
+13 項通過。關鍵一項：同一批 case 跑第二次，`CountingAdapter.calls == 0`。
+七要素分層以 model_id / provider_revision / runtime_config_hash 三項各自
+改動驗證，改動後必須重問 8 次。預設（不給 cache root）行為與接線前相同，
+regression snapshot 仍為 IDENTICAL。
+
+---
+
 ## NOTE-069 論文圖不截軸，且同一份 report 產兩次要逐 byte 相同
 
 **決策日期**：2026-09-04（P2-6，FR-020 thesis-ready figure）
