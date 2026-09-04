@@ -28,6 +28,20 @@
       {% else %}
         <p class="note">{{ execution.reason }}</p>
       {% endif %}
+    {% elif execution.reason == 'cache_hit' %}
+      {# 命中時四次角色投影根本沒有發生，因此這裡沒有隔離矩陣可畫。
+         連到快取項目本身，讓人看得到當初存下來的六份 artifact。 #}
+      <p class="lede">
+        <span class="badge ok">命中快取</span>
+        本筆 provider 呼叫 <strong>0</strong> 次
+      </p>
+      <p class="note">{{ execution.note }}</p>
+      <p>
+        <a class="btn" href="{{ url_for('console.cache_entry_page',
+                                        cache_key=execution.cache_key) }}">
+          查看這把鑰匙存下的六份 artifact</a>
+      </p>
+      <p class="note mono">{{ execution.cache_key }}</p>
     {% else %}
       <p class="lede">
         <span class="badge ok">已執行</span>

@@ -324,6 +324,63 @@ py -3.10 -m pcmef.cli locks status
 
 ---
 
+## NOTE-071 用量收集了卻沒寫出；thinking token 不入帳會低估 3.6 倍
+
+**決策日期**：2026-09-04（P3-2 / P3-3）
+
+**適用範圍**：`pcmef/experiments/e2_formal.py` 的 `_token_usage()` 與報告的
+`token_usage` 欄位；`pcmef/console/run_view.py` 的 `cost_view()` 與
+`cache_entry_view()`；`_run_cost.html`、`cache_entry.html`；
+`navigation.RUN_SECTIONS` 增為七個分頁。
+
+**決策**：把 `CountingAdapter` 逐角色累計的 token 用量寫進 formal report，
+並在 run 底下新增 Cost 分頁。thinking token 單獨列，計價基準是
+`billable_output_tokens = completion + thoughts`。快取項目由
+`/console/cache/<key>` 瀏覽。
+
+**原因**：分四點。
+
+**其一，資料一直在收集卻從來沒有寫出**。`CountingAdapter.usage_by_task`
+逐角色累計 prompt / completion / thoughts，`usage_totals()` 也早就存在，
+但 `e2_formal.py` 從未把它放進報告 —— 只有 `e2_executor_validation.py` 與
+`throughput_ladder.py` 用到。結果是一場正式執行跑完，沒有任何地方記得它
+花了多少。這不是新功能，是把已經量到的東西寫下來。
+
+**其二，thinking token 必須單獨列**。Google 明訂 thinking 併入 output 計費，
+卻不放進 `candidatesTokenCount`。只讀 candidates 會漏掉這一塊：實測
+thinking 佔計費 output 的 **72%**，換算成低估倍率約 **3.6 倍**。畫面因此
+同時顯示 completion 與 thinking 兩欄，並把低估倍率直接印出來 ——
+一個倍率比一句「記得算 thinking」有用得多。
+
+**其三，「沒有量到」不得顯示成 $0**。三種情況都沒有金額可報：dry run 真的
+沒呼叫、沒有安裝 CountingAdapter、以及 2026-09-04 之前的舊報告（量了沒寫出）。
+這三種都不是「花了零元」，因此 `cost_view()` 回 `available: False` 並說明
+是哪一種。費率另有到期日，過期後畫面上會標示促銷價已失效。
+
+費率從 `experiments/e2_cost.py` 的 `PRICING` 匯入，不在 console 另寫一份。
+兩份費率分岔時，畫面上的金額看起來仍然完全正常 —— 那是最不會被發現的一種錯。
+
+**其四，Cost 是第七個 run 分頁，不是第六個頂層入口**。頂層五個入口是刻意的
+收斂（NOTE-065），不得因為新功能再加。成本是某一次執行的屬性，因此排在
+Outputs 之後、Artifacts 之前：它是那份輸出的代價，屬於結果的一部分，
+不是檔案清單。
+
+**快取瀏覽頁不掛在 run 底下**：快取以內容定址，刻意與 case 身分無關，
+同一把鑰匙可能同時是好幾次 run 的來源；掛進單一 run 會暗示它專屬於那次。
+`cache_key` 來自 URL 且直接組成目錄名，因此限制成 64 位十六進位。
+六份缺一時明說不完整 —— §48 規定缺一即不算命中，顯示成可用會讓人以為
+不必再付費，實際執行時卻仍然重問。頁面沒有刪除入口：快取項目是某次執行的
+證據，清除應該是明確的維運動作。
+
+**驗證**：
+```
+py -3.10 -m pytest tests/console/test_cost_and_cache_browser.py -v
+```
+23 項通過。畫面在 1280 px 下以一次真實 run 檢視：七個分頁、Cost 三張卡、
+逐角色依花費排序（arbitration 最貴）、thinking 佔 72% 與低估 3.57 倍都有顯示、快取頁六份 artifact 依 §48 順序、頁面無任何表單或按鈕、無水平溢出。
+
+---
+
 ## NOTE-070 Agent cache 接上正式路徑：它在決策路徑上，不是旁路
 
 **決策日期**：2026-09-04（P3-1，SRC-SAI §48 / FR-031 / LLM-RESUME-01）

@@ -93,16 +93,19 @@ class RunSection:
     answers: str
 
 
-#: 進入一次 run 之後的六個分頁（SAI v0.6.0 §20 第二層）。
+#: 進入一次 run 之後的七個分頁（SAI v0.6.0 §20 第二層）。
 #:
 #: 順序照資料流：先看整體，再看決策過程，然後才是輸入、中間值、輸出。
-#: Artifacts 放最後 —— 它是「檔案在哪」，不是「發生了什麼」。
+#: Cost 排在 Outputs 之後、Artifacts 之前 —— 它是那份輸出的代價，
+#: 屬於結果的一部分，不是檔案清單。Artifacts 放最後，它回答的是
+#: 「檔案在哪」而不是「發生了什麼」。
 RUN_SECTIONS: tuple[RunSection, ...] = (
     RunSection("overview", "總覽 Overview", "這次執行整體發生了什麼？"),
     RunSection("trace", "流程追蹤 Trace", "每一筆是怎麼被判斷的？"),
     RunSection("inputs", "輸入 Inputs", "餵進去的是什麼？"),
     RunSection("intermediate", "中間結果 Intermediate", "中途產生了什麼？"),
     RunSection("outputs", "輸出 Outputs", "得到什麼結論？"),
+    RunSection("cost", "用量與成本 Cost", "這次花了多少？"),
     RunSection("artifacts", "Artifacts", "檔案落在哪裡？"),
 )
 

@@ -1,0 +1,118 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/routes.py 的 cache_entry_page 繪製；內容來自
+ #         artifacts/agents/<cache_key>/ 的六份 artifact 與 manifest。
+ # 檔案路徑: pcmef/admin/templates/cache_entry.html
+ # 產生時間: 2026-09-04 19:20 +08:00
+ # 版本: v0.1.0
+ # 功能說明: content-addressed agent cache 裡一把鑰匙的完整內容。
+ # 模組定位: SAI v0.6.0 §48 的瀏覽面。**唯讀** ——
+ #           快取內容是既成事實，這裡不得提供刪除或重寫的入口。
+ # 主要責任:
+ #   1. 顯示鑰匙的七個組成要素，說明什麼情況會產生另一把鑰匙
+ #   2. 依 §48 的順序列出六份 artifact
+ #   3. 六份缺一時明說不完整，不得顯示成可用
+ # 維護提醒:
+ #   - 不得在本頁加入刪除按鈕。快取項目是某次 run 的證據；要清除
+ #     應該是明確的維運動作，不是瀏覽時順手一點。
+ #   - 不得把六份缺一的目錄顯示成可用。§48 規定缺一即不算命中，
+ #     顯示成可用會讓人以為不必再付費，實際執行時卻仍然重問。
+ #   - v0.1.0 新增：首版，對應 P3-2。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_cache_browser.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}Agent cache {{ entry.cache_key[:12] }}{% endblock %}
+
+{% block content %}
+
+<header class="masthead">
+  <h1>Agent cache
+    <span class="badge {{ 'ok' if entry.complete else 'bad' }}">
+      {{ '六份齊全' if entry.complete else '不完整' }}</span>
+  </h1>
+  <p class="mono">{{ entry.cache_key }}</p>
+  <p>
+    以內容定址：同一份證據配同一組模型、prompt、schema 與 runtime 設定，
+    就是同一把鑰匙。它<strong>刻意與 case 身分無關</strong> ——
+    因此同一把鑰匙可能同時是好幾次執行的來源。
+  </p>
+</header>
+
+{% if not entry.complete %}
+<div class="flash bad">
+  這個目錄缺了部分 artifact。§48 規定六份缺一即不算命中，
+  因此下一次執行仍會重新呼叫 provider —— 這不是可用的快取項目。
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>鑰匙的組成
+    <span class="hint">任一項不同，就是另一把鑰匙</span>
+  </h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>cache_key</th>
+            <td class="mono" colspan="3">{{ entry.manifest.get('cache_key', '—') }}</td></tr>
+        <tr><th>目錄</th>
+            <td class="mono" colspan="3">{{ entry.folder }}</td></tr>
+        {% if entry.manifest.get('provider_request_id') %}
+        <tr><th>provider request</th>
+            <td class="mono">{{ entry.manifest.get('provider_request_id') }}</td>
+            <th>latency</th>
+            <td class="mono">{{ entry.manifest.get('latency_ms', '—') }} ms</td></tr>
+        {% endif %}
+        {% if entry.manifest.get('token_usage') is not none %}
+        <tr><th>token usage</th>
+            <td class="mono" colspan="3">{{ entry.manifest.get('token_usage') }}</td></tr>
+        {% endif %}
+        {% if entry.manifest.get('created_at') %}
+        <tr><th>寫入時間</th>
+            <td class="mono" colspan="3">{{ entry.manifest.get('created_at') }}</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    <p class="note">
+      鑰匙由七項串接而成：evidence hash、representation mode、model id、
+      provider revision、四份 prompt 的 hash、schema hash、runtime config hash。
+      換模型、改 prompt、改 schema 或改 runtime 設定，都會得到另一把鑰匙
+      而必須重問 —— 這正是它不會在換版之後沿用舊答案的原因。
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>六份 artifact
+    <span class="hint">順序即 §48 Cache Contract 1 的順序</span>
+  </h2>
+  <div class="body">
+    {% for artifact in entry.artifacts %}
+    <details class="advanced role-detail">
+      <summary>
+        <span class="mono">{{ artifact.name }}</span>
+        <span class="note">
+          {% if artifact.present %}
+            {{ artifact.body | length }} bytes
+          {% else %}
+            缺席
+          {% endif %}
+        </span>
+      </summary>
+      {% if artifact.present %}
+        <pre>{{ artifact.body }}</pre>
+      {% else %}
+        <p class="note">
+          這一份不在目錄裡。半套的目錄不算命中 ——
+          沿用它會讓一次中斷的執行悄悄變成完整結果。
+        </p>
+      {% endif %}
+    </details>
+    {% endfor %}
+  </div>
+</section>
+
+<p class="note">
+  本頁唯讀。快取項目是某次執行的證據，清除它應該是明確的維運動作，
+  不是瀏覽時順手一點。
+</p>
+{% endblock %}

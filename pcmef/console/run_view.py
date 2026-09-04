@@ -3,7 +3,7 @@
 #         run.json、artifacts/ 與 artifacts/trace/。**唯讀，不寫入。**
 # 檔案路徑: pcmef/console/run_view.py
 # 產生時間: 2026-09-03 12:10 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 把一次 run 的目錄整理成六個分頁各自需要的內容，
 #           並判斷哪些分頁對這次 run 真的有東西。
 # 模組定位: SAI v0.6.0 §20 第二層的資料層。它「不是」決策路徑的一部分 ——
@@ -15,6 +15,8 @@
 #   4. 沒有內容時回傳「為什麼沒有」，而不是空字典
 #   5. agent_isolation() 由實際 payload 算角色隔離矩陣
 #   6. support_chain() 還原 s_A 的形成過程
+#   7. cost_view() 逐角色 token 用量與據 PRICING 換算的成本
+#   8. cache_entry_view() 讀 content-addressed cache 的六份 artifact
 # 維護提醒:
 #   - 不得在讀不到檔時拋例外。一次 sim_smoke 本來就沒有 trace，
 #     那是正常狀態而不是錯誤；分頁要說明原因，不是顯示 500。
@@ -23,6 +25,11 @@
 #   - agent_isolation() 必須只讀 input_payload。改成查
 #     ROLE_EVIDENCE_CONTRACT 就失去意義 —— 那會變成契約自我證明，
 #     而契約與實作不一致正是它要抓的東西（NOTE-067）。
+#   - 不得在 cost_view 內另寫一份費率。定價由 experiments.e2_cost.PRICING
+#     匯入；兩份費率分岔時，畫面上的金額看起來仍然很正常（NOTE-071）。
+#   - 不得把「沒有量到用量」顯示成 $0。dry run 真的沒呼叫，舊報告則是
+#     量了卻沒寫出 —— 兩者都不是「花了零元」。
+#   - v0.3.0 新增：cost_view / cache_entry_view，對應 P3-2 與 P3-3。
 #   - v0.2.0 新增：agent_isolation / support_chain，對應 P2-5。
 #   - v0.1.0 新增：首版，對應 P2-4。
 # 驗證方式:
@@ -42,6 +49,8 @@ __all__ = [
     "case_view",
     "case_neighbours",
     "agents_view",
+    "cost_view",
+    "cache_entry_view",
     "agent_isolation",
     "role_detail",
     "support_chain",
@@ -91,6 +100,9 @@ def availability(run_dir: Path, kind: str) -> dict[str, bool]:
             list(artifacts.glob("*/dataset_manifest.json"))
         ),
         "outputs": report is not None,
+        # 有報告就顯示 Cost，即使它量到的是「沒有呼叫過」——
+        # 那本身就是 dry run 的重要事實，藏起來反而看不出零成本預演跑過。
+        "cost": report is not None,
         "artifacts": True,
     }
 
@@ -301,6 +313,119 @@ def support_chain(artifacts: Sequence[Mapping[str, Any]],
         "s_a": keyed,
         "eps_shift": shift,
         "conflict_tag": validated.get("conflict_tag"),
+    }
+
+
+#: §48 Cache Contract 1 的六份 artifact，順序即目錄樹的順序。
+#: 從 agents.cache 匯入而不是重打一份 —— 重打的那份哪天與 §48 不一致，
+#: 瀏覽器會安靜地漏掉一份 artifact 並顯示成「這個 key 不完整」。
+def _artifact_names() -> tuple[str, ...]:
+    from pcmef.agents.cache import AGENT_ARTIFACT_NAMES
+
+    return AGENT_ARTIFACT_NAMES
+
+
+def cache_entry_view(cache_root: Path, cache_key: str) -> dict[str, Any] | None:
+    """content-addressed cache 裡某一把鑰匙的六份 artifact 與 manifest。
+
+    `cache_key` 來自 URL，因此必須是純十六進位的 64 字元 —— 目錄名直接由它
+    組成，不限制就是一條讀取任意目錄的路徑。
+    """
+    key = str(cache_key)
+    if len(key) != 64 or not all(c in "0123456789abcdef" for c in key.lower()):
+        return None
+    folder = Path(cache_root) / key
+    manifest = _read_json(folder / "manifest.json")
+    if manifest is None:
+        return None
+
+    artifacts = []
+    for name in _artifact_names():
+        payload = _read_json(folder / f"{name}.json")
+        artifacts.append({
+            "name": name,
+            "present": payload is not None,
+            "body": json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                    if payload is not None else "",
+        })
+    return {
+        "cache_key": key,
+        "folder": str(folder),
+        "manifest": manifest,
+        "artifacts": artifacts,
+        # 六份缺一即不算命中（§48）。半套目錄要看得出來，否則使用者會以為
+        # 這把鑰匙可用，而執行時卻仍然重問。
+        "complete": all(a["present"] for a in artifacts),
+    }
+
+
+def cost_view(run_dir: Path, kind: str) -> dict[str, Any]:
+    """這次執行的 token 用量與據此換算的成本。
+
+    定價由 `experiments.e2_cost.PRICING` 匯入而不是在這裡重寫一份。
+    兩份費率遲早會分岔，而分岔時畫面上的金額看起來仍然很正常。
+    """
+    report = _read_json(run_dir / "artifacts" / "formal_e2_report.json") or \
+        _read_json(run_dir / "artifacts" / "formal_e2_dry_run.json")
+    if report is None:
+        return {"available": False,
+                "reason": "這次執行沒有產生 formal report，因此沒有用量紀錄。"}
+
+    usage = report.get("token_usage") or {}
+    if not usage.get("measured"):
+        return {
+            "available": False,
+            # 「沒有量到」與「花了 0 元」必須分得出來。dry run 真的沒有呼叫，
+            # 舊報告則是量了卻沒寫出 —— 兩者都不該顯示成 $0。
+            "reason": usage.get("reason") or (
+                "這份報告沒有 token_usage 欄位。dry run 不呼叫 provider，"
+                "而 2026-09-04 之前的報告則是量了卻沒有寫出（NOTE-071）。"
+            ),
+            "dry_run": bool(report.get("dry_run")),
+        }
+
+    from pcmef.experiments.e2_cost import PRICING
+
+    totals = usage.get("totals") or {}
+    billable = int(totals.get("billable_output_tokens", 0))
+    prompt = int(totals.get("prompt_tokens", 0))
+    completion = int(totals.get("completion_tokens", 0))
+    thoughts = int(totals.get("thoughts_tokens", 0))
+
+    input_usd = prompt / 1e6 * PRICING["input_usd_per_1m"]
+    output_usd = billable / 1e6 * PRICING["output_usd_per_1m"]
+
+    rows = []
+    for role, bucket in (usage.get("by_role") or {}).items():
+        role_billable = int(bucket.get("completion_tokens", 0)) + \
+            int(bucket.get("thoughts_tokens", 0))
+        rows.append({
+            "role": role,
+            "calls": int(bucket.get("calls", 0)),
+            "prompt_tokens": int(bucket.get("prompt_tokens", 0)),
+            "completion_tokens": int(bucket.get("completion_tokens", 0)),
+            "thoughts_tokens": int(bucket.get("thoughts_tokens", 0)),
+            "billable_output_tokens": role_billable,
+            "usd": (int(bucket.get("prompt_tokens", 0)) / 1e6
+                    * PRICING["input_usd_per_1m"]
+                    + role_billable / 1e6 * PRICING["output_usd_per_1m"]),
+        })
+    rows.sort(key=lambda r: r["usd"], reverse=True)
+
+    return {
+        "available": True,
+        "pricing": PRICING,
+        "rows": rows,
+        "totals": totals,
+        # 只讀 candidatesTokenCount 會低估多少倍。這個比值是「不要只看
+        # completion」的量化理由，比一句提醒有用。
+        "thinking_share": (thoughts / billable) if billable else None,
+        "underestimate_factor": (billable / completion) if completion else None,
+        "input_usd": input_usd,
+        "output_usd": output_usd,
+        "total_usd": input_usd + output_usd,
+        "agent_cache": (report.get("routing") or {}).get("agent_cache") or
+                       {"enabled": False},
     }
 
 

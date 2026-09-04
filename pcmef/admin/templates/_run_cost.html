@@ -1,0 +1,130 @@
+{# 由 console_run.html 於 section=cost 時 include。
+   回答「這次花了多少」。thinking token 單獨列 —— 它照 output 計費卻不在
+   candidatesTokenCount 裡，只讀 completion 會低估實際帳單。唯讀。 #}
+
+{% if not cost.available %}
+  <section class="card">
+    <h2>用量與成本</h2>
+    <div class="body">
+      <p><span class="badge warn">沒有量到用量</span></p>
+      <p class="note">{{ cost.reason }}</p>
+      <p class="note">
+        「沒有量到」與「花了 0 元」是兩件事。這裡不顯示金額，
+        是因為沒有觀測值可據，而不是因為觀測值是零。
+      </p>
+    </div>
+  </section>
+{% else %}
+
+<section class="card">
+  <h2>總計
+    <span class="hint">依 {{ cost.pricing.model }} 的公告費率換算</span>
+  </h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>實際請求數</th>
+            <td>{{ cost.totals.get('calls', 0) }}</td>
+            <th>input tokens</th>
+            <td class="mono">{{ '{:,}'.format(cost.totals.get('prompt_tokens', 0)) }}</td></tr>
+        <tr><th>completion tokens</th>
+            <td class="mono">{{ '{:,}'.format(cost.totals.get('completion_tokens', 0)) }}</td>
+            <th>thinking tokens</th>
+            <td class="mono">{{ '{:,}'.format(cost.totals.get('thoughts_tokens', 0)) }}</td></tr>
+        <tr><th>計費 output</th>
+            <td class="mono"><strong>{{ '{:,}'.format(cost.totals.get('billable_output_tokens', 0)) }}</strong></td>
+            <th>合計</th>
+            <td class="mono"><strong>US$ {{ '%.4f' | format(cost.total_usd) }}</strong></td></tr>
+      </tbody>
+    </table>
+
+    {% if cost.underestimate_factor %}
+    <p class="lede" style="margin-top:14px">
+      <span class="badge warn">只看 completion 會低估
+        {{ '%.2f' | format(cost.underestimate_factor) }} 倍</span>
+    </p>
+    <p class="note">
+      thinking token 佔計費 output 的
+      <strong>{{ '%.0f' | format(cost.thinking_share * 100) }}%</strong>。
+      它照 output 計價，卻不出現在 <span class="mono">candidatesTokenCount</span> 裡 ——
+      只讀 candidates 估出來的金額會少掉這一塊。上表的「計費 output」
+      已經是 completion + thinking。
+    </p>
+    {% endif %}
+
+    <p class="note">
+      input US$ {{ '%.4f' | format(cost.input_usd) }} ·
+      output US$ {{ '%.4f' | format(cost.output_usd) }} ·
+      費率 {{ cost.pricing.input_usd_per_1m }} / {{ cost.pricing.output_usd_per_1m }}
+      USD 每 1M tokens
+    </p>
+    <p class="note">
+      <span class="badge warn">促銷價</span>
+      有效期至 {{ cost.pricing.effective_until }}。
+      過期之後這一頁的金額不再可信 —— {{ cost.pricing.note }}
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>逐角色
+    <span class="hint">依花費排序，不是依呼叫順序</span>
+  </h2>
+  <div class="body">
+    <table>
+      <thead>
+        <tr><th>角色</th><th>請求</th><th>input</th><th>completion</th>
+            <th>thinking</th><th>計費 output</th><th>USD</th></tr>
+      </thead>
+      <tbody>
+      {% for row in cost.rows %}
+        <tr>
+          <td class="mono">{{ row.role }}</td>
+          <td>{{ row.calls }}</td>
+          <td class="mono">{{ '{:,}'.format(row.prompt_tokens) }}</td>
+          <td class="mono">{{ '{:,}'.format(row.completion_tokens) }}</td>
+          <td class="mono">{{ '{:,}'.format(row.thoughts_tokens) }}</td>
+          <td class="mono">{{ '{:,}'.format(row.billable_output_tokens) }}</td>
+          <td class="mono">{{ '%.4f' | format(row.usd) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="note">
+      一個 escalated case 會產生四次請求，retry 會再加。
+      非 escalated 的 case 依定義為零次 —— 它們的 evidence payload 從未組裝。
+    </p>
+  </div>
+</section>
+
+{% if cost.agent_cache.get('enabled') %}
+<section class="card">
+  <h2>快取
+    <span class="hint">命中的部分沒有付費</span>
+  </h2>
+  <div class="body">
+    <table>
+      <tbody>
+        <tr><th>命中 / 未命中</th>
+            <td>{{ cost.agent_cache.get('hits', 0) }} / {{ cost.agent_cache.get('misses', 0) }}</td>
+            <th>命中率</th>
+            <td class="mono">
+              {{ '%.1f%%' | format(cost.agent_cache.get('hit_rate') * 100)
+                 if cost.agent_cache.get('hit_rate') is not none else '—' }}</td></tr>
+        <tr><th>model</th>
+            <td class="mono">{{ cost.agent_cache.get('model_id', '—') }}</td>
+            <th>revision</th>
+            <td class="mono">{{ cost.agent_cache.get('provider_revision', '—') }}</td></tr>
+        <tr><th>cache root</th>
+            <td class="mono" colspan="3">{{ cost.agent_cache.get('cache_root', '—') }}</td></tr>
+      </tbody>
+    </table>
+    <p class="note">
+      命中不算 provider 呼叫，因此上面的請求數會低於
+      escalated case 數 × 4。那個落差是省下來的錢，不是漏計。
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% endif %}

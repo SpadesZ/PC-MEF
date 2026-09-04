@@ -598,6 +598,36 @@ def execute_full_pcmef_cases(
     }
 
 
+def _token_usage(counter: Any) -> dict[str, Any]:
+    """逐角色與總計的 token 用量，供成本核算。
+
+    `thoughts_tokens` **單獨列**而不是併進 completion。Google 明訂 thinking
+    併入 output 計費，卻不放在 `candidatesTokenCount` 裡；只讀 candidates 會
+    低估實際計費 output（實測差距達 3.59 倍）。因此另外給一個
+    `billable_output_tokens = completion + thoughts` 當計價基準。
+    """
+    if counter is None:
+        return {
+            "measured": False,
+            "reason": (
+                "no CountingAdapter was installed, so nothing observed the "
+                "provider responses; usage is unknown rather than zero"
+            ),
+            "by_role": {}, "totals": {},
+        }
+    return {
+        "measured": True,
+        "by_role": {role: dict(bucket)
+                    for role, bucket in sorted(counter.usage_by_task.items())},
+        "totals": counter.usage_totals(),
+        "note": (
+            "thoughts_tokens are billed as output but are absent from "
+            "candidatesTokenCount; billable_output_tokens = completion + "
+            "thoughts is the figure to price against."
+        ),
+    }
+
+
 def _cache_identity_from_locks(freeze_dir: str | Path) -> Any:
     """由 llm_runtime.lock 組出 cache 鑰匙裡與 case 無關的那幾項。
 
@@ -976,6 +1006,9 @@ def run_formal_e2_full(
                 "zero calls by construction: their evidence payload is never built."
             ),
         },
+        # CountingAdapter 一直在逐角色累計用量，但先前沒有任何地方把它寫出來 ——
+        # 收集了卻丟掉，等於整場正式執行結束後沒有人知道花了多少（NOTE-071）。
+        "token_usage": _token_usage(counter),
         "results": results,
         "per_condition": per_condition,
         # 實驗計畫 v1.2 §5 的 primary robustness metric。

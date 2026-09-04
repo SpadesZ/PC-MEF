@@ -41,6 +41,10 @@ from pcmef.console.navigation import breadcrumb, nav_context
 from pcmef.console.results import bar_chart_svg, line_chart_svg, load_results
 from pcmef.console.runner import PRESETS, FormalRunRefused, RunnerError, RunSpec
 
+#: agent cache 的預設根目錄。與 agents.cache.DEFAULT_CACHE_ROOT 同源 ——
+#: 在這裡另寫一個字面路徑，改了那邊之後瀏覽器會安靜地看向空目錄。
+from pcmef.agents.cache import DEFAULT_CACHE_ROOT
+
 __all__ = ["blueprint"]
 
 blueprint = Blueprint("console", __name__)
@@ -172,6 +176,8 @@ def run_page(run_id: str, section: str = "overview"):
         context["intermediate"] = run_view.intermediate_view(run_dir)
     elif section == "outputs":
         context["outputs"] = run_view.outputs_view(run_dir)
+    elif section == "cost":
+        context["cost"] = run_view.cost_view(run_dir, record.kind)
     else:
         context["artifacts"] = run_view.artifacts_view(run_dir)
 
@@ -225,6 +231,34 @@ def case_page(run_id: str, case_id: str):
         # 的 artifacts 是空的，這時給 None 讓樣板說明原因，而不是渲染一張
         # 全部 absent 的表 —— 那看起來會像隔離失敗，而不是沒有發生。
         agents=run_view.agents_view(trace),
+    )
+
+
+@blueprint.get("/console/cache/<cache_key>")
+def cache_entry_page(cache_key: str):
+    """content-addressed cache 裡一把鑰匙的六份 artifact（SAI §48）。**唯讀。**
+
+    快取以內容定址，刻意與 case 身分無關 —— 因此這一頁不掛在某個 run 底下。
+    同一把鑰匙可能同時是好幾次 run 的來源，掛進單一 run 會暗示它專屬於那次。
+    """
+    from flask import abort, render_template, request
+
+    from pcmef.console import run_view
+
+    root = Path(request.args.get("root") or DEFAULT_CACHE_ROOT)
+    entry = run_view.cache_entry_view(root, cache_key)
+    if entry is None:
+        abort(404)
+
+    return render_template(
+        "cache_entry.html",
+        **nav_context("results"),
+        breadcrumb=breadcrumb(
+            ("結果 Results", url_for("results.page")),
+            ("Agent cache", None),
+            (cache_key[:12], None),
+        ),
+        entry=entry,
     )
 
 
