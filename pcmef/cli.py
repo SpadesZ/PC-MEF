@@ -3054,6 +3054,9 @@ def _formal_preflight(args: argparse.Namespace) -> dict[str, Any]:
     return preflight(
         mode=args.mode, base=args.base, out=args.out,
         lineage_root=args.lineage_root,
+        # pre-flight 必須知道這是不是一次 resume，否則 INTERRUPTED 的 claim
+        # 會在這裡被擋掉，而 `reserve(resume=True)` 永遠到不了（NOTE-086）。
+        resume=bool(getattr(args, "resume", False)),
     )
 
 
@@ -3079,6 +3082,7 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     就又多了一條需要各自驗證的路徑。
     """
     import subprocess
+    import uuid
     from datetime import datetime, timezone
 
     from pcmef.experiments.e2_formal import (
@@ -3160,9 +3164,17 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
             # dry run 需要自己的 run_id，否則第二次預演會覆蓋第一次的
             # trace 與 stress（NOTE-078）。formal 不需要 —— 它只有一個
             # root，而那個 root 由 claim 保護。
+            # 自動 run_id 帶隨機尾碼。只有秒級時間戳的話，同一秒內啟動的
+            # 兩次預演會拿到同一個目錄，而那正是 run-specific root 要防的
+            # 事 —— 分母對了，目錄還是撞在一起（NOTE-088）。
             run_id=(
-                getattr(args, "run_id", None)
-                or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+                (
+                    getattr(args, "run_id", None)
+                    or (
+                        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+                        + "-" + uuid.uuid4().hex[:8]
+                    )
+                )
                 if dry_run else None
             ),
             # formal 一律取 claim。一次性由狀態機保證，不由檔案存在推論。
@@ -3199,6 +3211,45 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
             else f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}"
         )
     print("\n  worst-condition macro-F1 is the primary robustness endpoint")
+    return 0
+
+
+def cmd_formal_reclaim(args: argparse.Namespace) -> int:
+    """把一個卡住的 RUNNING / RESERVED claim 標回可 resume。
+
+    存在的理由：`RUNNING` 同時擋掉 fresh restart 與 resume。持有它的行程
+    若被 kill -9 或整台機器斷電，那份 claim 就永遠卡著，而唯一的出路會變成
+    「人工刪掉 claim 檔」—— 也就是把 one-shot 的保護整個丟掉。這個指令是
+    那條出路的受控版本：狀態只推到 INTERRUPTED_RESUMABLE，claim_id 與
+    identity 都保留，後續仍然只能以相同 identity 接續（NOTE-085）。
+    """
+    from pcmef.experiments.e2_formal import run_artifact_root
+    from pcmef.experiments.run_claim import ClaimError, read_claim, reclaim_stale
+
+    root = run_artifact_root(args.out, dry_run=False)
+    before = read_claim(root)
+    if before is None:
+        print(f"no Formal E2 claim at {root.as_posix()}", file=sys.stderr)
+        return 2
+
+    print(f"  claim    {before.get('claim_id')}")
+    print(f"  state    {before.get('state')}")
+    print(f"  held by  pid {before.get('pid')} @ {before.get('host')}")
+    print(f"  since    {before.get('started_at') or before.get('reserved_at')}")
+
+    try:
+        after = reclaim_stale(root, force=args.force, reason=args.reason)
+    except ClaimError as error:
+        print(f"\nerror: {error}", file=sys.stderr)
+        return 2
+
+    print(f"\n  -> {after['state']}")
+    print(f"  automatic  {after['reclaimed']['automatic']}")
+    print(f"  forced     {after['reclaimed']['forced']}")
+    print(
+        "\n  claim_id 與 identity 都保留：接續必須用相同的 lineage、資料與\n"
+        "  code revision，`pcmef formal run-e2 --mode formal --resume`。"
+    )
     return 0
 
 
@@ -4505,6 +4556,10 @@ def build_parser() -> argparse.ArgumentParser:
         "preflight", help="只跑起跑前檢查，不執行任何 case"
     )
     _add_formal_arguments(formal_preflight)
+    formal_preflight.add_argument(
+        "--resume", action="store_true",
+        help="以「接續一次中斷的執行」的語意檢查。與 run-e2 --resume 同一組判準。",
+    )
     formal_preflight.set_defaults(func=cmd_formal_preflight)
 
     formal_run = formal_sub.add_parser(
@@ -4538,6 +4593,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     formal_run.set_defaults(func=cmd_formal_run_e2)
+
+    formal_reclaim = formal_sub.add_parser(
+        "reclaim",
+        help="把卡住的 RUNNING/RESERVED claim 標回可 resume（不刪 claim）",
+    )
+    formal_reclaim.add_argument("--out", default="outputs/perception/e2_final")
+    formal_reclaim.add_argument(
+        "--force", action="store_true",
+        help=(
+            "持有者仍在、跨機器、或無法判斷時仍要回收。會記進 claim 的 "
+            "reclaimed 欄位，之後任何人都看得到這次人工回收。"
+        ),
+    )
+    formal_reclaim.add_argument(
+        "--reason", default="", help="為什麼確定那次執行已經死亡",
+    )
+    formal_reclaim.set_defaults(func=cmd_formal_reclaim)
 
     figures_parser = subparsers.add_parser("figures", help="論文用圖")
     figures_sub = figures_parser.add_subparsers(

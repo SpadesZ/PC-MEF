@@ -113,7 +113,7 @@ def test_an_empty_breakdown_is_refused():
 def test_the_report_carries_the_endpoint_and_its_definition():
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert '"worst_condition_macro_f1": worst_condition' in source
     assert '"worst_condition_at": worst_condition_at' in source
     assert '"primary_endpoint"' in source
@@ -127,6 +127,6 @@ def test_the_endpoint_is_derived_not_recomputed():
     另外算一次就有兩個可能不一致的來源，而不一致時沒有任何症狀。
     """
     source = inspect.getsource(
-        __import__("pcmef.experiments.e2_formal", fromlist=["x"]).run_formal_e2_full
+        __import__("pcmef.experiments.e2_formal", fromlist=["x"])._execute_formal_e2
     )
     assert "worst_condition_macro_f1(per_condition)" in source

@@ -182,12 +182,18 @@ def _llm_runtime_refrozen(ctx: Mapping[str, Any]) -> tuple[bool, str]:
     )
 
 
-def _formal_config_refrozen(ctx: Mapping[str, Any]) -> tuple[bool, str]:
+def _formal_config_matches_llm_runtime(ctx: Mapping[str, Any]) -> tuple[bool, str]:
     """`formal_config.lock` 引用的 llm_runtime 必須是現行那一份。
 
-    formal_config 以 `agent.llm_runtime_hash` 交叉引用 llm_runtime。
-    llm_runtime 重凍之後 formal_config 沒跟著重凍，那個引用就指向一份
-    已經不存在的身分 —— 而它不會有任何症狀。
+    **這一項只回答交叉引用是否一致，不回答「是否已重凍」。** 兩者不同：
+    一份舊的 formal_config 引用一份同樣舊的 llm_runtime，交叉引用是一致的，
+    但兩份都還沒重凍。先前這一項叫 `formal_config_refrozen` 並在那種情況下
+    顯示 PASS，於是 Status 上會出現「formal_config 已重凍」——一句假話
+    （NOTE-090）。
+
+    因此它**依賴第五項**：llm_runtime 尚未重凍時，這一項一律 FAIL，
+    理由寫明「上游未完成」。llm_runtime 重凍之後，它才回答自己該回答的
+    那個問題。
     """
     from pcmef.core.locks import LockStore
 
@@ -195,16 +201,26 @@ def _formal_config_refrozen(ctx: Mapping[str, Any]) -> tuple[bool, str]:
     for name in ("formal_config", "llm_runtime"):
         if not store.exists(name):
             return False, f"{name}.lock 不存在"
+
+    upstream_ok, upstream_detail = _llm_runtime_refrozen(ctx)
     referenced = str(
         ((store.load("formal_config") or {}).get("agent") or {}).get(
             "llm_runtime_hash", ""
         )
     )
     actual = store.load_hash("llm_runtime")
-    return referenced == actual, (
+    consistent = referenced == actual
+    detail = (
         f"formal_config.agent.llm_runtime_hash={referenced[:16] or '<absent>'} "
         f"llm_runtime={actual[:16]}"
+        + ("（交叉引用一致）" if consistent else "（交叉引用不一致）")
     )
+    if not upstream_ok:
+        return False, (
+            detail + f"；但 llm_runtime 本身尚未重凍（{upstream_detail[:80]}）"
+            "，因此這一份引用的是一組尚未通過驗證的 runtime"
+        )
+    return consistent, detail
 
 
 def _canonical_baseline(ctx: Mapping[str, Any]) -> tuple[bool, str]:
@@ -224,7 +240,51 @@ def _canonical_baseline(ctx: Mapping[str, Any]) -> tuple[bool, str]:
             f"{path.as_posix()} 的 canonical=false；尚有 {len(blockers)} 條 "
             "canonical_blocker 未解除"
         )
-    return True, f"{path.as_posix()} canonical=true"
+
+    # `canonical: true` 只是一個布林。一份**舊 lineage** 的快照、或一個
+    # 手寫的 `{"canonical": true}`，都會通過那一條 —— 而 Golden Baseline
+    # 的意義正是「這組行為對應這一組凍結身分」。沒有綁身分的 baseline
+    # 不是 baseline，是一句宣稱（NOTE-089）。
+    from pcmef.core.locks import LockStore
+
+    store = LockStore(ctx["freeze_dir"])
+    recorded = document.get("frozen_lock_hashes") or {}
+    if not recorded:
+        return False, (
+            f"{path.as_posix()} 宣稱 canonical=true 但沒有記錄 "
+            "frozen_lock_hashes —— 無法證明它對應哪一組凍結身分"
+        )
+
+    mismatched = []
+    for name, digest in sorted(recorded.items()):
+        if not store.exists(name):
+            mismatched.append(f"{name}（lineage 沒有這份 lock）")
+            continue
+        actual = store.load_hash(name)
+        if actual != digest:
+            mismatched.append(f"{name} {str(digest)[:12]}≠{actual[:12]}")
+    if mismatched:
+        return False, (
+            f"{path.as_posix()} 的 canonical=true，但它綁的是**另一組** lock："
+            + "；".join(mismatched[:4])
+            + (f"（共 {len(mismatched)} 項不符）" if len(mismatched) > 4 else "")
+        )
+
+    # 快照也必須說得出它是在哪一份 runtime 與哪一個 code revision 下取的。
+    missing = [
+        field for field in ("runtime_identity", "code_revision")
+        if not document.get(field)
+    ]
+    if missing:
+        return False, (
+            f"{path.as_posix()} canonical=true 且 lock 相符，但缺少 "
+            + "、".join(missing)
+            + " —— baseline 必須綁得住 runtime 與程式碼身分"
+        )
+    return True, (
+        f"{path.as_posix()} canonical=true，{len(recorded)} 份 lock 與現行 "
+        f"lineage 相符，code {str(document.get('code_revision'))[:12]}"
+    )
 
 
 def _final_manifest(ctx: Mapping[str, Any]) -> tuple[bool, str]:
@@ -284,9 +344,11 @@ FINAL_E2_PRECONDITIONS: tuple[dict[str, Any], ...] = (
         "why": "lock 記的 runtime identity 必須就是通過驗證的那一組。",
     },
     {
-        "key": "formal_config_refrozen",
-        "label": "formal_config 已重凍",
-        "check": _formal_config_refrozen,
+        # 名稱刻意不是 `formal_config_refrozen`：這一項驗的是「引用的是不是
+        # 現行那一份 llm_runtime」，而兩份都還沒重凍時那個引用也會一致。
+        "key": "formal_config_matches_current_llm_runtime",
+        "label": "formal_config 對得上現行 llm_runtime",
+        "check": _formal_config_matches_llm_runtime,
         "why": "formal_config 交叉引用 llm_runtime；後者重凍前者必須跟上。",
     },
     {

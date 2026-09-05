@@ -211,7 +211,7 @@ def test_finalise_failure_does_not_fail_the_run():
     """
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     finalise_at = source.index("writer.finalise()")
     window = source[finalise_at - 400:finalise_at + 400]
     assert "try:" in window
@@ -222,7 +222,7 @@ def test_emit_trace_records_the_failure_before_re_raising():
     """單筆失敗要先記進 writer 再往外拋，否則分母對不上時說不出是哪一列。"""
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert "writer.record_failure(index, case_id, error)" in source
 
 
@@ -238,7 +238,7 @@ def test_the_executor_still_swallows_trace_exceptions():
 def test_expected_cases_is_the_row_count():
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert "expected_cases=len(rows)" in source
 
 
@@ -250,7 +250,7 @@ def test_completeness_is_written_into_the_report_itself():
     """
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     trace_block = source.index('document["trace"] = {')
     write_at = source.index('(out / filename).write_text')
     assert trace_block < write_at, (

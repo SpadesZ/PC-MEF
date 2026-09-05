@@ -238,7 +238,12 @@ def trace_view(
     if route:
         cases = [c for c in cases if str(c.get("route")) == route]
 
-    correct = sum(1 for c in cases if c.get("correct"))
+    # 預演的 escalated 列停在仲裁邊界，那一列的 correct 來自填位值。
+    # 把它算進正確率，畫面上的百分比就有一部分不是任何方法的表現
+    # （NOTE-091）。分母只取真的跑過的列，並把排除掉幾列說出來。
+    dry = bool(index.get("dry_run"))
+    executed = [c for c in cases if not (dry and c.get("escalated"))]
+    correct = sum(1 for c in executed if c.get("correct"))
     written = len(index.get("cases", []))
     expected = index.get("expected_cases")
     failed = list(index.get("failed_trace_cases") or [])
@@ -270,7 +275,9 @@ def trace_view(
         "shown": min(len(cases), limit),
         "filtered": len(cases),
         "correct": correct,
-        "accuracy": (correct / len(cases)) if cases else None,
+        "scored": len(executed),
+        "excluded_unexecuted": len(cases) - len(executed),
+        "accuracy": (correct / len(executed)) if executed else None,
         "conditions": conditions,
         "routes": routes,
         "condition": condition,

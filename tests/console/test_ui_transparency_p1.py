@@ -100,7 +100,7 @@ def test_dry_run_non_escalated_keeps_g5():
 def test_the_executor_records_all_five_arms():
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     for arm in ("vision_only", "tof_only", "fixed_fusion",
                 "reliability_routing", "pcmef_full"):
         assert f'"{arm}":' in source, arm

@@ -281,6 +281,12 @@ th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--lin
 .table-scroll { overflow-x: auto; max-width: 100%; }
 .table-scroll > table { min-width: max-content; }
 
+/* ToF 的 mini trace。內聯 SVG，零 script —— 要回答的只是「這條通道長
+   什麼形狀」，那不需要圖表函式庫。currentColor 讓它跟著文字色走。 */
+.sparkline { width: 110px; height: 24px; display: block; color: var(--muted); }
+.tof-channels th { white-space: nowrap; }
+.tof-channels td { vertical-align: middle; }
+
 /* 資料一覽。auto-fill 而不是固定欄數：同一份標記在 1024 與 1920 下都不會
    有半排空格或橫向溢位，也不需要 media query。 */
 .gallery {

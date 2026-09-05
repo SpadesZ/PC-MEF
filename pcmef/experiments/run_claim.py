@@ -56,6 +56,7 @@ __all__ = [
     "mark_running",
     "mark_complete",
     "mark_interrupted",
+    "reclaim_stale",
     "read_claim",
     "claim_path",
 ]
@@ -145,15 +146,59 @@ def read_claim(formal_root: str | Path) -> dict[str, Any] | None:
 def _write(path: Path, document: Mapping[str, Any]) -> None:
     """原子性覆寫既有 claim：先寫暫存再 replace。
 
-    只用於**推進**既有 claim。建立 claim 走 `_create_exclusive()`，
-    那一條不能用 replace —— replace 會蓋掉別人的 claim。
+    **只在已經贏得 CAS token 之後呼叫。** 單獨用它推進 claim 是
+    read-then-write，兩個行程可以同時讀到同一個狀態再各自覆寫。
     """
-    staging = path.with_suffix(".json.partial")
+    staging = path.with_suffix(f".json.{os.getpid()}.partial")
     staging.write_text(
         json.dumps(dict(document), ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     os.replace(staging, path)
+
+
+def _revision_token(path: Path, revision: int) -> Path:
+    """推進到某個 revision 的權杖檔名。"""
+    return path.parent / f".{path.name}.rev{revision}"
+
+
+def _cas_advance(
+    path: Path, expected_revision: int, document: Mapping[str, Any]
+) -> dict[str, Any]:
+    """把 claim 從 `expected_revision` 推進到 +1。**恰好一個行程會成功。**
+
+    作法是為目標 revision 建立一個 O_EXCL 的權杖檔。同一個 revision 的
+    權杖只能被建立一次，因此「我讀到 revision N，我要寫 N+1」這件事被
+    序列化了 —— 而序列化的是作業系統，不是呼叫端的自律。
+
+    為什麼不用 lock 檔：lock 需要生命週期管理，持有者在臨界區內死掉就會
+    留下一把沒有人會釋放的鎖，而那正是這個模組最不該有的東西（一次性
+    實驗被一個孤兒鎖擋住，只能人工刪檔，而人工刪檔正是我們要禁止的）。
+    權杖只增不減，沒有釋放這個動作，因此沒有孤兒。
+
+    副作用是權杖檔會累積 —— 一次 run 幾個，而且它們本身就是 lifecycle
+    的稽核痕跡：看得到這份 claim 被推進過幾次。
+    """
+    target = expected_revision + 1
+    token = _revision_token(path, target)
+    try:
+        handle = os.open(token, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise ClaimError(
+            f"lost the race to advance the Formal E2 claim to revision {target}: "
+            f"another request already took it ({token.name}). Only one may win."
+        ) from None
+    try:
+        os.write(handle, json.dumps({
+            "revision": target, "pid": os.getpid(), "host": socket.gethostname(),
+            "at": _now(), "state": document.get("state"),
+        }, sort_keys=True).encode("utf-8"))
+    finally:
+        os.close(handle)
+
+    updated = {**dict(document), "revision": target}
+    _write(path, updated)
+    return updated
 
 
 def _create_exclusive(path: Path, document: Mapping[str, Any]) -> None:
@@ -242,6 +287,9 @@ def reserve(
                     "experiment; a changed lineage, dataset or code revision is "
                     "a different one and must not inherit the claim."
                 )
+            # CAS，不是 read-then-write：兩個行程可以同時讀到同一份
+            # INTERRUPTED，各自算出 resume_count+1，然後各自覆寫 ——
+            # 兩個都會以為自己接手了那場實驗（NOTE-084）。
             document = dict(existing)
             document.update(
                 state=STATE_RESERVED,
@@ -250,8 +298,7 @@ def reserve(
                 pid=os.getpid(),
                 host=socket.gethostname(),
             )
-            _write(path, document)
-            return document
+            return _cas_advance(path, int(existing.get("revision", 0)), document)
         raise ClaimError(
             f"Formal E2 claim at {path.as_posix()} is in an unusable state "
             f"{state!r}: {existing.get('error', '')}. Refusing to start; a claim "
@@ -262,6 +309,9 @@ def reserve(
         "schema_version": CLAIM_SCHEMA_VERSION,
         "state": STATE_RESERVED,
         "claim_id": os.urandom(8).hex(),
+        # 單調遞增。每一次狀態推進都必須贏得 revision+1 的權杖，
+        # 因此「我讀到的就是我要改的那一份」由檔案系統保證。
+        "revision": 0,
         "identity": {**identity.to_json(), "digest": identity.digest()},
         "reserved_at": _now(),
         "started_at": None,
@@ -290,7 +340,7 @@ def _advance(
     formal_root: str | Path, claim_id: str, expected: tuple[str, ...],
     **changes: Any,
 ) -> dict[str, Any]:
-    """推進既有 claim。claim_id 與現況都必須對得上。"""
+    """推進既有 claim。claim_id 與現況都必須對得上，且走 CAS。"""
     root = Path(formal_root)
     existing = read_claim(root)
     if existing is None:
@@ -310,8 +360,107 @@ def _advance(
         )
     document = dict(existing)
     document.update(changes)
-    _write(claim_path(root), document)
-    return document
+    return _cas_advance(
+        claim_path(root), int(existing.get("revision", 0)), document
+    )
+
+
+# ---------------------------------------------------------------------------
+# stale RUNNING 的回收
+# ---------------------------------------------------------------------------
+
+
+def _process_alive(pid: int) -> bool | None:
+    """那個 pid 還在嗎。無法判斷時回 None（**不是** False）。
+
+    分不出「已經死了」與「我不知道」是這一段最危險的錯誤：把不知道當成
+    死了，就會把一個還在跑的正式執行判成可回收。
+    """
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # 存在但不屬於我們。存在就夠了。
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def reclaim_stale(
+    formal_root: str | Path,
+    *,
+    force: bool = False,
+    reason: str = "",
+) -> dict[str, Any]:
+    """把一個卡住的 RUNNING / RESERVED claim 標回可 resume。
+
+    存在的理由：`RUNNING` 同時擋掉 fresh restart 與 resume。持有它的行程
+    若被 kill -9 或整台機器斷電，那份 claim 就永遠卡著 —— 而唯一的出路
+    會變成「人工刪掉 claim 檔」，也就是把 one-shot 的保護整個丟掉。
+    這個函式是那條出路的**受控**版本：它只把狀態推到
+    INTERRUPTED_RESUMABLE，claim_id 與 identity 都保留，因此後續仍然只能
+    以相同 identity 接續（NOTE-085）。
+
+    判準：
+      * 同一台機器且 pid 已不存在 → 自動判定 stale
+      * 其餘情況（跨機器、pid 仍在、無法判斷）→ 需要 `force=True` 並附理由
+
+    `force` 不是後門：它記進 claim 的 `reclaimed` 欄位，之後任何人都看得到
+    這份 claim 曾經被人工回收、由誰、為什麼。
+    """
+    root = Path(formal_root)
+    existing = read_claim(root)
+    if existing is None:
+        raise ClaimError(f"no Formal E2 claim at {claim_path(root).as_posix()}")
+
+    state = str(existing.get("state", ""))
+    if state not in (STATE_RESERVED, STATE_RUNNING):
+        raise ClaimError(
+            f"claim is {state!r}, not a stuck run. Reclaiming only applies to "
+            f"{STATE_RESERVED} or {STATE_RUNNING}."
+        )
+
+    same_host = str(existing.get("host", "")) == socket.gethostname()
+    alive = _process_alive(int(existing.get("pid") or 0))
+    automatic = same_host and alive is False
+
+    if not automatic and not force:
+        raise ClaimError(
+            f"refusing to reclaim: claim {existing.get('claim_id')} is {state} "
+            f"held by pid {existing.get('pid')} on {existing.get('host')} "
+            f"(same_host={same_host}, process_alive={alive}). It may still be "
+            "running. Confirm the run is really dead, then pass force=True with "
+            "a reason. Do not delete the claim file: that would discard the "
+            "one-shot protection entirely."
+        )
+
+    document = dict(existing)
+    document.update(
+        state=STATE_INTERRUPTED,
+        interrupted_at=_now(),
+        reason=(
+            f"reclaimed from {state}: "
+            + (reason or ("holder process is gone" if automatic else "forced"))
+        )[:400],
+        reclaimed={
+            "at": _now(),
+            "automatic": automatic,
+            "forced": bool(force and not automatic),
+            "previous_state": state,
+            "previous_pid": existing.get("pid"),
+            "previous_host": existing.get("host"),
+            "by_pid": os.getpid(),
+            "by_host": socket.gethostname(),
+            "reason": reason[:400],
+        },
+    )
+    return _cas_advance(
+        claim_path(root), int(existing.get("revision", 0)), document
+    )
 
 
 def mark_running(formal_root: str | Path, claim_id: str) -> dict[str, Any]:

@@ -91,12 +91,18 @@ def test_the_executor_writes_everything_under_one_root():
     """
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     # out 由 run_artifact_root 決定，而不是直接用傳進來的 out_dir。
     assert "out = run_artifact_root(canonical_out" in source
-    # stress 與 trace 都吃那個 out。
-    assert "prepare_cases(\n            base_manifest_dir, stack, out," in source
-    assert "TraceWriter(\n        out," in source
+
+    # stress、trace 與 report 都吃那個 out。
+    #
+    # 用正規化過的空白比對，不綁縮排：先前這裡寫死了「12 個空格」的版本，
+    # 於是把一層 try 拿掉就會失敗 —— 而那與「產物是不是落在同一個 root」
+    # 完全無關。
+    flat = " ".join(source.split())
+    assert "prepare_cases( base_manifest_dir, stack, out," in flat
+    assert "TraceWriter( out," in flat
     assert "(out / filename).write_text" in source
 
 
@@ -104,7 +110,7 @@ def test_the_report_records_its_own_root():
     """報告要說得出自己的產物在哪 —— 否則「同屬一次 run」無法被查證。"""
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert '"artifact_root": out.as_posix()' in source
     assert '"canonical_out": canonical_out.as_posix()' in source
 

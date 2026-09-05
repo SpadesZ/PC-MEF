@@ -55,7 +55,8 @@ def test_all_eight_are_evaluated(tmp_path):
     assert len(FINAL_E2_PRECONDITIONS) == 8
     assert set(_by_key(results)) == {
         "amd007_real_provider_validation", "amd007_frozen", "amd008_frozen",
-        "amd009_frozen", "llm_runtime_refrozen", "formal_config_refrozen",
+        "amd009_frozen", "llm_runtime_refrozen",
+        "formal_config_matches_current_llm_runtime",
         "canonical_golden_baseline", "final_partition_manifest",
     }
 
@@ -176,10 +177,92 @@ def test_provisional_snapshot_is_not_golden(tmp_path):
     assert result["passed"] is False
     assert "canonical=false" in result["detail"]
 
+
+def test_a_bare_canonical_flag_is_not_a_baseline(tmp_path):
+    """`{"canonical": true}` 不足以通過。
+
+    Golden Baseline 的意義是「這組行為對應**這一組**凍結身分」。一個沒有
+    綁身分的布林不是 baseline，是一句宣稱 —— 手寫一行就能通過的閘門，
+    在最需要它的時候不會擋任何東西（NOTE-089）。
+    """
+    snapshot = tmp_path / "snap.json"
     snapshot.write_text(json.dumps({"canonical": True}), encoding="utf-8")
-    assert _by_key(evaluate(tmp_path, snapshot_path=snapshot))[
+    result = _by_key(evaluate(tmp_path, snapshot_path=snapshot))[
+        "canonical_golden_baseline"
+    ]
+    assert result["passed"] is False
+    assert "frozen_lock_hashes" in result["detail"]
+
+
+def test_a_baseline_from_another_lineage_is_refused(tmp_path):
+    """快照綁的 lock 必須是**現行** lineage 的那一組。"""
+    from pcmef.core.active_lineage import resolve_active_lineage
+    from pcmef.core.locks import LockStore
+
+    resolved = resolve_active_lineage("freeze")
+    store = LockStore(resolved.freeze_dir)
+    snapshot = tmp_path / "snap.json"
+
+    # 換掉其中一個 hash —— 代表這份 baseline 取自另一組 lock。
+    stale = {"gate": "0" * 64}
+    snapshot.write_text(
+        json.dumps({
+            "canonical": True, "frozen_lock_hashes": stale,
+            "runtime_identity": {"model_id": "x"}, "code_revision": "d" * 40,
+        }),
+        encoding="utf-8",
+    )
+    result = _by_key(evaluate(resolved.freeze_dir, snapshot_path=snapshot))[
+        "canonical_golden_baseline"
+    ]
+    assert result["passed"] is False
+    assert "另一組" in result["detail"]
+
+    # 綁對 lock 但缺 runtime / code 身分 —— 仍然不夠。
+    snapshot.write_text(
+        json.dumps({
+            "canonical": True,
+            "frozen_lock_hashes": {"gate": store.load_hash("gate")},
+        }),
+        encoding="utf-8",
+    )
+    partial = _by_key(evaluate(resolved.freeze_dir, snapshot_path=snapshot))[
+        "canonical_golden_baseline"
+    ]
+    assert partial["passed"] is False
+    assert "runtime_identity" in partial["detail"]
+
+    # 三者齊全才通過。
+    snapshot.write_text(
+        json.dumps({
+            "canonical": True,
+            "frozen_lock_hashes": {"gate": store.load_hash("gate")},
+            "runtime_identity": {"model_id": "x"},
+            "code_revision": "d" * 40,
+        }),
+        encoding="utf-8",
+    )
+    assert _by_key(evaluate(resolved.freeze_dir, snapshot_path=snapshot))[
         "canonical_golden_baseline"
     ]["passed"]
+
+
+def test_formal_config_does_not_pass_while_llm_runtime_is_stale():
+    """兩份都還沒重凍時，交叉引用一致**不算**通過。
+
+    先前這一項叫 `formal_config_refrozen` 且在那種情況下顯示 PASS ——
+    Status 上會出現「formal_config 已重凍」，而那是一句假話（NOTE-090）。
+    """
+    from pcmef.core.active_lineage import resolve_active_lineage
+
+    results = _by_key(evaluate(resolve_active_lineage("freeze").freeze_dir))
+    upstream = results["llm_runtime_refrozen"]
+    downstream = results["formal_config_matches_current_llm_runtime"]
+    assert upstream["passed"] is False
+    assert downstream["passed"] is False, (
+        "llm_runtime 尚未重凍時，formal_config 這一項不得 PASS"
+    )
+    assert "尚未重凍" in downstream["detail"]
 
 
 def test_the_final_manifest_must_match_the_locked_identity(tmp_path):

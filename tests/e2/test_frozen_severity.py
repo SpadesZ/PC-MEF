@@ -196,7 +196,7 @@ def test_report_records_a_named_source_not_a_slogan():
     """
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert '"severity_source": severity_provenance' in source
     assert "resolve_severity(freeze_dir, severity)" in source
 

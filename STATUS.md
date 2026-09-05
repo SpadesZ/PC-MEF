@@ -3,7 +3,118 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-09-05（第二輪）
+最後更新：2026-09-05（第三輪）
+
+---
+
+## Formal lifecycle 收斂（2026-09-05 第三輪，NOTE-084~092）
+
+**families 36-43 全程未生成、未讀取、未預覽、未掃描。
+`regression verify` = IDENTICAL，`FINAL_E2_36_43_TOUCHED = NO`。
+full suite failure set 與整改前逐項相同（13 項既有失敗，0 新增）。**
+
+第二輪建立了 claim 狀態機與八項閘門。這一輪修的是那兩樣東西自己留下的洞。
+
+### P0-1 `--resume` 是一條到不了的路
+
+CLI 先跑 pre-flight，而 pre-flight 對 `INTERRUPTED_RESUMABLE` 一律 FAIL ——
+於是 `reserve(resume=True)` **沒有任何呼叫得到它的機會**。旗標存在、文件
+寫了、程式碼在那裡，而那條路徑永遠不會被執行。
+
+`preflight(resume=...)` 現在認得四種情況：
+
+| claim 現況 | fresh | `--resume` |
+|---|---|---|
+| 無 | PASS | PASS（並說明沒有可接續的執行） |
+| INTERRUPTED_RESUMABLE | BLOCK | **PASS** |
+| RESERVED / RUNNING | BLOCK（指向 `formal reclaim`） | BLOCK |
+| COMPLETE / CORRUPT | BLOCK | BLOCK |
+
+identity 仍然只由 claim layer 驗證。pre-flight 刻意不重複那一段：兩份實作
+遲早漂移，而漂移時 pre-flight 那一份會是比較寬鬆的 —— 它先跑，於是它放行
+的東西才會走到 claim layer（有測試守住這一點）。
+
+### P0-2 resume 本身不是原子的
+
+`reserve()` 建立 claim 走 `O_EXCL`，但 `INTERRUPTED → RESERVED` 那一段是
+read-then-write：兩個行程可以同時讀到同一份 INTERRUPTED、各自算出
+`resume_count + 1`、各自覆寫，**兩邊都以為自己接手了那場一次性實驗**。
+
+改法：claim 帶單調遞增的 `revision`，每一次狀態推進都必須先以 `O_EXCL`
+建立 `.RUN_CLAIM.json.rev<N+1>` 權杖檔。同一個 revision 的權杖只能被建立
+一次，因此「我讀到 N，我要寫 N+1」由作業系統序列化。
+
+不用 lock 檔的理由：lock 需要生命週期管理，持有者在臨界區內死掉就會留下
+一把沒有人會釋放的鎖 —— 而那正是這個模組最不該有的東西（一次性實驗被
+孤兒鎖擋住，只能人工刪檔，而人工刪檔正是要禁止的）。權杖只增不減，
+沒有釋放這個動作，因此沒有孤兒。
+
+### P0-3 lifecycle 不是全段 exception-safe
+
+`_fail_claim` 只裝在 stress 生成與 execute loop 兩處。統計、bootstrap、
+trace finalise 與 report write 階段的失敗會讓 claim 停在 `RUNNING` ——
+而 `RUNNING` 同時擋掉 fresh restart 與 resume，那份 claim 再也動不了。
+
+改法：claim 的生命週期整個移出執行本體。`run_formal_e2_full` 現在只做
+lifecycle，執行在 `_execute_formal_e2`：
+
+```
+reserve → mark_running → try: 全流程 → except: mark_interrupted → mark_complete
+```
+
+`try` 內只有一次 `_execute_formal_e2()` 呼叫，因此涵蓋範圍不再是「我記得
+在哪幾個地方加了 try」。執行本體裡不得再呼叫任何 claim 操作（有測試守）。
+
+**stale RUNNING 的受控出路**：`pcmef formal reclaim`。同機器且 pid 已不
+存在 → 自動判定 stale；其餘情況需 `--force` 並附理由，且記進 claim 的
+`reclaimed` 欄位。狀態只推到 `INTERRUPTED_RESUMABLE`，`claim_id` 與
+identity 都保留 —— 回收之後仍然只能以相同 identity 接續。
+`_process_alive()` 對無法判斷的情況回 `None` 而不是 `False`：把「我不知道」
+當成「已經死了」，就會把一個還在跑的正式執行判成可回收。
+
+### P1（六項）
+
+| # | 問題 | 修法 |
+|---|---|---|
+| 1 | Golden gate 只驗 `canonical=true` —— 手寫一行就能通過 | 加驗 `frozen_lock_hashes` 與現行 lineage 逐項相符、`runtime_identity`、`code_revision`。舊 lineage 的快照或裸布林一律 FAIL |
+| 2 | `formal_config_refrozen` 在兩份都還沒重凍時顯示 PASS | 更名 `formal_config_matches_current_llm_runtime`，並**依賴第五項**：llm_runtime 未重凍時一律 FAIL |
+| 3 | dry-run 的 escalated 列在主畫面顯示填位 F(x) 與對錯 | F(x)=NOT AVAILABLE、prediction=—、correct=—；填位分布只放 Advanced；列表頁同步，且正確率不再把未執行的列算進分母 |
+| 4 | ToF 只有 shape 與通道名，而畫面宣稱「case 頁可看」 | `tof_summary()`：整份與逐通道 content hash、mean/std/p10/median/p90、48 點 mini trace（內聯 SVG，零 script） |
+| 5 | 自動 run_id 只有秒級；自訂 run_id 被 sanitize | 自動 id 加 8 字元 UUID 尾碼；非法 run_id **直接拒絕**不 sanitize（`a/b` 與 `ab` 先前會映射到同一個目錄） |
+| 6 | 報告不記 claim 出身 | `formal_e2_report.json` 持久化 `claim_id` / `identity_digest` / `resume_count`；`RUN_CLAIM.json` 仍是 authoritative lifecycle state |
+
+**文件修正**：publication renderer 是 **5 張圖 × pdf/svg/png = 15 個檔**，
+不是四張。`figures.py` 與 `reporting/__init__.py` 的說明已改。
+
+### 實跑證據（local-only）
+
+| 項目 | 結果 |
+|---|---|
+| subprocess 競態（4 行程搶 reserve） | 恰好 1 個成功 |
+| subprocess 競態（4 行程搶 resume） | 恰好 1 個成功，`resume_count` 只加一次 |
+| subprocess fresh restart on INTERRUPTED | 全部 BLOCKED |
+| thread 競態（8 執行緒 resume） | 恰好 1 個成功 |
+| resume E2E（synthetic fixture） | 統計階段失敗 → INTERRUPTED → fresh BLOCK → 換 identity BLOCK → 同 identity resume → COMPLETE → 永久封閉 |
+| live dry run | 384 列，auto run_id `20260905T170354-eb96bf09`（帶 UUID 尾碼） |
+| dry-run F(x) UI | `NOT AVAILABLE` / `NOT EXECUTED`，無「判對/判錯」洩漏，填位值在 Advanced |
+| ToF transparency UI | 四通道統計 + 4 條 sparkline + ToF sha256 |
+| Golden gate | 裸 `{canonical:true}` FAIL、他組 lineage FAIL、缺 runtime/code FAIL、三者齊全 PASS |
+| Status 推導階段 | 1 / 8（第二輪是 2/8 —— `formal_config` 不再假 PASS） |
+| viewport | 1280 / 1024 × 14 頁，0 溢位 |
+
+**未驗證**：formal 模式的 claim 從未在真實 384 列上跑過（那需要開封
+families 36-43）；`--resume` 的實際續跑用 synthetic fixture 驗證 lifecycle，
+不是續跑真正的 384 列決策迴圈；producer trace 在真實 provider 下仍未驗證。
+
+### 新增測試（47 項，全綠）
+
+| 檔案 | 項數 | 覆蓋 |
+|---|---|---|
+| `tests/e2/test_claim_concurrency.py` | 11 | subprocess × 2 種競態、CAS revision、stale 回收不刪 claim、`_process_alive` 的 None 語意 |
+| `tests/e2/test_resume_path.py` | 15 | preflight 的四種 resume 情況、CLI 傳遞、lifecycle 結構、報告的 claim 出身 |
+| `tests/console/test_ui_transparency_p2.py` | 21 | 填位 F(x) 不上主畫面、ToF 逐通道、run_id 拒絕而非 sanitize |
+
+另有 5 項既有測試因判準改變而更新（`test_final_gate.py`）。
 
 ---
 
@@ -357,8 +468,8 @@ log    [PASS] severity_is_restored_from_the_frozen_selection:
 | 3 | **AMD-008 freeze**（§208 紅線：Web 可觸發 formal） | spec 已寫，未凍結 |
 | 4 | **AMD-009 freeze**（worst-condition paired CI estimator） | spec 已寫，未凍結 |
 | 5 | **`llm_runtime.lock` re-freeze** | 未完成。prompt/schema hash 與驗證相符，但 validation 報告沒有記 `runtime_config_hash`，因此「lock 的 runtime 設定就是通過驗證的那一組」無法被證明 |
-| 6 | **`formal_config.lock` re-freeze** | **交叉引用一致**（`agent.llm_runtime_hash` 對得上）。但它繼承第 5 項的問題：llm_runtime 重凍後這一份必須跟著重凍 |
-| 7 | **canonical Golden Baseline** | 未確立。`regression/provisional/` 的 `canonical: false`，尚有 4 條 `canonical_blocker` |
+| 6 | **`formal_config.lock` re-freeze** | 未完成。交叉引用一致，但第 5 項未過 —— 2026-09-05 第三輪起這一項**依賴**第 5 項，不再單獨顯示 PASS（先前那個 PASS 讓 Status 上出現「formal_config 已重凍」，是一句假話） |
+| 7 | **canonical Golden Baseline** | 未確立。`regression/provisional/` 的 `canonical: false`，尚有 4 條 `canonical_blocker`。第三輪起這一項另外要求快照綁得住現行 lineage 的 lock hashes、runtime identity 與 code revision |
 | 8 | families 36-43 生成 | **未生成**。生成即開封，必須在 1-7 全部完成之後 |
 
 第 1 項先前記為「未執行」，那是**錯的** —— 驗證產物 2026-08-31 就存在，

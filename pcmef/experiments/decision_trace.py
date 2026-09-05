@@ -54,6 +54,8 @@ __all__ = [
     "build_case_trace",
     "TraceWriter",
     "route_explanation",
+    "tof_summary",
+    "SPARKLINE_POINTS",
 ]
 
 #: trace 的 schema 版本。改欄位語意時必須進版，否則舊 trace 讀不回來。
@@ -176,6 +178,80 @@ def route_explanation(
     }
 
 
+#: mini trace 的取樣點數。500 個 bin 全部進 JSON 會讓 384 筆的 trace
+#: 多出數 MB；而畫面要的是「這條通道長什麼形狀」，等距取 48 點就夠。
+SPARKLINE_POINTS = 48
+
+
+def tof_summary(tof: Any, channels: Sequence[str] = TOF_CHANNELS) -> dict[str, Any]:
+    """ToF 的逐通道統計與 mini trace。**純資料轉換，不做決策。**
+
+    先前 trace 只記 shape 與通道名 —— 畫面因此說得出「這是 500×4」，
+    卻說不出那四條通道長什麼樣。而 case 頁的說明寫著「逐通道的實際值在
+    感知與品質段落」，那句話是假的：那兩段只有 Q 與 U（NOTE-092）。
+
+    原始 (500, 4) 不進 trace（每筆 16 KB，384 筆就是數 MB）。這裡存的是
+    每條通道的 content hash、五個分位數、以及等距取樣的 mini trace ——
+    足以回答「這一筆餵進去的 ToF 是什麼形狀」，而不必回頭讀資料集。
+    """
+    array = np.asarray(tof)
+    if array.ndim != 2 or array.shape[1] != len(channels):
+        return {
+            "shape": list(array.shape),
+            "channels": list(channels),
+            "per_channel": [],
+            "note": (
+                f"形狀 {list(array.shape)} 與 {len(channels)} 條通道對不上，"
+                "因此沒有逐通道摘要。"
+            ),
+        }
+
+    from pcmef.core.hash import hash_object
+
+    step = max(1, len(array) // SPARKLINE_POINTS)
+    per_channel = []
+    for index, name in enumerate(channels):
+        column = array[:, index].astype(float)
+        finite = column[np.isfinite(column)]
+        stats = (
+            {
+                "mean": float(finite.mean()),
+                "std": float(finite.std()),
+                "p10": float(np.percentile(finite, 10)),
+                "median": float(np.percentile(finite, 50)),
+                "p90": float(np.percentile(finite, 90)),
+                "min": float(finite.min()),
+                "max": float(finite.max()),
+            }
+            if finite.size else
+            {k: None for k in ("mean", "std", "p10", "median", "p90", "min", "max")}
+        )
+        per_channel.append({
+            "name": name,
+            "index": index,
+            # 逐通道 hash：兩筆 case 的某一條通道是否逐 byte 相同，
+            # 這是唯一能直接比對的東西。
+            "sha256": hash_object([round(float(x), 9) for x in column.tolist()]),
+            "n_finite": int(finite.size),
+            "n_non_finite": int(column.size - finite.size),
+            **stats,
+            "sparkline": [float(x) for x in column[::step][:SPARKLINE_POINTS]],
+        })
+
+    return {
+        "shape": list(array.shape),
+        "channels": list(channels),
+        # 整份 ToF 的 content hash。與 RGB 的 sha256 對稱 —— 先前只有
+        # RGB 有，於是「這兩筆的 ToF 是不是同一份」無從回答。
+        "sha256": hash_object(
+            [[round(float(v), 9) for v in row] for row in array.tolist()]
+        ),
+        "per_channel": per_channel,
+        "sparkline_points": min(SPARKLINE_POINTS, len(array[::step])),
+        "sparkline_step": step,
+    }
+
+
 #: 五條臂在畫面上的名稱與定義。順序即 G1..G5。
 ARM_LABELS: tuple[tuple[str, str, str], ...] = (
     ("vision_only", "G1", "argmax p_V"),
@@ -294,6 +370,7 @@ def build_case_trace(
     rgb_preview: Mapping[str, Any] | None,
     tof_shape: Sequence[int] | None,
     dry_run: bool,
+    tof_detail: Mapping[str, Any] | None = None,
     cache: Mapping[str, Any] | None = None,
 ) -> CaseTrace:
     """把一個 case 的決策過程組成 CaseTrace。**純資料轉換，不做決策。**"""
@@ -364,7 +441,11 @@ def build_case_trace(
         physical_scene_family=str(row.get("physical_scene_family", "")),
         inputs={
             "rgb": rgb_preview or {},
-            "tof": {"shape": list(tof_shape or []), "channels": list(TOF_CHANNELS)},
+            # tof_detail 帶逐通道統計、mini trace 與 content hash。
+            # 沒給時退回只有形狀與通道名的舊形狀，舊 trace 仍然讀得回來。
+            "tof": dict(tof_detail) if tof_detail else {
+                "shape": list(tof_shape or []), "channels": list(TOF_CHANNELS),
+            },
             "stress_id": str(row.get("stress_id", "")),
             "base_scenario_id": str(row.get("base_scenario_id", "")),
         },

@@ -4,7 +4,7 @@
 # 檔案路徑: pcmef/reporting/figures.py
 # 產生時間: 2026-09-04 16:35 +08:00
 # 版本: v0.1.0
-# 功能說明: 由一份 formal report 產出四張論文用圖。
+# 功能說明: 由一份 formal report 產出五張論文用圖（× pdf/svg/png = 15 個檔）。
 # 模組定位: FR-020 的 thesis-ready figure。它在 console 之外，因為
 #           matplotlib 是重相依而 console 必須維持零繪圖相依。
 # 主要責任:

@@ -211,7 +211,7 @@ def test_reliability_routing_is_a_paired_statistics_baseline():
 
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert '"reliability_routing"' in source
     for baseline in ("vision_only", "tof_only", "fixed_fusion", "reliability_routing"):
         assert f'"{baseline}"' in source, baseline
@@ -223,7 +223,7 @@ def test_the_arm_is_documented_in_the_report():
 
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     assert "arm_definitions" in source
     assert "G4" in source and "G5" in source
 
@@ -234,7 +234,7 @@ def test_the_arm_survives_a_dry_run_report():
 
     from pcmef.experiments import e2_formal
 
-    source = inspect.getsource(e2_formal.run_formal_e2_full)
+    source = inspect.getsource(e2_formal._execute_formal_e2)
     # pcmef_full 只在非 dry-run 時加入；G4 無條件加入。
     assert 'arms["pcmef_full"] = finals' in source
     assert '"reliability_routing": reliability_routing,' in source

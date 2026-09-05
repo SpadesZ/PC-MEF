@@ -78,6 +78,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,6 +124,10 @@ SEVERITY_FIELD = "severity_allocation"
 FORMAL_SUBDIR = "formal"
 DRY_RUN_SUBDIR = "dry_runs"
 
+#: dry-run 目錄名的合法字元。`run_id` 直接變成目錄名，因此它是白名單而不是
+#: 過濾器 —— 見 `run_artifact_root()` 對「不 sanitize」的說明。
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
 
 def run_artifact_root(
     out_dir: str | Path, *, dry_run: bool, run_id: str | None = None
@@ -142,10 +147,20 @@ def run_artifact_root(
             "directory, and without a per-run subdirectory the second rehearsal "
             "overwrites the first one's trace and stress set"
         )
-    safe = "".join(c for c in str(run_id) if c.isalnum() or c in "-_.")
-    if not safe:
-        raise FormalE2Error(f"run_id {run_id!r} has no usable characters")
-    return out / DRY_RUN_SUBDIR / safe
+    # run_id **不 sanitize，直接拒絕**。剝掉非法字元會讓 `a/b` 與 `ab`
+    # 映射到同一個目錄 —— 兩次不同的預演於是靜靜互相覆蓋，而呼叫端以為
+    # 自己給的是兩個名字。拒絕比默默改名安全（NOTE-088）。
+    text = str(run_id)
+    if not RUN_ID_PATTERN.fullmatch(text) or text in (".", ".."):
+        raise FormalE2Error(
+            f"illegal run_id {run_id!r}: expected 1-64 characters from "
+            "[A-Za-z0-9._-], and neither '.' nor '..'. The run id becomes a "
+            "directory name; sanitising it instead of refusing would map two "
+            "different ids onto one directory, and the second rehearsal would "
+            "silently overwrite the first."
+        )
+    return out / DRY_RUN_SUBDIR / text
+
 
 #: 正式執行：escalated case 呼叫四個真 agent。
 LLM_MODE_EXECUTE = "execute"
@@ -810,7 +825,7 @@ def _cache_identity_from_locks(freeze_dir: str | Path) -> Any:
     )
 
 
-def run_formal_e2_full(
+def _execute_formal_e2(
     base_manifest_dir: str | Path,
     out_dir: str | Path,
     *,
@@ -825,10 +840,15 @@ def run_formal_e2_full(
     progress: Callable[[str], None] | None = None,
     artifact_cache_root: str | Path | None = None,
     run_id: str | None = None,
-    claim: bool = False,
-    resume: bool = False,
+    claim_record: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Full PC-MEF 的 Formal E2。
+    """Formal E2 的執行本體。**不管理 claim** —— 那在 run_formal_e2_full。
+
+    分開的理由：claim 的生命週期必須涵蓋**整個**流程（prepare、agent、
+    statistics、trace finalise、report write），而把 reserve/mark_complete
+    寫在本體裡的話，涵蓋範圍就等於「我記得在哪幾個地方加了 try」——
+    先前正是那樣，於是統計或報告寫入失敗會讓 claim 永遠卡在 RUNNING，
+    而 RUNNING 同時擋掉 fresh restart 與 resume（NOTE-085）。
 
     formal=True 時 escalated case **必須**有真正的四 agent 仲裁器；
     沒有就中止，不接受決定性替身。
@@ -874,55 +894,10 @@ def run_formal_e2_full(
         f"(from {SEVERITY_LOCK}.lock)"
     )
 
-    # --- one-shot claim（NOTE-079）----------------------------------------
-    #
-    # 在 prepare_cases 之前取得。prepare_cases 會生成 stress set，而生成
-    # 本身就是動作 —— claim 必須在任何動作之前握住，否則兩個同時啟動的
-    # 請求會各自生成一份 stress set，然後才發現彼此。
-    active_claim: dict[str, Any] | None = None
-    if claim and not dry_run:
-        from pcmef.experiments.run_claim import RunIdentity, mark_complete
-        from pcmef.experiments.run_claim import mark_interrupted, mark_running
-        from pcmef.experiments.run_claim import reserve as reserve_claim
-
-        base_manifest = json.loads(
-            (Path(base_manifest_dir) / "dataset_manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        identity = RunIdentity(
-            freeze_dir=str(freeze_dir),
-            lock_hashes=stack["lock_hashes"],
-            # 只取 manifest 的**身分**欄位，不 hash 整份檔案：後者含檔案
-            # 路徑與計數，換一台機器就會變，於是 resume 永遠對不上。
-            base_manifest_hash=str(base_manifest.get("scenario_set_hash", "")),
-            code_version=code_version,
-        )
-        active_claim = reserve_claim(out, identity, resume=resume)
-        say(f"claim {active_claim['claim_id']} {active_claim['state']}"
-            + (f" (resume #{active_claim.get('resume_count')})" if resume else ""))
-        mark_running(out, active_claim["claim_id"])
-
-    def _fail_claim(reason: str) -> None:
-        """把 claim 標成可 resume。**不刪掉它** —— final partition 已經開封。"""
-        if active_claim is None:
-            return
-        try:
-            mark_interrupted(out, active_claim["claim_id"], reason)
-        except Exception as error:  # noqa: BLE001
-            say(f"warning: could not mark the claim interrupted: {error}")
-
-    try:
-        prepared = prepare_cases(
-            base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
-            code_version=code_version, progress=say,
-        )
-    except BaseException as error:
-        # 這裡的失敗發生在 stress set 生成階段。claim 標成可 resume 而不是
-        # 放著不管：放著會停在 RUNNING，而 RUNNING 既擋掉 fresh restart
-        # 也擋掉 resume，等於把自己鎖死。
-        _fail_claim(f"{type(error).__name__}: {error}")
-        raise
+    prepared = prepare_cases(
+        base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
+        code_version=code_version, progress=say,
+    )
     rows = prepared["rows"]
     labels = prepared["labels"]
     p_vision, p_tof = prepared["p_vision"], prepared["p_tof"]
@@ -998,7 +973,13 @@ def run_formal_e2_full(
         digest = hash_object(
             _b64.b64encode(rgb_to_png_bytes(rgb_array)).decode("ascii")
         )
-        tof_shape = list(np.load(row["tof_path"]).shape)
+        # ToF 的逐通道摘要在這裡算：run 當下記憶體裡就有那個陣列，
+        # 之後畫面才不必回頭讀資料集（NOTE-092）。
+        from pcmef.experiments.decision_trace import tof_summary
+
+        tof_array = np.load(row["tof_path"])
+        tof_shape = list(tof_array.shape)
+        tof_detail = tof_summary(tof_array)
 
         writer.write_case(
             build_case_trace(
@@ -1032,6 +1013,7 @@ def run_formal_e2_full(
                     "preview_path": preview_path,
                 },
                 tof_shape=tof_shape,
+                tof_detail=tof_detail,
                 dry_run=payload["dry_run"],
                 cache=payload.get("cache"),
             )
@@ -1047,7 +1029,6 @@ def run_formal_e2_full(
         # run 中止時仍要留下已寫的 case，但 index 必須明說它不完整 ——
         # 一份看起來完整的 index 比沒有 index 更糟。
         writer.abort(f"{type(error).__name__}: {error}")
-        _fail_claim(f"{type(error).__name__}: {error}")
         raise
     finals = executed["finals"]
     traces = executed["traces"]
@@ -1231,6 +1212,20 @@ def run_formal_e2_full(
         "artifact_root": out.as_posix(),
         "canonical_out": canonical_out.as_posix(),
         "run_id": run_id,
+        # 這份報告屬於哪一個 claim。RUN_CLAIM.json 仍然是 lifecycle 的
+        # authoritative state，但報告本身必須說得出自己的出身 —— 報告會被
+        # 複製、附進論文、寄給別人，而那些副本旁邊不會有 claim 檔（NOTE-087）。
+        "run_claim": None if claim_record is None else {
+            "claim_id": claim_record.get("claim_id"),
+            "identity_digest": (claim_record.get("identity") or {}).get("digest"),
+            "resume_count": claim_record.get("resume_count", 0),
+            "reserved_at": claim_record.get("reserved_at"),
+            "claim_path": (out / "RUN_CLAIM.json").as_posix(),
+            "note": (
+                "lifecycle 的權威狀態在 RUN_CLAIM.json；這裡記的是「這份報告"
+                "由哪一個 claim 產生」，讓報告離開這個目錄之後仍然可追溯。"
+            ),
+        },
         "dataset": {
             "base": Path(base_manifest_dir).as_posix(),
             "family_indices": prepared["base_manifest"].get("family_indices"),
@@ -1354,19 +1349,123 @@ def run_formal_e2_full(
     document["report_path"] = (out / filename).as_posix()
     document["trace_index_path"] = trace_index_path
     document["artifact_root"] = out.as_posix()
+    return document
 
-    # 報告落盤成功才封閉 claim。順序不可對調：先標 COMPLETE 再寫報告的話，
-    # 寫入失敗會留下一個「已完成但沒有結果」的永久封閉狀態（NOTE-079）。
-    if active_claim is not None:
-        claim_state = mark_complete(
-            out, active_claim["claim_id"], (out / filename).as_posix()
+
+def run_formal_e2_full(
+    base_manifest_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    freeze_dir: str | Path,
+    ds_dir: str | Path = DS_V2,
+    severity: dict[str, float] | None = None,
+    agent_runner: Any = None,
+    formal: bool = True,
+    llm_mode: str = LLM_MODE_EXECUTE,
+    code_version: str = "",
+    is_final_formal_e2: bool = False,
+    progress: Callable[[str], None] | None = None,
+    artifact_cache_root: str | Path | None = None,
+    run_id: str | None = None,
+    claim: bool = False,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Full PC-MEF 的 Formal E2。**唯一**的公開入口。
+
+    這一層只做一件事：管理 one-shot claim 的生命週期。執行本體在
+    `_execute_formal_e2()`。
+
+    結構刻意是這一個形狀：
+
+    ```
+    reserve → mark_running → try 全流程 → except mark_interrupted
+                                        → else mark_complete
+    ```
+
+    `try` 涵蓋**整個**流程 —— prepare、agent execution、statistics、
+    bootstrap、trace finalise、report write。先前 claim 的 except 只裝在
+    兩個地方（stress 生成與 execute loop），於是統計或報告寫入階段的失敗
+    會讓 claim 停在 `RUNNING`；而 `RUNNING` 同時擋掉 fresh restart 與
+    resume，那份 claim 就再也動不了，唯一的出路變成人工刪檔 —— 也就是把
+    one-shot 的保護整個丟掉（NOTE-085）。
+
+    `claim=False` 或 dry run 時完全不介入，行為與沒有 claim 這回事時逐 byte
+    相同：預演可以重跑，claim 保護的是「正式結果只有一份」。
+    """
+    say = progress or (lambda _m: None)
+    dry_run = llm_mode == LLM_MODE_SKIP
+
+    if not claim or dry_run:
+        return _execute_formal_e2(
+            base_manifest_dir, out_dir, freeze_dir=freeze_dir, ds_dir=ds_dir,
+            severity=severity, agent_runner=agent_runner, formal=formal,
+            llm_mode=llm_mode, code_version=code_version,
+            is_final_formal_e2=is_final_formal_e2, progress=progress,
+            artifact_cache_root=artifact_cache_root, run_id=run_id,
         )
-        say(f"claim {claim_state['claim_id']} COMPLETE — Formal E2 是一次性的，"
-            "此後永久封閉")
-        document["run_claim"] = {
-            "claim_id": claim_state["claim_id"],
-            "state": claim_state["state"],
-            "identity_digest": (claim_state.get("identity") or {}).get("digest"),
-            "resume_count": claim_state.get("resume_count", 0),
-        }
+
+    from pcmef.experiments.run_claim import (
+        RunIdentity, mark_complete, mark_interrupted, mark_running, reserve,
+    )
+
+    root = run_artifact_root(out_dir, dry_run=False, run_id=run_id)
+    root.mkdir(parents=True, exist_ok=True)
+
+    # identity 在**任何動作之前**算出來。lock 與 manifest 都是純讀，
+    # 而 claim 必須在 stress set 生成之前握住 —— 生成本身就是動作，
+    # 兩個同時啟動的請求會各自生成一份，然後才發現彼此。
+    stack = load_frozen_decision_stack(freeze_dir)
+    base_manifest = json.loads(
+        (Path(base_manifest_dir) / "dataset_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    identity = RunIdentity(
+        freeze_dir=str(freeze_dir),
+        lock_hashes=stack["lock_hashes"],
+        # 只取 manifest 的**身分**欄位，不 hash 整份檔案：後者含檔案路徑與
+        # 計數，換一台機器就會變，於是 resume 永遠對不上。
+        base_manifest_hash=str(base_manifest.get("scenario_set_hash", "")),
+        code_version=code_version,
+    )
+
+    active = reserve(root, identity, resume=resume)
+    say(f"claim {active['claim_id']} {active['state']}"
+        + (f" (resume #{active.get('resume_count')})" if resume else ""))
+    active = mark_running(root, active["claim_id"])
+
+    try:
+        document = _execute_formal_e2(
+            base_manifest_dir, out_dir, freeze_dir=freeze_dir, ds_dir=ds_dir,
+            severity=severity, agent_runner=agent_runner, formal=formal,
+            llm_mode=llm_mode, code_version=code_version,
+            is_final_formal_e2=is_final_formal_e2, progress=progress,
+            artifact_cache_root=artifact_cache_root, run_id=run_id,
+            claim_record=active,
+        )
+    except BaseException as error:
+        # 任何一步失敗都留下可恢復狀態。標記本身失敗也不得掩蓋原始例外 ——
+        # 那才是使用者要看的東西。
+        try:
+            mark_interrupted(root, active["claim_id"],
+                             f"{type(error).__name__}: {error}")
+            say(f"claim {active['claim_id']} INTERRUPTED_RESUMABLE — "
+                "以相同 identity 加 --resume 可接續")
+        except Exception as nested:  # noqa: BLE001
+            say(f"warning: could not mark the claim interrupted: {nested}. "
+                f"Use `pcmef formal reclaim` if it is stuck.")
+        raise
+
+    # 報告已經落盤才封閉。順序不可對調：先標 COMPLETE 再寫報告的話，
+    # 寫入失敗會留下一個「已完成但沒有結果」的永久封閉狀態。
+    final = mark_complete(root, active["claim_id"], document.get("report_path", ""))
+    say(f"claim {final['claim_id']} COMPLETE — Formal E2 是一次性的，此後永久封閉")
+    document["run_claim"] = {
+        **(document.get("run_claim") or {}),
+        "claim_id": final["claim_id"],
+        "state": final["state"],
+        "identity_digest": (final.get("identity") or {}).get("digest"),
+        "resume_count": final.get("resume_count", 0),
+        "revision": final.get("revision"),
+    }
     return document

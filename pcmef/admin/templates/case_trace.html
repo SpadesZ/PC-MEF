@@ -41,10 +41,20 @@
 
 {% block content %}
 
+{# G5 有沒有在這一列執行。dry run 的 escalated 列停在仲裁邊界，那時
+   F(x)、預測與對錯都是填位值 —— 整頁**任何**位置都不得把它們當成結果
+   （NOTE-091）。在最前面算一次，讓下面每一段共用同一個判斷。 #}
+{% set g5 = (trace.arm_outcomes or {}).get('pcmef_full') %}
+{% set g5_absent = g5 and not g5.executed %}
+
 <header class="masthead">
   <h1>{{ trace.case_id }}
+    {% if g5_absent %}
+      <span class="badge warn">未執行</span>
+    {% else %}
     <span class="badge {{ 'ok' if trace.final.correct else 'bad' }}">
       {{ '判對' if trace.final.correct else '判錯' }}</span>
+    {% endif %}
   </h1>
   <p>
     {{ trace.condition }} · 真值 <strong>{{ trace.class_label }}</strong> ·
@@ -99,12 +109,71 @@
                 <td class="mono">{{ trace.inputs.tof.shape | join(' × ') }}</td></tr>
             <tr><th>通道</th>
                 <td class="note">{{ trace.inputs.tof.channels | join('、') }}</td></tr>
+            {% if trace.inputs.tof.get('sha256') %}
+            <tr><th>ToF sha256</th>
+                <td class="mono">{{ trace.inputs.tof.sha256[:16] }}…</td></tr>
+            {% endif %}
             <tr><th>stress_id</th>
                 <td class="mono">{{ trace.inputs.stress_id }}</td></tr>
           </tbody>
         </table>
       </div>
     </div>
+
+    {# 逐通道的實際形狀。先前這一頁只說得出「500 × 4」，而說明文字宣稱
+       逐通道的值在感知段落 —— 那裡只有 Q 與 U，那句話是假的（NOTE-092）。 #}
+    {% set per_channel = trace.inputs.tof.get('per_channel') or [] %}
+    {% if per_channel %}
+    <h3 class="note">ToF 四個通道</h3>
+    <div class="table-scroll">
+    <table class="tof-channels">
+      <thead>
+        <tr><th>通道</th><th>形狀</th><th>mean</th><th>std</th>
+            <th>p10</th><th>median</th><th>p90</th><th>sha256</th></tr>
+      </thead>
+      <tbody>
+      {% for channel in per_channel %}
+        <tr>
+          <th>{{ channel.name }}</th>
+          <td>
+            {# mini trace。SVG 內聯，零 script：畫面要回答的是「這條通道
+               長什麼形狀」，那不需要圖表函式庫。 #}
+            {% set points = channel.sparkline or [] %}
+            {% if points | length > 1 %}
+              {% set lo = points | min %}{% set hi = points | max %}
+              {% set span = (hi - lo) if (hi - lo) > 0 else 1 %}
+              <svg class="sparkline" viewBox="0 0 100 24" preserveAspectRatio="none"
+                   role="img" aria-label="{{ channel.name }} 的 mini trace">
+                <polyline fill="none" stroke="currentColor" stroke-width="1"
+                  points="{% for v in points %}{{ '%.2f' | format(loop.index0 * 100.0 / (points|length - 1)) }},{{ '%.2f' | format(22 - (v - lo) / span * 20) }} {% endfor %}"/>
+              </svg>
+            {% else %}<span class="note">—</span>{% endif %}
+          </td>
+          <td class="mono">{{ num(channel.mean) }}</td>
+          <td class="mono">{{ num(channel.std) }}</td>
+          <td class="mono">{{ num(channel.p10) }}</td>
+          <td class="mono">{{ num(channel.median) }}</td>
+          <td class="mono">{{ num(channel.p90) }}</td>
+          <td class="mono">{{ (channel.sha256 or '—')[:10] }}…</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="note">
+      mini trace 由 {{ trace.inputs.tof.get('sparkline_points', '—') }} 個等距
+      取樣點畫成（每 {{ trace.inputs.tof.get('sparkline_step', '—') }} 個 bin 取一點），
+      縱軸各自正規化 —— 它回答形狀，不回答尺度；尺度看左邊的統計量。
+      原始 (500, 4) 陣列不進 trace：每筆 16 KB，384 筆會讓 trace 膨脹到數 MB。
+    </p>
+    {% elif trace.inputs.tof.get('note') %}
+    <p class="note">{{ trace.inputs.tof.note }}</p>
+    {% else %}
+    <p class="note">
+      這份 trace 是 2026-09-05 之前的格式，只記錄了 ToF 的形狀與通道名，
+      沒有逐通道統計與 mini trace。
+    </p>
+    {% endif %}
   </div>
 </section>
 
@@ -280,6 +349,47 @@
     {% endif %}
 
     <h3 class="note">F(x) 與 s<sub>A</sub></h3>
+    {% if g5_absent %}
+      {# G5 沒有執行時，這一列的 F(x) 是填位值（恰好等於 fixed fusion）。
+         把它印在科研主畫面上，讀者會把它當成 PC-MEF 的結果 —— 即使旁邊
+         有一行警語。填位值只放進 Advanced，與正式結果不並列（NOTE-091）。 #}
+      <p class="lede"><span class="badge warn">F(x) = NOT AVAILABLE</span></p>
+      <p class="note">{{ g5.reason }}</p>
+      <table>
+        <tbody>
+          <tr><th>F(x)</th><td><span class="badge warn">NOT AVAILABLE</span></td>
+              <th>s<sub>A</sub></th><td><span class="badge warn">NOT AVAILABLE</span></td></tr>
+          <tr><th>預測</th><td class="note">—</td>
+              <th>結果</th><td class="note">—</td></tr>
+          <tr><th>真值</th><td colspan="3"><strong>{{ trace.final.truth_label }}</strong>
+              <span class="note">（真值與這一列有沒有執行無關）</span></td></tr>
+        </tbody>
+      </table>
+      <details class="advanced">
+        <summary>Internal · 填位分布（debug 用，不是結果）</summary>
+        <p class="note">
+          executor 對未執行的 escalated 列填一個合法分布，純粹是為了讓
+          sum-to-1 與 cluster 形狀檢查仍有東西可算。它<strong>不是</strong>
+          任何方法的輸出，也沒有進報告的任何一欄。
+        </p>
+        <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th></th>
+              {% for name in trace.perception.class_order %}<th>{{ name }}</th>{% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono">placeholder</td>
+              {% for value in trace.final.distribution %}
+              <td class="mono">{{ '%.4f' | format(value) }}</td>{% endfor %}
+            </tr>
+          </tbody>
+        </table>
+        </div>
+      </details>
+    {% else %}
     <div class="table-scroll">
     <table>
       <thead>
@@ -303,13 +413,10 @@
       </tbody>
     </table>
     </div>
-    {% set g5 = (trace.arm_outcomes or {}).get('pcmef_full') %}
-    {% if g5 and not g5.executed %}
-    <p class="note">
-      <span class="badge warn">上表的 F(x) 不是 G5 的結果</span>
-      {{ g5.reason }}它列在這裡只是為了讓 sum-to-1 這類形狀檢查仍然有東西可看。
-    </p>
     {% endif %}
+    {# 未執行時上面已經印過 NOT AVAILABLE 的那一組，這裡不再印一次
+       「預測 / 是否判對」—— 那兩欄在沒有結果的情況下只能是填位值。 #}
+    {% if not g5_absent %}
     <table>
       <tbody>
         <tr><th>預測</th><td><strong>{{ trace.final.prediction_label }}</strong></td>
@@ -319,6 +426,7 @@
                 {{ '對' if trace.final.correct else '錯' }}</span></td></tr>
       </tbody>
     </table>
+    {% endif %}
   </div>
 </section>
 

@@ -104,7 +104,10 @@
     <p class="note" style="margin-top:12px">
       符合 {{ trace.filtered }} 筆
       {% if trace.get('accuracy') is not none %}
-        · 其中判對 {{ trace.correct }} 筆（{{ '%.1f' | format(trace.get('accuracy') * 100) }}%）
+        · 其中判對 {{ trace.correct }} / {{ trace.scored }} 筆（{{ '%.1f' | format(trace.get('accuracy') * 100) }}%）
+      {% endif %}
+      {% if trace.get('excluded_unexecuted') %}
+        · 另有 {{ trace.excluded_unexecuted }} 筆 escalated 未執行，不計入正確率
       {% endif %}
       {% if trace.filtered > trace.shown %}
         · 只列出前 {{ trace.shown }} 筆
@@ -126,10 +129,17 @@
           <td>
             <span class="badge {{ 'warn' if case.escalated else '' }}">{{ case.route }}</span>
           </td>
-          <td class="note">{{ case.prediction }}</td>
+          {# 預演的 escalated 列停在仲裁邊界，F(x) 是填位值 —— 預測與對錯
+             都不是結果。列表頁與 case 頁必須說同一句話（NOTE-091）。 #}
+          {% set unexecuted = trace.dry_run and case.escalated %}
+          <td class="note">{{ '—' if unexecuted else case.prediction }}</td>
           <td>
+            {% if unexecuted %}
+              <span class="badge warn">未執行</span>
+            {% else %}
             <span class="badge {{ 'ok' if case.correct else 'bad' }}">
               {{ '對' if case.correct else '錯' }}</span>
+            {% endif %}
           </td>
         </tr>
       {% endfor %}

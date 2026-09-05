@@ -48,6 +48,7 @@ def preflight(
     base: str | Path = "outputs/perception/formal_e2",
     out: str | Path = "outputs/perception/e2_final",
     lineage_root: str | Path = "freeze",
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Final E2 的起跑前檢查。**不執行任何 case。**
 
@@ -167,20 +168,47 @@ def preflight(
     )
     if mode == "formal":
         state = None if claim is None else str(claim.get("state", ""))
-        record(
-            "formal_run_claim_is_available",
-            claim is None and not legacy_report,
-            "no claim; the one-shot has not been taken"
-            if claim is None and not legacy_report else
-            "a formal report exists without a claim (pre-2026-09-05 layout); "
-            "the one-shot has already been consumed" if claim is None else
-            f"claim {claim.get('claim_id')} is {state}"
-            + (
+        # pre-flight 必須認得 resume，否則 `--resume` 這條路徑**永遠到不了**
+        # executor：CLI 先跑 pre-flight，而 INTERRUPTED 在這裡一律 FAIL，
+        # 於是 `reserve(resume=True)` 沒有任何呼叫得到它的機會（NOTE-086）。
+        #
+        # 這裡只判斷「這個請求該不該被放到 claim layer 面前」。identity 是否
+        # 相符仍然由 claim layer fail-closed 驗證 —— pre-flight 不重複那一段，
+        # 兩份實作遲早漂移。
+        if claim is None and not legacy_report:
+            passed, detail = True, (
+                "no claim; the one-shot has not been taken"
+                + ("（--resume 無效：沒有可接續的執行）" if resume else "")
+            )
+        elif claim is None:
+            passed, detail = False, (
+                "a formal report exists without a claim (pre-2026-09-05 layout); "
+                "the one-shot has already been consumed"
+            )
+        elif state == STATE_INTERRUPTED:
+            passed = bool(resume)
+            detail = (
+                f"claim {claim.get('claim_id')} is {state} — "
+                + (
+                    "以相同 identity 接續；identity 由 claim layer 驗證，"
+                    "不符即中止"
+                    if resume else
+                    "已開封，不得重新開始。要接續請加 --resume"
+                )
+            )
+        else:
+            passed = False
+            detail = f"claim {claim.get('claim_id')} is {state}" + (
                 " — Formal E2 已完成，永久封閉" if state == STATE_COMPLETE
-                else " — 另一個請求持有它" if state in (STATE_RESERVED, STATE_RUNNING)
-                else " — 已開封，只能以相同 identity resume（--resume）"
-                if state == STATE_INTERRUPTED else " — 狀態不可讀，fail-closed"
-            ),
+                else " — 另一個請求持有它；若確定它已死亡，用 "
+                     "`pcmef formal reclaim` 回收，不要刪 claim 檔"
+                if state in (STATE_RESERVED, STATE_RUNNING)
+                else " — 狀態不可讀，fail-closed"
+            )
+        record(
+            "formal_run_claim_is_available" if not resume
+            else "formal_run_claim_is_resumable",
+            passed, detail,
         )
     else:
         # 預演不取 claim，但要看得到 formal 的現況：一個已經 COMPLETE 的
@@ -228,6 +256,7 @@ def preflight(
         "allowed": not blockers,
         "frozen_severity": severity,
         "claim": claim,
+        "resume": bool(resume),
         "formal_root": formal_root.as_posix(),
         "final_gate": final_gate_checks,
     }
