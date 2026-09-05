@@ -49,6 +49,19 @@ from pcmef.console.runner import (
 
 __all__ = ["blueprint"]
 
+
+def _project_name() -> str:
+    """目前專案名稱，供 breadcrumb 使用。
+
+    取不到時回空字串：breadcrumb 會少一層，而不是顯示錯的專案名稱。
+    """
+    try:
+        from pcmef.console.project_routes import request_context
+
+        return request_context().display_name
+    except Exception:  # noqa: BLE001 - breadcrumb 不得讓整頁 500
+        return ""
+
 blueprint = Blueprint("formal", __name__)
 
 #: 畫面預設看的位置。與 CLI 的預設一致，否則兩邊會盯著不同的目錄。
@@ -129,6 +142,7 @@ def page():
         breadcrumb=breadcrumb(
             ("實驗 Run", url_for("console.page")),
             ("Formal Research Workspace", None),
+            project_name=_project_name(),
         ),
         formal=formal["preflight"],
         dry=dry["preflight"],

@@ -149,10 +149,36 @@ def test_the_run_page_still_owns_starting_things(client):
 # ---------------------------------------------------------------------------
 
 
-def test_breadcrumb_starts_from_a_single_root():
+def test_breadcrumb_starts_from_the_workspace_root():
+    """根是 Workspace，不是任何一個專案的名字。
+
+    平台化前這裡固定是 `PC-MEF`。在只有一個研究的系統裡那是對的，
+    但一旦有第二個專案，寫死的根會在看 B 專案時仍然說 PC-MEF ——
+    而那種錯誤在畫面上看起來完全正常。
+    """
     crumbs = breadcrumb(("結果 Results", "/results"), ("run-1", None))
-    assert crumbs[0]["label"] == "PC-MEF"
-    assert [c["label"] for c in crumbs] == ["PC-MEF", "結果 Results", "run-1"]
+    assert crumbs[0]["label"] == "Workspace"
+    assert [c["label"] for c in crumbs] == ["Workspace", "結果 Results", "run-1"]
+
+
+def test_breadcrumb_names_the_current_project_between_workspace_and_page():
+    crumbs = breadcrumb(
+        ("結果 Results", "/results"),
+        ("run-1", None),
+        project_name="PC-MEF Thesis",
+    )
+    assert [c["label"] for c in crumbs] == [
+        "Workspace",
+        "PC-MEF Thesis",
+        "結果 Results",
+        "run-1",
+    ]
+
+
+def test_breadcrumb_without_a_project_shows_only_the_workspace_root():
+    """專案未知時不得憑空補一個名字，寧可少一層。"""
+    crumbs = breadcrumb(("專案 Projects", None))
+    assert [c["label"] for c in crumbs] == ["Workspace", "專案 Projects"]
 
 
 def test_the_formal_page_breadcrumb_shows_two_levels(client):

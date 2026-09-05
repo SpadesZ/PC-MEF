@@ -14,13 +14,23 @@
  #   1. NAV_ITEMS 由 view 傳入 active 鍵，決定哪一項高亮
  #   2. breadcrumb 區塊，讓第二層頁面能標出上下層關係
  #   3. {% block content %} 給各頁填內容
+ #   4. Workspace bar 顯示目前 Project 並提供切換器
+ #   5. 回退警示：目前專案無法載入時顯示原因，不靜默改用別的專案
  # 維護提醒:
  #   - 不得在本檔加入任何表單或寫入端點。它是每一頁都會載入的骨架；
  #     一個放在這裡的按鈕會出現在包含 read-only 頁面在內的所有位置。
+ #     **專案切換器也不例外**：Workspace bar 只顯示目前專案，
+ #     切換要連到 /projects。曾經在此放過一個 <select> 表單，
+ #     結果 Status 與 Pipeline 的唯讀測試立刻失敗 —— 那兩頁的唯讀性
+ #     是「不能從觀察頁改動研究狀態」的保證，不是風格偏好。
  #   - 不得讓導航項目數量隨頁面增加。五個入口是刻意的收斂：
  #     Run / Pipeline / Results / Status / LLM Settings。新功能要歸進其中一個，
- #     而不是再長一個頂層項目。
+ #     而不是再長一個頂層項目。**Project 不是第六個項目**，
+ #     它在導航列之上。
+ #   - 不得把專案名稱寫死回版型。寫死時，開著 Blank Project 也會說 PC-MEF。
  #   - v0.1.0 新增：首版，對應 P2-2。
+ #   - v0.2.0 變更：加入 Workspace bar 與專案切換器，移除寫死的
+ #     PC-MEF 品牌字樣，對應平台化 Phase 1。
  # 驗證方式:
  #   - py -3.10 -m pytest tests/console/test_navigation.py -v
  # ------------------------------------------------------------ #}
@@ -29,14 +39,51 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PC-MEF · {% block title %}{% endblock %}</title>
+<title>{{ current_project.name if current_project else 'Workspace' }} · {% block title %}{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='admin.css') }}">
 </head>
 <body>
 
+{# Workspace 層。Project 刻意**不進**下面的導航列：五個入口是刻意的收斂，
+ # 而 Project 是它們之上的一層，不是第六個並列項目。
+ #
+ # 兩條 bar 包在同一個 sticky 容器裡，而不是各自 sticky 再用固定
+ # offset 對齊 —— 固定 offset 會在專案名稱換行、字級改變或多一個標籤時
+ # 立刻錯位，而錯位的結果是導航列蓋住內容。 #}
+<div class="stickyhead">
+<div class="workspacebar">
+  <div class="workspacebar-inner">
+    <a class="brand" href="{{ url_for('projects.page') }}">Workspace</a>
+    <span class="sep">›</span>
+    {% if current_project %}
+    {# 這裡只**顯示**目前專案，切換要回 Workspace 頁。
+     # 版型會載入到 Status 與 Pipeline 這兩個唯讀頁上，而唯讀頁不得出現
+     # 任何表單 —— 一個放在骨架裡的 <form> 會同時出現在它們身上。
+     # 與「要啟動什麼一律回 Run」同一個道理：要切換專案一律回 Workspace。 #}
+    <span class="current-project" title="目前專案">{{ current_project.name }}</span>
+    {% if current_project.state %}
+    <span class="tag">{{ current_project.state }}</span>
+    {% endif %}
+    {% if current_project.legacy %}
+    <span class="tag legacy" title="科學資料位於 repo 根目錄，平台化未搬動">legacy layout</span>
+    {% endif %}
+    <a class="switch-link" href="{{ url_for('projects.page') }}">切換…</a>
+    {% else %}
+    <span class="tag warn">無法判定目前專案</span>
+    {% endif %}
+  </div>
+</div>
+
+{% if project_fell_back %}
+<div class="project-fallback" role="alert">
+  ⚠ {{ project_fallback_reason }}
+</div>
+{% endif %}
+
+{# 導航列不再重複標示專案身分：那由上方的 Workspace bar 負責。
+ # 留一個寫死的 PC-MEF 在這裡，會在開著 Blank Project 時仍然說 PC-MEF。 #}
 <nav class="topnav">
   <div class="topnav-inner">
-    <span class="brand">PC-MEF</span>
     <ul>
       {% for item in nav_items %}
       <li>
@@ -48,6 +95,7 @@
     </ul>
   </div>
 </nav>
+</div>
 
 <div class="page">
   {% if breadcrumb %}

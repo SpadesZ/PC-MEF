@@ -70,3 +70,12 @@ outputs/
 # E1-G06 的證據由 `pcmef e1 metrics-evidence` 產生。JUnit 報告帶機器專屬的
 # 時間與路徑，進版控只會製造 diff 雜訊；證據要靠「跑一次」而不是「被提交過」。
 tests/e1_metrics.xml
+
+# 平台化：每個專案自己的產出。專案「定義」(project.json) 要進版控，
+# 專案「產物」不進 —— 與根目錄 outputs/ 同一個道理，只是換了位置。
+# 既有的 outputs/ 規則是錨定在根目錄的，蓋不到 projects/<id>/outputs/。
+projects/*/outputs/
+projects/*/runs/
+projects/*/artifacts/
+projects/*/datasets/
+projects/*/freeze/

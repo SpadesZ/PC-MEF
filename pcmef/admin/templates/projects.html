@@ -1,0 +1,117 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 console.project_routes.page 渲染；extends _layout.html。
+ #         表單送往 projects.select / create / archive / clone。
+ # 檔案路徑: pcmef/admin/templates/projects.html
+ # 產生時間: 2026-09-06 16:45 +08:00
+ # 版本: v0.1.0
+ # 功能說明: Workspace 專案清單：有哪些研究專案、現在在哪一個、
+ #           每一個的資料落在哪裡。
+ # 模組定位: 平台化 Phase 1 的入口頁。第一次使用者應該在這裡就能回答
+ #           「我在哪個研究專案」與「結果屬於誰」。
+ # 主要責任:
+ #   1. 列出全部專案（含已封存），標出目前專案
+ #   2. 顯示每個專案的資料路徑，讓 namespace 邊界看得見
+ #   3. 建立 / 切換 / 封存 / Clone 的操作入口
+ #   4. 明示 Clone 不會帶走科學結果
+ # 維護提醒:
+ #   - 不得隱藏已封存專案。看不到會讓人以為專案被刪了，
+ #     而封存與刪除是兩件事。
+ #   - 不得在本頁加入任何啟動研究執行的按鈕；要跑東西一律回 Run。
+ #   - v0.1.0 新增：首版，對應平台化 Phase 1。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_project_routes.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}專案 Projects{% endblock %}
+
+{% block content %}
+<h1>研究專案 Projects</h1>
+<p class="lede">
+  每一個專案有自己的設定、資料、執行紀錄與結果。
+  切換專案會同時切換 Status、Pipeline、Results 所看到的內容。
+</p>
+
+{% if request.args.get('error') %}
+<p class="error" role="alert">
+  操作未完成（{{ request.args.get('error') }}）。專案識別碼須為小寫英數與連字號、
+  以字母開頭，且不得與現有專案重複。目前專案未被改動。
+</p>
+{% endif %}
+
+<table class="projects">
+  <thead>
+    <tr>
+      <th>專案</th><th>狀態</th><th>模板</th><th>資料位置</th><th>操作</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for project in projects %}
+    <tr class="{{ 'current' if project.project_id == current_project_id else '' }}{{ ' archived' if project.archived else '' }}">
+      <td>
+        <strong>{{ project.display_name }}</strong>
+        {% if project.project_id == current_project_id %}<span class="tag current">目前</span>{% endif %}
+        {% if project.archived %}<span class="tag archived">已封存</span>{% endif %}
+        {% if project.legacy_layout %}<span class="tag legacy">legacy layout</span>{% endif %}
+        <div class="muted mono">{{ project.project_id }}</div>
+        {% if project.description %}<div class="muted">{{ project.description }}</div>{% endif %}
+        {% if project.parent_project_id %}
+        <div class="muted">clone 自 {{ project.parent_project_id }}</div>
+        {% endif %}
+      </td>
+      <td>{{ project.state }}</td>
+      <td class="mono">{{ project.template }}</td>
+      <td class="mono small">
+        {% if project.project_id == current_project_id %}
+          {% for key, value in paths.items() if key != 'project_id' %}
+          <div>{{ key }}: {{ value }}</div>
+          {% endfor %}
+        {% else %}
+          <span class="muted">切換後顯示</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if not project.archived and project.project_id != current_project_id %}
+        <form method="post" action="{{ url_for('projects.select') }}" class="inline">
+          <input type="hidden" name="project_id" value="{{ project.project_id }}">
+          <button type="submit">開啟</button>
+        </form>
+        {% endif %}
+        {% if not project.archived %}
+        <form method="post" action="{{ url_for('projects.archive', project_id=project.project_id) }}" class="inline">
+          <button type="submit">封存</button>
+        </form>
+        {% endif %}
+        <details class="inline">
+          <summary>Clone</summary>
+          <form method="post" action="{{ url_for('projects.clone', project_id=project.project_id) }}">
+            <input name="new_project_id" placeholder="new-project-id" required>
+            <input name="new_display_name" placeholder="顯示名稱">
+            <button type="submit">建立副本</button>
+            <p class="muted small">
+              只複製研究設計與 pipeline 定義。
+              <strong>不會</strong>複製 freeze、outputs、runs、artifacts 或
+              已凍結的證據 —— 副本從 DRAFT 開始。
+            </p>
+          </form>
+        </details>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">尚無專案。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>建立新專案</h2>
+<form method="post" action="{{ url_for('projects.create') }}" class="create-project">
+  <label>識別碼 <input name="project_id" placeholder="sand-extension" required></label>
+  <label>顯示名稱 <input name="display_name" placeholder="Sand Extension"></label>
+  <label>模板
+    <select name="template">
+      <option value="blank">Blank Project</option>
+      <option value="blank-multimodal">Blank Multimodal Project</option>
+    </select>
+  </label>
+  <button type="submit">建立</button>
+</form>
+{% endblock %}

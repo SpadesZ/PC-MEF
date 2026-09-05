@@ -59,6 +59,19 @@ from pcmef.secrets.vault import SecretError
 
 __all__ = ["blueprint", "CSRF_SESSION_KEY", "CSRF_FORM_FIELD", "ADMIN_TOKEN_HEADER"]
 
+
+def _project_name() -> str:
+    """目前專案名稱，供 breadcrumb 使用。
+
+    取不到時回空字串：breadcrumb 會少一層，而不是顯示錯的專案名稱。
+    """
+    try:
+        from pcmef.console.project_routes import request_context
+
+        return request_context().display_name
+    except Exception:  # noqa: BLE001 - breadcrumb 不得讓整頁 500
+        return ""
+
 blueprint = Blueprint("llm_admin", __name__)
 
 CSRF_SESSION_KEY = "pcmef_csrf"
@@ -217,7 +230,7 @@ def page():
     return render_template(
         "llm_setup.html",
         **nav_context("llm"),
-        breadcrumb=breadcrumb(("LLM 設定", None)),
+        breadcrumb=breadcrumb(("LLM 設定", None), project_name=_project_name()),
         csrf_token=_csrf_token(),
         connections=service.connection_views(),
         bindings=service.binding_views(),

@@ -519,3 +519,113 @@ td .note.mono { margin-left: 6px; }
 .facts td .note { display: block; margin-top: 2px; }
 /* 出處靠右且不換行 —— 它是標註，不該與值搶視線。 */
 .facts .fact-source { width: 27%; text-align: right; font-size: 12px; color: var(--muted); }
+
+/* ---------- Workspace bar：目前在哪一個研究專案 ---------- */
+/* Project 刻意不進 .topnav 的五個入口。那五個是「在這個專案裡要做什麼」，
+   而 Project 是「在哪一個專案」—— 上下關係，不是並列關係。
+   放進導航列會讓它看起來像第六個功能，而它是那五個的容器。
+   sticky 是必要的：使用者必須隨時看得到目前專案，否則捲動幾頁之後
+   就會忘記自己在看誰的結果。 */
+.workspacebar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-height: 34px;
+}
+.workspacebar-inner {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 4px 24px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  font-size: 13px;
+  min-height: 26px;
+}
+.workspacebar .brand {
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: .4px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.workspacebar .brand:hover { color: var(--accent); }
+.workspacebar .sep { color: var(--line); }
+.workspacebar .current-project { font-weight: 700; color: var(--ink); }
+.workspacebar .switch-link {
+  color: var(--accent); text-decoration: none; font-size: 12px;
+  margin-left: 2px; white-space: nowrap;
+}
+.workspacebar .switch-link:hover { text-decoration: underline; }
+
+/* 兩條 bar 由 .stickyhead 一起固定在頂端。個別 sticky 加固定 offset
+   會在專案名稱換行時錯位，而錯位的結果是導航列蓋住內容。 */
+.stickyhead { position: sticky; top: 0; z-index: 11; }
+.topnav { position: static; }
+/* 專案名稱可能很長。截斷勝過把整條 bar 撐開，但 title 屬性保留全名。 */
+.workspacebar .current-project {
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 回退警示。**不得改成靜默** —— 使用者以為在看 A 而畫面是 B，
+   是本輪最該防的錯誤歸屬。 */
+.project-fallback {
+  background: #fff8e5;
+  border-bottom: 1px solid #e6d9b0;
+  color: var(--warn);
+  padding: 8px 24px;
+  font-size: 13px;
+}
+
+/* ---------- 標籤與輔助文字 ---------- */
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  vertical-align: middle;
+}
+.tag.current { border-color: var(--accent); color: var(--accent); }
+.tag.legacy { border-color: #b8a76a; color: #7a6420; background: #fdf8e8; }
+.tag.archived { color: var(--muted); background: var(--panel); }
+.tag.warn { border-color: #e6d9b0; color: var(--warn); background: #fff8e5; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+/* 螢幕閱讀器用的標籤。視覺上隱藏，但不得用 display:none —— 那會讓它
+   從無障礙樹上一起消失。 */
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- 專案清單 ---------- */
+.projects { width: 100%; margin-top: 14px; }
+.projects th, .projects td { vertical-align: top; padding: 9px 10px; }
+.projects tr.current { background: #f2fafb; }
+/* 已封存仍然顯示：看不到會讓人以為專案被刪了，而封存與刪除是兩件事。 */
+.projects tr.archived { opacity: .62; }
+.projects td form.inline { display: inline-block; margin: 0 4px 4px 0; }
+.projects details.inline { display: inline-block; vertical-align: top; }
+.projects details.inline > summary {
+  cursor: pointer; font-size: 13px; padding: 3px 0;
+}
+.projects details.inline form { margin-top: 6px; }
+.projects details.inline input { display: block; margin-bottom: 5px; }
+.create-project {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+  margin-top: 10px;
+}
+.create-project label { display: flex; flex-direction: column; font-size: 13px; gap: 3px; }

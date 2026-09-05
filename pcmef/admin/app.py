@@ -71,6 +71,7 @@ def create_app(
     environ: Mapping[str, str] | None = None,
     console_run_root: str | Path = "outputs/console/runs",
     audit_paths=None,
+    workspace_root: str | Path | None = None,
 ):
     """建立 Flask app。
 
@@ -88,6 +89,9 @@ def create_app(
         template_folder=str(_HERE / "templates"),
     )
     app.secret_key = _session_secret()
+    # 專案 workspace 的根。None 表示 repo 根目錄；測試傳 tmp_path
+    # 才不會在開發者真實的 projects/ 底下建立與封存專案。
+    app.config["PCMEF_WORKSPACE_ROOT"] = workspace_root
     app.config["PCMEF_ADMIN_SERVICE"] = service or AdminService(
         registry=LLMRegistry(registry_path),
         # local_master_key=True：沒設 PCMEF_SECRET_MASTER_KEY 時自動在
@@ -187,6 +191,18 @@ def _register_console(app, run_root, audit_paths, env: Mapping[str, str]) -> Non
     app.register_blueprint(status_blueprint)
     app.register_blueprint(results_blueprint)
     app.register_blueprint(pipeline_blueprint)
+
+    # Workspace 層。Project 是五個主入口**之上**的一層，因此它有自己的
+    # blueprint 與版型區塊，而不是導航列上的第六個項目。
+    # context processor 讓每一頁都拿得到目前專案：漏傳的那一頁會少掉
+    # 專案標示，而「少一個標示」看起來只是比較樸素，不像錯誤。
+    from pcmef.console.project_routes import (
+        blueprint as projects_blueprint,
+        install_project_context,
+    )
+
+    app.register_blueprint(projects_blueprint)
+    install_project_context(app)
 
 
 def serve(

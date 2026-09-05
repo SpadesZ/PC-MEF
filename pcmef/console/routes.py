@@ -47,6 +47,19 @@ from pcmef.agents.cache import DEFAULT_CACHE_ROOT
 
 __all__ = ["blueprint"]
 
+
+def _project_name() -> str:
+    """目前專案名稱，供 breadcrumb 使用。
+
+    取不到時回空字串：breadcrumb 會少一層，而不是顯示錯的專案名稱。
+    """
+    try:
+        from pcmef.console.project_routes import request_context
+
+        return request_context().display_name
+    except Exception:  # noqa: BLE001 - breadcrumb 不得讓整頁 500
+        return ""
+
 blueprint = Blueprint("console", __name__)
 
 #: SSE 的輪詢間隔與上限。上限存在是為了不讓忘記關的分頁累積連線。
@@ -111,7 +124,7 @@ def page():
     return render_template(
         "console.html",
         **nav_context("run"),
-        breadcrumb=breadcrumb(("實驗 Run", None)),
+        breadcrumb=breadcrumb(("實驗 Run", None), project_name=_project_name()),
         csrf_token=token,
         presets=PRESETS,
         classes=current_app.config.get("PCMEF_CONSOLE_CLASSES", []),
@@ -131,7 +144,7 @@ def _not_found(what: str, run_id: str | None = None, kind: str = "run") -> str:
         "not_found.html",
         **nav_context("results"),
         breadcrumb=breadcrumb(("結果 Results", url_for("results.page")),
-                              ("找不到", None)),
+                              ("找不到", None), project_name=_project_name()),
         what=what, run_id=run_id, kind=kind,
     )
 
@@ -224,6 +237,7 @@ def run_page(run_id: str, section: str = "overview"):
             ("結果 Results", url_for("results.page")),
             (run_id, url_for("console.run_page", run_id=run_id)),
             (label, None),
+            project_name=_project_name(),
         ),
         csrf_token=session.get(CSRF_SESSION_KEY, ""),
         **context,
@@ -263,6 +277,7 @@ def case_page(run_id: str, case_id: str):
             ("流程追蹤 Trace",
              url_for("console.run_page", run_id=run_id, section="trace")),
             (case_id, None),
+            project_name=_project_name(),
         ),
         record=record,
         section="trace",

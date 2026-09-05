@@ -4,7 +4,7 @@
 #         **純資料，不讀檔、不查詢、不寫入。**
 # 檔案路徑: pcmef/console/navigation.py
 # 產生時間: 2026-09-03 09:20 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 全站五個主入口的單一定義處，以及 breadcrumb 的組裝工具。
 # 模組定位: SAI v0.6.0 §20 的資訊架構。導航項目集中在這裡而不是散在各
 #           template：散開的話新增一頁就會漏掉某個頁面的導航，
@@ -14,15 +14,21 @@
 #   2. nav_context() 產生 template 需要的 nav_items / nav_active
 #   3. RUN_SECTIONS 定義單次 run 的六個第二層分頁
 #   4. run_subnav() 產生分頁列，並標出哪些對這次 run 有內容
-#   5. breadcrumb() 組出「PC-MEF > Results > Run ID > ...」這種路徑
+#   5. breadcrumb() 組出「Workspace > Project > Results > Run ID > ...」這種路徑
 # 維護提醒:
 #   - 不得為了新功能再加第六個頂層項目。五個入口是刻意的收斂；
 #     新功能要歸進其中一個，否則首頁會重新開始堆疊（那正是要修的問題）。
+#     **Project 不是第六個項目**：它是這五個入口之上的一層，
+#     由版型頂端的切換器呈現，不佔用導航列。
+#   - 不得把 breadcrumb 的根改回寫死的專案名稱。根寫死時，切到另一個
+#     專案後麵包屑仍會說 PC-MEF，而那在畫面上看起來完全正常。
 #   - 不得把「沒有內容」的分頁藏起來。藏起來看起來像系統沒有這個能力，
 #     而事實是「這種 run 不產生那一層」—— 兩者必須在畫面上分得出來。
 #   - 不得把 href 寫成字面路徑。一律用 url_for 的端點名，
 #     改路由時才不會留下指向 404 的導航。
 #   - v0.1.0 新增：首版，對應 P2-2。
+#   - v0.2.0 變更：breadcrumb 根由寫死的 PC-MEF 改為
+#     Workspace > Project，對應平台化 Phase 1。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_navigation.py -v
 # ------------------------------------------------------------
@@ -137,12 +143,25 @@ def run_subnav(run_id: str, active: str, available: Mapping[str, bool]) -> list[
     ]
 
 
-def breadcrumb(*crumbs: tuple[str, str | None]) -> list[dict[str, str | None]]:
+def breadcrumb(
+    *crumbs: tuple[str, str | None],
+    project_name: str | None = None,
+    workspace_href: str | None = None,
+) -> list[dict[str, str | None]]:
     """組出 breadcrumb。每個 crumb 是 (label, href)；最後一個不加連結。
 
-    第一層固定補上 PC-MEF，讓每一條路徑都從同一個根開始 ——
-    「Results > Run ID」與「PC-MEF > Results > Run ID」在畫面上是兩種深度感。
+    根從 **Workspace** 開始，其後是目前的 Project。平台化之前這裡固定寫
+    `PC-MEF`，那在只有一個研究的系統裡是對的；一旦有第二個專案，
+    寫死的根就會在看 B 專案時仍然說 PC-MEF —— 而那種錯誤在畫面上
+    看起來完全正常。
+
+    `project_name` 未給時只有 Workspace 一層。**不在此查詢目前專案**：
+    本模組是純資料，查詢會讓它需要 request context 才能被測試。
     """
-    items: list[dict[str, str | None]] = [{"label": "PC-MEF", "href": None}]
+    items: list[dict[str, str | None]] = [
+        {"label": "Workspace", "href": workspace_href}
+    ]
+    if project_name:
+        items.append({"label": project_name, "href": None})
     items.extend({"label": label, "href": href} for label, href in crumbs)
     return items
