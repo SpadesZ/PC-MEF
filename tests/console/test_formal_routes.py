@@ -137,32 +137,45 @@ def test_every_check_declares_whether_it_blocks(client):
 
 def test_a_non_blocking_failure_does_not_block(tmp_path):
     """dry run 可以覆寫自己的上一份預演；那不是 FAIL。"""
-    from pcmef.experiments.formal_service import DRY_RUN_REPORT, preflight
+    from pcmef.experiments.formal_service import preflight
 
     out = tmp_path / "out"
     out.mkdir()
-    (out / DRY_RUN_REPORT).write_text("{}", encoding="utf-8")
 
     report = preflight(mode="dry-run", base=tmp_path / "base", out=out)
-    occupied = [
-        c for c in report["checks"] if c["check"] == "output_location_is_free"
-    ][0]
-    assert occupied["passed"] is False
-    assert occupied["blocking"] is False
-    assert "output_location_is_free" not in " ".join(report["blockers"])
+    # 預演模式下 formal 的 claim 狀態只是參考資訊，不阻擋 —— 一個已經跑完
+    # 正式執行的專案裡，再跑一次預演仍然是合法的。
+    informational = [c for c in report["checks"] if not c["blocking"]]
+    assert informational, "預演必須有非阻擋的參考項"
+    assert all(
+        c["check"] not in " ".join(report["blockers"]) for c in informational
+    )
 
 
 def test_the_same_failure_blocks_a_formal_run(tmp_path):
-    """同一個狀況在正式模式下必須擋下來：那是 one-shot。"""
-    from pcmef.experiments.formal_service import FORMAL_REPORT, preflight
+    """正式模式下 claim 已被持有就必須擋下來：那是 one-shot。
+
+    判準自 2026-09-05 起是 claim 狀態而不是「報告檔在不在」：一次跑到一半
+    失敗的正式執行沒有報告，但 final partition 已經開封（NOTE-079）。
+    """
+    from pcmef.experiments.e2_formal import run_artifact_root
+    from pcmef.experiments.formal_service import preflight
+    from pcmef.experiments.run_claim import RunIdentity, mark_complete, reserve
 
     out = tmp_path / "out"
     out.mkdir()
-    (out / FORMAL_REPORT).write_text("{}", encoding="utf-8")
+    formal_root = run_artifact_root(out, dry_run=False)
+    identity = RunIdentity(
+        freeze_dir="freeze/runs/PFC-001", lock_hashes={"gate": "a" * 64},
+        base_manifest_hash="b" * 64, code_version="c" * 40,
+    )
+    claim = reserve(formal_root, identity)
+    mark_complete(formal_root, claim["claim_id"])
 
     report = preflight(mode="formal", base=tmp_path / "base", out=out)
-    occupied = [
-        c for c in report["checks"] if c["check"] == "output_location_is_free"
+    taken = [
+        c for c in report["checks"] if c["check"] == "formal_run_claim_is_available"
     ][0]
-    assert occupied["blocking"] is True
+    assert taken["passed"] is False
+    assert taken["blocking"] is True
     assert report["allowed"] is False

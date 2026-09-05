@@ -68,26 +68,63 @@
       {% else %}
         <p class="lede"><span class="badge warn">尚未執行</span></p>
         <p class="note">
-          正式執行還沒發生過。它跑完會把最終報告寫到下面這個
-          <strong>canonical 位置</strong>，而那個位置一旦被佔用，
-          pre-flight 的 <span class="mono">output_location_is_free</span>
-          就會擋下第二次 —— 這就是 one-shot 的實作方式。
+          正式執行還沒發生過。它一開始就會用
+          <span class="mono">O_EXCL</span> 建立一份 claim，之後任何第二個
+          請求都拿不到 —— 兩個同時按下去也只有一個能跑。跑完 claim 標成
+          <span class="mono">COMPLETE</span> 並永久封閉；中途失敗標成
+          <span class="mono">INTERRUPTED_RESUMABLE</span>，那時只能以相同
+          identity resume，不能重新開始。
         </p>
       {% endif %}
       <table>
         <tbody>
+          <tr><th>claim 狀態</th>
+              <td>
+                {% if status.claim_state %}
+                  <span class="badge {{ 'bad' if status.claim_state == 'COMPLETE'
+                                        else 'warn' }}">{{ status.claim_state }}</span>
+                {% else %}<span class="badge ok">未取得</span>{% endif %}
+              </td>
+              <th>claim 檔</th>
+              <td class="mono">{{ status.claim_path }}</td></tr>
+          {% if status.claim %}
+          <tr><th>持有者</th>
+              <td class="note">pid {{ status.claim.get('pid') }} @ {{ status.claim.get('host') }}</td>
+              <th>取得時間</th>
+              <td class="note">{{ (status.claim.get('reserved_at') or '')[:19] }}</td></tr>
+          {% if status.claim.get('resume_count') %}
+          <tr><th>resume 次數</th>
+              <td class="mono" colspan="3">{{ status.claim.get('resume_count') }}</td></tr>
+          {% endif %}
+          {% endif %}
           <tr><th>canonical 輸出目錄</th>
               <td class="mono" colspan="3">{{ status.canonical_out }}</td></tr>
+          <tr><th>正式產物 root</th>
+              <td class="mono" colspan="3">{{ status.formal_root }}</td></tr>
           <tr><th>正式報告</th><td class="mono">{{ status.report_path }}</td>
               <th>是否存在</th>
-              <td><span class="badge {{ 'bad' if status.already_executed else 'warn' }}">
-                  {{ '是' if status.already_executed else '否' }}</span></td></tr>
-          <tr><th>預演報告</th><td class="mono">{{ status.dry_run_report_path }}</td>
-              <th>是否存在</th>
-              <td><span class="badge {{ 'ok' if status.dry_run_present else 'warn' }}">
-                  {{ '是' if status.dry_run_present else '否' }}</span></td></tr>
+              <td><span class="badge {{ 'bad' if status.completed else 'warn' }}">
+                  {{ '是' if status.completed else '否' }}</span></td></tr>
+          <tr><th>預演</th>
+              <td class="mono">{{ status.dry_runs_root }}</td>
+              <th>次數</th>
+              <td class="mono">{{ status.dry_run_ids | length }}</td></tr>
         </tbody>
       </table>
+      {% if status.dry_run_ids %}
+      <details class="advanced">
+        <summary>{{ status.dry_run_ids | length }} 次預演，各有自己的 root</summary>
+        <p class="note">
+          每一次預演的 report、trace、stress 與 preview 都在自己的目錄底下，
+          彼此不覆蓋，也碰不到正式的那一份。
+        </p>
+        <ul class="note">
+          {% for run_id in status.dry_run_ids %}
+          <li class="mono">{{ status.dry_runs_root }}/{{ run_id }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endif %}
       <p class="note"><strong>執行紀錄 ≠ 科學報告。</strong>{{ status.record_vs_report }}</p>
       {% if formal_records %}
       <table>
@@ -158,9 +195,8 @@
           <p class="note">
             <strong>正式執行</strong>：一次性，會呼叫 provider 並產生研究結論。
             {% if status.already_executed %}
-              <span class="badge bad">已經跑過，永久封閉</span>
-              報告已在 <span class="mono">{{ status.report_path }}</span>；
-              重跑會產生第二份互相矛盾的正式結果，因此按鈕停用。
+              <span class="badge bad">claim 已被取得</span>
+              {{ status.blocked_reason }}
             {% elif not formal.allowed %}
               目前 <span class="badge bad">BLOCKED</span>：
               {{ formal.blockers | join('；') }}

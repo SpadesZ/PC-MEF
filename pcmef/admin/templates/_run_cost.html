@@ -115,6 +115,13 @@
             <td class="mono">{{ cost.agent_cache.get('model_id', '—') }}</td>
             <th>revision</th>
             <td class="mono">{{ cost.agent_cache.get('provider_revision', '—') }}</td></tr>
+        <tr><th>省下的 provider 呼叫</th>
+            <td class="mono">
+              {% set avoided = cost.agent_cache.get('provider_calls_avoided') %}
+              {% if avoided is not none %}<strong>{{ avoided }}</strong> 次
+              {% else %}—{% endif %}</td>
+            <th>案例數</th>
+            <td class="mono">{{ cost.agent_cache.get('cases', '—') }}</td></tr>
         <tr><th>cache root</th>
             <td class="mono" colspan="3">{{ cost.agent_cache.get('cache_root', '—') }}</td></tr>
       </tbody>
@@ -122,7 +129,30 @@
     <p class="note">
       命中不算 provider 呼叫，因此上面的請求數會低於
       escalated case 數 × 4。那個落差是省下來的錢，不是漏計。
+      「省下的呼叫」= 命中數 × 4（四個角色各一次，不含 retry）。
     </p>
+
+    {# 寫不出 producer trace 的命中，日後無法追溯當初四個角色看到什麼。
+       那是**解釋能力的損失**，不是錯誤 —— 但它必須被看見，否則使用者會
+       在點進 cache 頁之後才發現追不到（NOTE-074）。 #}
+    {% set errors = cost.agent_cache.get('provenance_errors') or [] %}
+    {% if errors %}
+    <p class="lede"><span class="badge bad">{{ errors | length }} 筆 provenance 寫入失敗</span></p>
+    <p class="note">
+      這些鑰匙沒有留下 <span class="mono">producer_trace.json</span>：
+      之後命中它們時，將看不到當初四個角色實際收到什麼。
+      決策與結果不受影響 —— 六份 artifact 都已寫入。
+    </p>
+    <ul class="note">
+      {% for error in errors %}<li class="mono">{{ error }}</li>{% endfor %}
+    </ul>
+    {% else %}
+    <p class="note">
+      <span class="badge ok">provenance 完整</span>
+      每一筆未命中都留下了 <span class="mono">producer_trace.json</span>，
+      因此日後命中時仍追得回最初那一次 Agent 執行。
+    </p>
+    {% endif %}
   </div>
 </section>
 {% endif %}

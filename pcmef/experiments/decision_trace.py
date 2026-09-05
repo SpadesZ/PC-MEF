@@ -118,28 +118,35 @@ def route_explanation(
         f"、q_T={q_t:.3f}{'≥' if tof_ok else '<'}{threshold:.3f}"
     )
 
+    # 措辭一律用「可靠度」而不是「感測品質」。
+    #
+    # q 是 **reliability**：由 Q（原始感測品質）、劣化餘裕與跨模態支持推得，
+    # 值域 [0,1]。Q 才是感測品質，而且它不在 [0,1]（實測 Q_T 到 17）。
+    # 把 q 唸成「感測品質」會讓畫面自己與 trace 的 `_meaning` 欄位矛盾 ——
+    # 那裡明寫 "q is sensor reliability... Predictive confidence is NOT
+    # sensor reliability"（NOTE-080）。
     if vision_ok and not tof_ok:
         implied, sentence = "trust_vision", (
-            f"只有 Vision 的感測品質過關（{quality}），因此採信 Vision 的分布。"
+            f"只有 Vision 的可靠度過關（{quality}），因此採信 Vision 的分布。"
         )
     elif tof_ok and not vision_ok:
         implied, sentence = "trust_tof", (
-            f"只有 ToF 的感測品質過關（{quality}），因此採信 ToF 的分布。"
+            f"只有 ToF 的可靠度過關（{quality}），因此採信 ToF 的分布。"
         )
     elif vision_ok and tof_ok and not conflicting:
         implied, sentence = "fusion", (
-            f"兩側品質都過關（{quality}），且分歧未超過門檻"
+            f"兩側可靠度都過關（{quality}），且分歧未超過門檻"
             f"（D={d:.3f} ≤ {cut:.3f}），因此以固定權重融合，不需要仲裁。"
         )
     elif vision_ok and tof_ok:
         implied, sentence = "escalated", (
-            f"兩側品質都過關（{quality}），但彼此分歧超過門檻"
+            f"兩側可靠度都過關（{quality}），但彼此分歧超過門檻"
             f"（D={d:.3f} > {cut:.3f}），傳統證據無法自行決定，"
             "因此進入四角色證據仲裁。"
         )
     else:
         implied, sentence = "escalated", (
-            f"兩側的感測品質都不過關（{quality}），傳統證據不足以支撐決定，"
+            f"兩側的可靠度都不過關（{quality}），傳統證據不足以支撐決定，"
             "因此進入四角色證據仲裁。"
         )
 
@@ -169,6 +176,63 @@ def route_explanation(
     }
 
 
+#: 五條臂在畫面上的名稱與定義。順序即 G1..G5。
+ARM_LABELS: tuple[tuple[str, str, str], ...] = (
+    ("vision_only", "G1", "argmax p_V"),
+    ("tof_only", "G2", "argmax p_T"),
+    ("fixed_fusion", "G3", "固定權重融合，不看 route"),
+    ("reliability_routing", "G4", "同樣的 route，但 escalated 退回固定融合"),
+    ("pcmef_full", "G5", "可靠度路由 + 選擇性多代理仲裁"),
+)
+
+
+def _arm_outcomes(
+    arms: Mapping[str, Sequence[float]],
+    labels: Sequence[str],
+    *,
+    escalated: bool,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """每條臂的 argmax，以及它在這一列有沒有真的執行。
+
+    `pcmef_full` 在 dry run 的 escalated 列上**沒有執行**：那一列的 F(x)
+    是填位值。回傳 `executed=False` 並且**不帶分布** —— 帶了就會有人把它
+    畫出來，而畫出來的數字會恰好等於 fixed fusion。
+    """
+    outcomes: dict[str, Any] = {}
+    for key, tag, definition in ARM_LABELS:
+        values = arms.get(key)
+        not_executed = (
+            key == "pcmef_full" and dry_run and escalated
+        )
+        if values is None:
+            outcomes[key] = {
+                "tag": tag, "definition": definition, "executed": False,
+                "reason": "這次 run 沒有記錄這一條臂。",
+                "distribution": None, "prediction": None,
+            }
+            continue
+        if not_executed:
+            outcomes[key] = {
+                "tag": tag, "definition": definition, "executed": False,
+                "reason": (
+                    "零成本預演停在 escalation 邊界，這一列的 F(x) 是填位值，"
+                    "不是 PC-MEF 的結果。"
+                ),
+                "distribution": None, "prediction": None,
+            }
+            continue
+        vector = [float(x) for x in values]
+        index = int(np.argmax(vector))
+        outcomes[key] = {
+            "tag": tag, "definition": definition, "executed": True,
+            "reason": "",
+            "distribution": vector,
+            "prediction": labels[index] if index < len(labels) else None,
+        }
+    return outcomes
+
+
 @dataclass
 class CaseTrace:
     """單一 case 的完整決策紀錄。"""
@@ -186,6 +250,10 @@ class CaseTrace:
     arms: dict[str, Any]
     agent_execution: dict[str, Any]
     final: dict[str, Any]
+    #: 逐臂的 argmax 與「這一列有沒有執行」。排在最後且有預設值，
+    #: 讓既有的 positional 建構（含測試）不必跟著改 —— 這是新增的觀測
+    #: 欄位，不是決策的一部分。
+    arm_outcomes: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self, header: Mapping[str, Any]) -> dict[str, Any]:
         return {
@@ -201,6 +269,7 @@ class CaseTrace:
             "reliability": self.reliability,
             "routing": self.routing,
             "arms": self.arms,
+            "arm_outcomes": self.arm_outcomes,
             "agent_execution": self.agent_execution,
             "final": self.final,
         }
@@ -339,6 +408,13 @@ def build_case_trace(
         arms={
             name: [float(x) for x in values] for name, values in arms.items()
         },
+        # 每條臂的 argmax，以及它在**這一列**到底有沒有執行。
+        #
+        # dry run 的 escalated 列停在仲裁邊界，F(x) 是填位值（等於 fused）。
+        # 把那個數字當成 G5 的結果顯示出來，讀起來會像「PC-MEF 恰好等於
+        # fixed fusion」—— 一個從未執行的方法不該有數字。報告層早就把整條臂
+        # 排除掉了（見 run_formal_e2_full），case 頁也必須這樣（NOTE-081）。
+        arm_outcomes=_arm_outcomes(arms, labels, escalated=escalated, dry_run=dry_run),
         agent_execution=agent_execution,
         final={
             "distribution": final,

@@ -93,6 +93,9 @@ __all__ = [
     "load_frozen_decision_stack",
     "frozen_severity",
     "resolve_severity",
+    "run_artifact_root",
+    "FORMAL_SUBDIR",
+    "DRY_RUN_SUBDIR",
     "prepare_cases",
     "execute_full_pcmef_cases",
     "worst_condition_macro_f1",
@@ -106,6 +109,43 @@ DS_V2 = Path("outputs/perception/ds_v2")
 #: 且該 payload 自帶 `reselection_forbidden: true`。
 SEVERITY_LOCK = "e2_sample_size"
 SEVERITY_FIELD = "severity_allocation"
+
+#: canonical out 底下，formal 與 dry-run 各自的子目錄。
+#:
+#: 先前兩者**共用** `<out>/trace` 與 `<out>/stress`，只有報告檔名不同。
+#: 於是正式跑完之後再跑一次預演，會直接覆蓋掉正式的 trace 與 stress ——
+#: 而報告還在，看起來一切正常。一次性保護了報告，卻沒保護它的證據
+#: （NOTE-078）。
+#:
+#: 現在：formal 落在 `<out>/formal/`（整個目錄不可變）；每一次 dry-run
+#: 落在 `<out>/dry_runs/<run_id>/`，彼此也不互相覆蓋。report、trace、
+#: stress、preview 因此必然同屬一次 run。
+FORMAL_SUBDIR = "formal"
+DRY_RUN_SUBDIR = "dry_runs"
+
+
+def run_artifact_root(
+    out_dir: str | Path, *, dry_run: bool, run_id: str | None = None
+) -> Path:
+    """這一次 run 的**所有**產物落在哪裡。
+
+    formal 與 dry-run 完全不共用任何路徑，兩次 dry-run 之間也不共用。
+    這是「舊 run 頁不可讀到新 run 產物」的實作方式 —— 不是靠畫面過濾，
+    而是靠它們根本不在同一個目錄裡。
+    """
+    out = Path(out_dir)
+    if not dry_run:
+        return out / FORMAL_SUBDIR
+    if not run_id:
+        raise FormalE2Error(
+            "a dry run needs its own run_id: dry runs share the canonical out "
+            "directory, and without a per-run subdirectory the second rehearsal "
+            "overwrites the first one's trace and stress set"
+        )
+    safe = "".join(c for c in str(run_id) if c.isalnum() or c in "-_.")
+    if not safe:
+        raise FormalE2Error(f"run_id {run_id!r} has no usable characters")
+    return out / DRY_RUN_SUBDIR / safe
 
 #: 正式執行：escalated case 呼叫四個真 agent。
 LLM_MODE_EXECUTE = "execute"
@@ -784,6 +824,9 @@ def run_formal_e2_full(
     is_final_formal_e2: bool = False,
     progress: Callable[[str], None] | None = None,
     artifact_cache_root: str | Path | None = None,
+    run_id: str | None = None,
+    claim: bool = False,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Full PC-MEF 的 Formal E2。
 
@@ -798,11 +841,21 @@ def run_formal_e2_full(
 
     `freeze_dir` 為 required keyword-only：見 `load_frozen_decision_stack`
     的說明，這裡不得回復預設值。
+
+    `out_dir` 是 **canonical root**，不是這次 run 的目錄。實際產物落在
+    `run_artifact_root()` 決定的子目錄：formal 一個、每次 dry-run 各一個。
+    兩者不共用任何路徑（NOTE-078）。
+
+    `claim=True` 時取得 one-shot claim 才開始跑，跑完標成 COMPLETE、
+    失敗標成 INTERRUPTED_RESUMABLE。dry run 不取 claim —— 預演可以重跑，
+    而 claim 保護的是「正式結果只有一份」（NOTE-079）。
     """
     say = progress or (lambda _m: None)
     dry_run = llm_mode == LLM_MODE_SKIP
-    out = Path(out_dir)
+    canonical_out = Path(out_dir)
+    out = run_artifact_root(canonical_out, dry_run=dry_run, run_id=run_id)
     out.mkdir(parents=True, exist_ok=True)
+    say(f"artifact root {out.as_posix()}")
 
     stack = load_frozen_decision_stack(freeze_dir)
     rule = stack["rule"]
@@ -821,10 +874,55 @@ def run_formal_e2_full(
         f"(from {SEVERITY_LOCK}.lock)"
     )
 
-    prepared = prepare_cases(
-        base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
-        code_version=code_version, progress=say,
-    )
+    # --- one-shot claim（NOTE-079）----------------------------------------
+    #
+    # 在 prepare_cases 之前取得。prepare_cases 會生成 stress set，而生成
+    # 本身就是動作 —— claim 必須在任何動作之前握住，否則兩個同時啟動的
+    # 請求會各自生成一份 stress set，然後才發現彼此。
+    active_claim: dict[str, Any] | None = None
+    if claim and not dry_run:
+        from pcmef.experiments.run_claim import RunIdentity, mark_complete
+        from pcmef.experiments.run_claim import mark_interrupted, mark_running
+        from pcmef.experiments.run_claim import reserve as reserve_claim
+
+        base_manifest = json.loads(
+            (Path(base_manifest_dir) / "dataset_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        identity = RunIdentity(
+            freeze_dir=str(freeze_dir),
+            lock_hashes=stack["lock_hashes"],
+            # 只取 manifest 的**身分**欄位，不 hash 整份檔案：後者含檔案
+            # 路徑與計數，換一台機器就會變，於是 resume 永遠對不上。
+            base_manifest_hash=str(base_manifest.get("scenario_set_hash", "")),
+            code_version=code_version,
+        )
+        active_claim = reserve_claim(out, identity, resume=resume)
+        say(f"claim {active_claim['claim_id']} {active_claim['state']}"
+            + (f" (resume #{active_claim.get('resume_count')})" if resume else ""))
+        mark_running(out, active_claim["claim_id"])
+
+    def _fail_claim(reason: str) -> None:
+        """把 claim 標成可 resume。**不刪掉它** —— final partition 已經開封。"""
+        if active_claim is None:
+            return
+        try:
+            mark_interrupted(out, active_claim["claim_id"], reason)
+        except Exception as error:  # noqa: BLE001
+            say(f"warning: could not mark the claim interrupted: {error}")
+
+    try:
+        prepared = prepare_cases(
+            base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
+            code_version=code_version, progress=say,
+        )
+    except BaseException as error:
+        # 這裡的失敗發生在 stress set 生成階段。claim 標成可 resume 而不是
+        # 放著不管：放著會停在 RUNNING，而 RUNNING 既擋掉 fresh restart
+        # 也擋掉 resume，等於把自己鎖死。
+        _fail_claim(f"{type(error).__name__}: {error}")
+        raise
     rows = prepared["rows"]
     labels = prepared["labels"]
     p_vision, p_tof = prepared["p_vision"], prepared["p_tof"]
@@ -911,10 +1009,22 @@ def run_formal_e2_full(
                 route=payload["route"], rule=payload["rule"],
                 decision=payload["decision"], agent_calls=payload["agent_calls"],
                 class_order=CLASS_ORDER,
+                # 五條臂全部進 trace。先前只有三條 —— 於是 case 頁看不到
+                # G4（路由但不仲裁）與 G5（完整 PC-MEF），而 G5 vs G4 正是
+                # 「仲裁帶來多少」這個問題的答案（NOTE-081）。
+                #
+                # G4 的定義：escalated 用 fused，其餘沿用 F(x)。non-escalated
+                # 時 F(x) 依定義等於 p_trad，所以這不是近似，是等式。
                 arms={
                     "vision_only": p_vision[index],
                     "tof_only": p_tof[index],
                     "fixed_fusion": fused_all[index],
+                    "reliability_routing": (
+                        fused_all[index]
+                        if payload["route"] == "escalated"
+                        else payload["decision"].final
+                    ),
+                    "pcmef_full": payload["decision"].final,
                 },
                 rgb_preview={
                     "sha256": digest,
@@ -937,6 +1047,7 @@ def run_formal_e2_full(
         # run 中止時仍要留下已寫的 case，但 index 必須明說它不完整 ——
         # 一份看起來完整的 index 比沒有 index 更糟。
         writer.abort(f"{type(error).__name__}: {error}")
+        _fail_claim(f"{type(error).__name__}: {error}")
         raise
     finals = executed["finals"]
     traces = executed["traces"]
@@ -1115,6 +1226,11 @@ def run_formal_e2_full(
         # `--vision-severity` 傳了什麼，報告都寫著「來自 frozen 選擇」——
         # 一句永遠為真的話證明不了任何事（NOTE-072）。
         "severity_source": severity_provenance,
+        # 這次 run 的產物全部在同一個 root 底下。寫進報告，讓「報告、trace、
+        # stress、preview 是不是同一次 run 的」變成可查的事實而不是推測。
+        "artifact_root": out.as_posix(),
+        "canonical_out": canonical_out.as_posix(),
+        "run_id": run_id,
         "dataset": {
             "base": Path(base_manifest_dir).as_posix(),
             "family_indices": prepared["base_manifest"].get("family_indices"),
@@ -1237,4 +1353,20 @@ def run_formal_e2_full(
     # 的絕對路徑，複製到別處之後那一欄就是錯的。
     document["report_path"] = (out / filename).as_posix()
     document["trace_index_path"] = trace_index_path
+    document["artifact_root"] = out.as_posix()
+
+    # 報告落盤成功才封閉 claim。順序不可對調：先標 COMPLETE 再寫報告的話，
+    # 寫入失敗會留下一個「已完成但沒有結果」的永久封閉狀態（NOTE-079）。
+    if active_claim is not None:
+        claim_state = mark_complete(
+            out, active_claim["claim_id"], (out / filename).as_posix()
+        )
+        say(f"claim {claim_state['claim_id']} COMPLETE — Formal E2 是一次性的，"
+            "此後永久封閉")
+        document["run_claim"] = {
+            "claim_id": claim_state["claim_id"],
+            "state": claim_state["state"],
+            "identity_digest": (claim_state.get("identity") or {}).get("digest"),
+            "resume_count": claim_state.get("resume_count", 0),
+        }
     return document

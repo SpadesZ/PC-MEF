@@ -27,6 +27,18 @@
     {% endif %}
     {# canonical 位置是共用的，因此「這份報告是不是這次執行寫的」必須說出來，
        不能靠讀者自己比對時間（P0-1）。 #}
+    {# 匯出圖表。**唯讀重繪** —— 與 `pcmef figures export` 是同一個 renderer，
+       圖上的每個數字都能在這份報告裡逐字找到。 #}
+    <form method="post" class="inline"
+          action="{{ url_for('console.export_figures', run_id=record.run_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn" type="submit">匯出論文品質圖表</button>
+      <span class="note">
+        由這份報告重繪，不重算任何指標；輸出到這次 run 的
+        <span class="mono">figures/</span>
+      </span>
+    </form>
+
     {% if outputs.attribution and outputs.attribution.kind == 'superseded' %}
     <p class="lede"><span class="badge bad">這份報告不是這次執行寫的</span></p>
     <p class="note">

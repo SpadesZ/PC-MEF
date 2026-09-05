@@ -200,6 +200,13 @@ def run_page(run_id: str, section: str = "overview"):
         )
     elif section == "inputs":
         context["inputs"] = run_view.inputs_view(run_dir, record)
+        # 「餵進去的是什麼」先前只有參數與資料集摘要 —— 看不到任何一筆
+        # 實際的資料長什麼樣。gallery 補上這一層。
+        context["gallery"] = run_view.case_gallery(
+            run_dir,
+            condition=request.args.get("condition", "").strip(),
+            family=request.args.get("family", "").strip(),
+        )
     elif section == "intermediate":
         context["intermediate"] = run_view.intermediate_view(run_dir, record)
     elif section == "outputs":
@@ -230,6 +237,7 @@ def case_page(run_id: str, case_id: str):
 
     from pcmef.console import run_view
     from pcmef.console.navigation import run_subnav
+    from pcmef.experiments.decision_trace import ARM_LABELS
 
     runner = _runner()
     try:
@@ -262,6 +270,10 @@ def case_page(run_id: str, case_id: str):
             run_id, "trace", run_view.availability(run_dir, record.kind, record)
         ),
         trace=trace,
+        # 臂的顯示順序。trace JSON 以 sort_keys=True 落盤（為了逐 byte
+        # 可重現），因此讀回來的 dict 是字母序 —— G3, G5, G4, G2, G1。
+        # 順序在這裡由 ARM_LABELS 還原，而不是在樣板裡寫死一份。
+        arm_order=[key for key, _tag, _definition in ARM_LABELS],
         neighbours=run_view.case_neighbours(run_dir, case_id),
         # 只有真的呼叫過 agent 才算得出隔離矩陣。未 escalate 或 dry-run
         # 的 artifacts 是空的，這時給 None 讓樣板說明原因，而不是渲染一張
@@ -401,6 +413,55 @@ def start_run():
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201
+
+
+@blueprint.post("/api/console/runs/<run_id>/figures")
+def export_figures(run_id: str):
+    """由這次 run 的報告產出論文用圖。**唯讀重繪，不重算任何指標。**
+
+    沿用 `pcmef.reporting.figures` —— 與 `pcmef figures export` 是同一個
+    renderer。在這裡另寫一份繪圖程式，畫出來的數字就會與 CLI 產的那一份
+    分岔，而分岔的圖看起來完全正常。
+
+    圖落在這次 run 自己的 artifact root 底下的 `figures/`：它們是那一份
+    報告的衍生物，跟著它走才不會有人拿 A 的圖配 B 的報告。
+    """
+    from flask import jsonify
+
+    from pcmef.console import run_view
+
+    _guard()
+    runner = _runner()
+    try:
+        record = runner.get(run_id)
+    except RunnerError:
+        return jsonify({"error": f"run {run_id!r} not found"}), 404
+
+    run_dir = runner.run_dir(run_id)
+    report, name, attribution = run_view.report_attribution(run_dir, record)
+    if report is None:
+        return jsonify({
+            "error": "這次執行沒有可用的報告，無法出圖。",
+            "reason": attribution.get("reason", ""),
+        }), 400
+
+    try:
+        from pcmef.reporting import figures
+    except ImportError as error:
+        return jsonify({
+            "error": f"matplotlib 未安裝：{error}",
+            "hint": "pip install -e '.[figures]'",
+        }), 501
+
+    out_dir = run_view.artifact_root(run_dir) / "figures"
+    result = figures.export_all(report, out_dir)
+    result["source_report"] = name
+    result["attribution"] = attribution.get("kind")
+    if request.form:
+        return redirect(
+            url_for("console.run_page", run_id=run_id, section="outputs")
+        )
+    return jsonify(result), 200
 
 
 @blueprint.post("/api/console/runs/<run_id>/delete")

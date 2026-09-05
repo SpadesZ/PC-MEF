@@ -280,6 +280,32 @@ th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--lin
    「一張表太寬」這件小事，代價卻是整頁都不能讀。 */
 .table-scroll { overflow-x: auto; max-width: 100%; }
 .table-scroll > table { min-width: max-content; }
+
+/* 資料一覽。auto-fill 而不是固定欄數：同一份標記在 1024 與 1920 下都不會
+   有半排空格或橫向溢位，也不需要 media query。 */
+.gallery {
+  display: grid; gap: 12px; margin-top: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+}
+.gallery-item { margin: 0; border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px; background: var(--panel); min-width: 0; }
+/* image-rendering: pixelated —— preview 是 32×32 或 64×64 的原始像素，
+   放大時平滑化會把「這是低解析度輸入」這件事抹掉。 */
+.gallery-item img { width: 100%; aspect-ratio: 1; object-fit: contain;
+  image-rendering: pixelated; background: #fff; border-radius: 4px; }
+.gallery-missing { width: 100%; aspect-ratio: 1; display: grid;
+  place-items: center; color: var(--muted); background: var(--panel);
+  border: 1px dashed var(--line); border-radius: 4px; }
+.gallery-item figcaption { margin-top: 6px; font-size: 12px; }
+.gallery-item figcaption .note { display: block; }
+/* 每一格都可能收到 hash 這種沒有斷點的長字串。不強制斷行的話它會把
+   grid 欄撐寬，而 grid 欄一寬整頁就橫向溢位 —— 症狀出現在整個頁面，
+   原因卻在一格裡面的一個字串。 */
+.gallery-item, .gallery-item figcaption, .gallery-item td {
+  overflow-wrap: anywhere; word-break: break-word;
+}
+.gallery-item table { font-size: 11.5px; table-layout: fixed; width: 100%; }
+.gallery-item th, .gallery-item td { padding: 3px 4px; }
 th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 tr:last-child td { border-bottom: none; }
 /* 操作欄的按鈕群。每顆按鈕各自是一個 <form>（零 script 的代價），

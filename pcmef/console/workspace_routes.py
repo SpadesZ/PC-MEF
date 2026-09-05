@@ -67,12 +67,25 @@ def _lock_summary() -> dict[str, Any]:
 @status_blueprint.get("/status")
 def page():
     gate_summary = current_app.config["PCMEF_CONSOLE_GATE_SUMMARY"]()
+
+    # 「現在在哪一步、下一步做什麼、還缺什麼」由 final_gate 的八項判定
+    # **推導**，不在畫面上手寫。手寫的進度敘述會過期，而且過期時看起來
+    # 完全正常 —— 那正是 STATUS.md 需要人工維護的那一段（NOTE-082）。
+    try:
+        from pcmef.core.active_lineage import resolve_active_lineage
+        from pcmef.experiments.final_gate import progress as final_progress
+
+        progress = final_progress(resolve_active_lineage("freeze").freeze_dir)
+    except Exception as error:  # noqa: BLE001 - Status 是觀察頁，不得 500
+        progress = {"error": f"{type(error).__name__}: {error}"}
+
     return render_template(
         "status.html",
         **nav_context("status"),
         breadcrumb=breadcrumb(("研究狀態 Status", None)),
         gate_summary=gate_summary,
         lineage=_lock_summary(),
+        progress=progress,
     )
 
 

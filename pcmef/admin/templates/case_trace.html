@@ -229,8 +229,58 @@
 
 {# ---------- 6. 最終 ---------- #}
 <section class="card">
-  <h2>6 · 最終決策<span class="hint">F(x) 與這一筆的結果</span></h2>
+  <h2>6 · 最終決策<span class="hint">五條臂在這一列各自得到什麼</span></h2>
   <div class="body">
+
+    {# 五條臂並排。只看 F(x) 的話，「G5 比 G4 好在哪」在單一 case 上完全
+       看不出來 —— 而那正是 selective escalation 的整個論點（NOTE-081）。 #}
+    {% if trace.arm_outcomes %}
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>臂</th><th>定義</th>
+          {% for name in trace.perception.class_order %}<th>{{ name }}</th>{% endfor %}
+          <th>預測</th></tr>
+      </thead>
+      <tbody>
+      {# 照 arm_order 迭代，不照 dict 的鍵序：trace 以 sort_keys=True 落盤，
+         直接迭代會得到 G3, G5, G4, G2, G1。 #}
+      {% for key in (arm_order or trace.arm_outcomes.keys()) %}
+        {% set arm = trace.arm_outcomes.get(key) %}
+        {% if arm %}
+        <tr>
+          <th>{{ arm.tag }}<span class="note mono">{{ key }}</span></th>
+          <td class="note">{{ arm.definition }}</td>
+          {% if arm.executed %}
+            {% for value in arm.distribution %}
+            <td class="mono">{{ '%.4f' | format(value) }}</td>{% endfor %}
+            <td>
+              <strong>{{ arm.prediction }}</strong>
+              {% if arm.prediction == trace.final.truth_label %}
+                <span class="badge ok">對</span>
+              {% else %}<span class="badge bad">錯</span>{% endif %}
+            </td>
+          {% else %}
+            <td colspan="{{ trace.perception.class_order | length + 1 }}">
+              <span class="badge warn">NOT EXECUTED</span>
+              <span class="note">{{ arm.reason }}</span>
+            </td>
+          {% endif %}
+        </tr>
+        {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="note">
+      這份 trace 是 2026-09-05 之前的格式，只記錄了 F(x)，沒有逐臂的分布。
+      下面仍然看得到 F(x) 與 s<sub>A</sub>。
+    </p>
+    {% endif %}
+
+    <h3 class="note">F(x) 與 s<sub>A</sub></h3>
+    <div class="table-scroll">
     <table>
       <thead>
         <tr><th></th>
@@ -252,6 +302,14 @@
         {% endif %}
       </tbody>
     </table>
+    </div>
+    {% set g5 = (trace.arm_outcomes or {}).get('pcmef_full') %}
+    {% if g5 and not g5.executed %}
+    <p class="note">
+      <span class="badge warn">上表的 F(x) 不是 G5 的結果</span>
+      {{ g5.reason }}它列在這裡只是為了讓 sum-to-1 這類形狀檢查仍然有東西可看。
+    </p>
+    {% endif %}
     <table>
       <tbody>
         <tr><th>預測</th><td><strong>{{ trace.final.prediction_label }}</strong></td>

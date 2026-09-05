@@ -104,3 +104,111 @@
   </div>
 </section>
 {% endif %}
+
+{# --- 逐筆資料長什麼樣 -------------------------------------------------
+   先前這一頁只有參數與資料集摘要，看不到任何一筆實際的資料。
+   preview 是 run 當下由記憶體裡的 RGB 產生的 artifact，不是回頭讀
+   dataset —— 這一頁只回答「這次跑的是什麼」。 #}
+{% if gallery %}
+<section class="card">
+  <h2>資料一覽
+    <span class="hint">
+      {% if gallery.available %}
+        {{ gallery.matched }} / {{ gallery.total }} 筆
+        {% if gallery.matched > gallery.shown %}（列出前 {{ gallery.shown }} 筆）{% endif %}
+      {% else %}沒有逐 case 紀錄{% endif %}
+    </span>
+  </h2>
+  <div class="body">
+    {% if not gallery.available %}
+      <p><span class="badge warn">沒有資料一覽</span></p>
+      <p class="note">{{ gallery.reason }}</p>
+    {% else %}
+      <form method="get" class="add-row">
+        <div class="field">
+          <label for="g-condition">Condition</label>
+          <select id="g-condition" name="condition">
+            <option value="">全部</option>
+            {% for c in gallery.conditions %}
+            <option value="{{ c }}" {% if gallery.condition == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="g-family">Family</label>
+          <select id="g-family" name="family">
+            <option value="">全部</option>
+            {% for f in gallery.families %}
+            <option value="{{ f }}" {% if gallery.family == f %}selected{% endif %}>{{ f }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn" type="submit">篩選</button>
+        {% if gallery.condition or gallery.family %}
+        <a class="btn" href="{{ url_for('console.run_page', run_id=record.run_id, section='inputs') }}">清除</a>
+        {% endif %}
+      </form>
+
+      <div class="gallery">
+        {% for case in gallery.cases %}
+        <figure class="gallery-item">
+          {% if case.preview_path %}
+          <a href="{{ url_for('console.case_page', run_id=record.run_id, case_id=case.case_id) }}">
+            <img loading="lazy"
+                 src="{{ url_for('console.trace_preview', run_id=record.run_id,
+                                 filename=case.preview_path.split('/')[-1]) }}"
+                 alt="{{ case.case_id }} 的 RGB preview">
+          </a>
+          {% else %}
+          <div class="gallery-missing" title="這一筆沒有留下 preview">—</div>
+          {% endif %}
+          <figcaption>
+            <a class="mono" href="{{ url_for('console.case_page', run_id=record.run_id, case_id=case.case_id) }}">{{ case.case_id }}</a>
+            <span class="note">{{ case.class_label }} · {{ case.condition }}</span>
+            {# family 是 40 字元的 hash。整串印出來會把這一格從 167px 撐到
+               400px 以上，於是整頁橫向溢位 —— 而縮圖牆上要的只是「這幾張
+               是不是同一個 family」，前 12 個字元就足以分辨。完整值在
+               展開的表格裡。 #}
+            <span class="note mono" title="{{ case.family }}">{{ case.family[:12] }}…</span>
+            <details class="advanced">
+              <summary class="note">形狀與雜湊</summary>
+              <table>
+                <tbody>
+                  <tr><th>RGB</th>
+                      <td class="mono">{{ case.rgb_shape | join(' × ') or '—' }}</td></tr>
+                  <tr><th>family</th>
+                      <td class="mono">{{ case.family }}</td></tr>
+                  <tr><th>sha256</th>
+                      <td class="mono">{{ (case.rgb_sha256 or '—')[:16] }}…</td></tr>
+                  <tr><th>ToF</th>
+                      <td class="mono">{{ case.tof_shape | join(' × ') or '—' }}</td></tr>
+                  <tr><th>通道</th>
+                      <td class="note">{{ case.tof_channels | join('、') or '—' }}</td></tr>
+                  <tr><th>Q_V / Q_T</th>
+                      <td class="mono">
+                        {{ '%.4f' | format(case.quality.Q_vision)
+                           if case.quality.Q_vision is not none else '—' }} /
+                        {{ '%.4f' | format(case.quality.Q_tof)
+                           if case.quality.Q_tof is not none else '—' }}</td></tr>
+                  <tr><th>route</th>
+                      <td><span class="badge">{{ case.route }}</span></td></tr>
+                </tbody>
+              </table>
+            </details>
+          </figcaption>
+        </figure>
+        {% endfor %}
+      </div>
+
+      {% if not gallery.cases %}
+      <p class="note">沒有符合這組篩選條件的資料。</p>
+      {% endif %}
+      <p class="note">
+        ToF 的原始 (500, 4) 陣列不進 trace —— 每筆 16 KB，384 筆會讓 trace
+        膨脹到數 MB。這裡列的是形狀與通道語意，逐通道的實際值在 case 頁的
+        感知與品質段落。
+      </p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}

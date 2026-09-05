@@ -39,8 +39,18 @@ import pytest
 from pcmef.console.runner import (
     DEFAULT_FORMAL_OUT, ConsoleRunner, RunnerError, RunRecord, RunSpec,
 )
+from pcmef.experiments.e2_formal import run_artifact_root
 from pcmef.experiments.formal_service import (
     FORMAL_REPORT, formal_status, preflight,
+)
+from pcmef.experiments.run_claim import (
+    STATE_COMPLETE, STATE_INTERRUPTED, RunIdentity, mark_complete,
+    mark_interrupted, reserve,
+)
+
+IDENTITY = RunIdentity(
+    freeze_dir="freeze/runs/PFC-001", lock_hashes={"gate": "a" * 64},
+    base_manifest_hash="b" * 64, code_version="c" * 40,
 )
 
 
@@ -85,15 +95,14 @@ def test_the_default_canonical_out_matches_the_cli_default():
     assert args.out == DEFAULT_FORMAL_OUT
 
 
-def test_preflight_checks_the_location_the_runner_writes_to(runner, tmp_path):
-    """pre-flight 檢查的檔案路徑必須等於 runner 實際寫入的位置。"""
+def test_preflight_guards_the_root_the_runner_writes_to(runner, tmp_path):
+    """pre-flight 守的 formal root 必須等於 runner 實際寫入的那一個。"""
     command = _command(runner, "formal")
     out = command[command.index("--out") + 1]
     report = preflight(mode="formal", out=out, lineage_root="freeze")
-    checked = next(
-        c for c in report["checks"] if c["check"] == "output_location_is_free"
-    )
-    assert checked["detail"].startswith((tmp_path / "e2_final" / FORMAL_REPORT).as_posix())
+    assert report["formal_root"] == run_artifact_root(
+        tmp_path / "e2_final", dry_run=False
+    ).as_posix()
 
 
 # ---------------------------------------------------------------------------
@@ -104,23 +113,22 @@ def test_preflight_checks_the_location_the_runner_writes_to(runner, tmp_path):
 def test_second_formal_run_is_blocked_after_the_first(runner, tmp_path):
     """第一次成功之後，第二次必須 fail-closed。
 
-    「成功」在這裡以 canonical 報告存在為準 —— 那正是 CLI 跑完之後留下的
-    狀態，也正是 pre-flight 唯一看得到的痕跡。
+    「成功」以 **claim = COMPLETE** 為準，不以報告檔存在為準：一次跑到一半
+    失敗的正式執行沒有報告，但 final partition 已經開封（NOTE-079）。
     """
     out = tmp_path / "e2_final"
     out.mkdir(parents=True, exist_ok=True)
+    formal_root = run_artifact_root(out, dry_run=False)
 
     first = preflight(mode="formal", out=out, lineage_root="freeze")
-    assert "output_location_is_free" not in " ".join(first["blockers"])
+    assert "formal_run_claim_is_available" not in " ".join(first["blockers"])
 
-    # 第一次跑完的效果。
-    (out / FORMAL_REPORT).write_text(
-        json.dumps({"report_id": "formal_e2_full_pcmef"}), encoding="utf-8"
-    )
+    claim = reserve(formal_root, IDENTITY)
+    mark_complete(formal_root, claim["claim_id"])
 
     second = preflight(mode="formal", out=out, lineage_root="freeze")
     assert second["allowed"] is False
-    assert any("output_location_is_free" in b for b in second["blockers"])
+    assert any("formal_run_claim_is_available" in b for b in second["blockers"])
 
 
 def test_the_cli_exits_two_when_the_output_is_occupied(runner, tmp_path, capsys):
@@ -138,19 +146,37 @@ def test_the_cli_exits_two_when_the_output_is_occupied(runner, tmp_path, capsys)
     assert "BLOCKED" in capsys.readouterr().out
 
 
-def test_dry_run_may_overwrite_its_own_report(runner, tmp_path):
+def test_a_completed_formal_run_does_not_block_a_dry_run(runner, tmp_path):
     """預演可以重跑。一次性只約束正式執行。"""
     out = tmp_path / "e2_final"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "formal_e2_dry_run.json").write_text("{}", encoding="utf-8")
+    formal_root = run_artifact_root(out, dry_run=False)
+    claim = reserve(formal_root, IDENTITY)
+    mark_complete(formal_root, claim["claim_id"])
 
     report = preflight(mode="dry-run", out=out, lineage_root="freeze")
-    occupied = next(
-        c for c in report["checks"] if c["check"] == "output_location_is_free"
-    )
-    assert occupied["passed"] is False
-    assert occupied["blocking"] is False
-    assert not any("output_location_is_free" in b for b in report["blockers"])
+    assert report["allowed"] is True
+    assert not any("claim" in b for b in report["blockers"])
+
+
+def test_each_dry_run_gets_its_own_root(runner, tmp_path):
+    """兩次預演不得共用 trace 與 stress（NOTE-078）。"""
+    out = tmp_path / "e2_final"
+    first = run_artifact_root(out, dry_run=True, run_id="run-a")
+    second = run_artifact_root(out, dry_run=True, run_id="run-b")
+    assert first != second
+    # 而且都不在 formal 的 root 底下。
+    formal_root = run_artifact_root(out, dry_run=False)
+    assert formal_root not in first.parents and first != formal_root
+    assert formal_root not in second.parents and second != formal_root
+
+
+def test_a_dry_run_without_a_run_id_is_refused(tmp_path):
+    """沒有 run_id 就沒有專屬目錄，第二次預演會覆蓋第一次。"""
+    from pcmef.experiments.e2_formal import FormalE2Error
+
+    with pytest.raises(FormalE2Error, match="own run_id"):
+        run_artifact_root(tmp_path, dry_run=True)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +211,9 @@ def test_run_view_follows_the_pointer(runner, tmp_path):
 
     runner.run_dir("r3").mkdir(parents=True, exist_ok=True)
     runner._write_formal_pointer("r3", "formal")
-    assert run_view.artifact_root(runner.run_dir("r3")) == tmp_path / "e2_final"
+    assert run_view.artifact_root(runner.run_dir("r3")) == run_artifact_root(
+        tmp_path / "e2_final", dry_run=False
+    )
 
     # 沒有指標的一般 run 維持原本行為。
     runner.run_dir("r4").mkdir(parents=True, exist_ok=True)

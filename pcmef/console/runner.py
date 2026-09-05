@@ -479,7 +479,9 @@ class ConsoleRunner:
                 "formal", "run-e2", "--mode", mode, "--out", str(self.formal_out),
             ]
             if mode == "dry-run":
-                command += ["--base", str(self.dry_run_base)]
+                # 用 console 的 run_id 當預演目錄名：兩者因此指的是同一次
+                # 執行，而不是兩個各自編號、要靠時間戳去對的東西。
+                command += ["--base", str(self.dry_run_base), "--run-id", run_id]
             elif self.agent_cache_root is not None:
                 # 正式執行才接快取：dry run 本來就不呼叫 provider。
                 command += ["--agent-cache", str(self.agent_cache_root)]
@@ -502,15 +504,24 @@ class ConsoleRunner:
         run 目錄不再放科學結果，因此畫面需要一條線才找得到報告。指標本身
         是 UI metadata：刪掉它不會失去任何科學證據，而報告仍在原處。
         """
+        from pcmef.experiments.e2_formal import run_artifact_root
+
         one_shot = mode == "formal"
         filename = "formal_e2_report.json" if one_shot else "formal_e2_dry_run.json"
+        # 指標指的是**這一次 run 自己的 root**，不是 canonical 目錄。
+        # formal 與每一次 dry-run 各有一個，因此舊 run 頁讀不到新 run 的
+        # 產物 —— 那不是靠畫面過濾，是靠它們不在同一個目錄裡（NOTE-078）。
+        root = run_artifact_root(
+            self.formal_out, dry_run=not one_shot, run_id=run_id,
+        )
         payload = {
             "kind": "formal_e2",
             "mode": mode,
             "one_shot": one_shot,
             "canonical_out": self.formal_out.as_posix(),
-            "report": (self.formal_out / filename).as_posix(),
-            "trace_index": (self.formal_out / "trace" / "trace_index.json").as_posix(),
+            "artifact_root": root.as_posix(),
+            "report": (root / filename).as_posix(),
+            "trace_index": (root / "trace" / "trace_index.json").as_posix(),
             "written_at": _now(),
             "note": (
                 "科學結果寫在 canonical_out，不在這個 console run 目錄裡。"

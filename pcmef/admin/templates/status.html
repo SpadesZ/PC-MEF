@@ -29,6 +29,82 @@
   <p>研究目前做到哪裡。本頁<strong>唯讀</strong>：狀態由稽核與 lock 決定，不在這裡設定。</p>
 </header>
 
+{# 這張卡片放最上面，因為它回答進本頁最先要問的一句：現在卡在哪。
+   內容由 final_gate 的八項判定推導，不是手寫的進度敘述 —— 手寫的會過期，
+   而且過期時看起來完全正常（NOTE-082）。 #}
+<section class="card">
+  <h2>目前階段
+    <span class="hint">
+      {% if progress and not progress.get('error') %}
+        Final E2 前置條件 {{ progress.cleared }} / {{ progress.total }}
+      {% else %}無法判定{% endif %}
+    </span>
+  </h2>
+  <div class="body">
+    {% if progress and progress.get('error') %}
+      <p><span class="badge warn">無法判定</span>
+        <span class="note mono">{{ progress.error }}</span></p>
+    {% elif progress %}
+      {% if progress.ready_for_final_e2 %}
+        <p class="lede"><span class="badge ok">前置條件已全部解除</span></p>
+      {% else %}
+        <p class="lede"><span class="badge warn">{{ progress.stage }}</span></p>
+      {% endif %}
+
+      {% if progress.next_step %}
+      <h3 class="note">下一步</h3>
+      <table>
+        <tbody>
+          <tr><th>{{ progress.next_step.label }}</th>
+              <td>{{ progress.next_step.why }}</td></tr>
+          <tr><th>現況</th>
+              <td class="note mono">{{ progress.next_step.detail }}</td></tr>
+        </tbody>
+      </table>
+      {% endif %}
+
+      {% if progress.blockers %}
+      <h3 class="note">後續順序<span class="note">（順序即必須解除的順序）</span></h3>
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>#</th><th>項目</th><th>為什麼</th><th>現況</th></tr></thead>
+        <tbody>
+        {% for item in progress.blockers %}
+          <tr>
+            <td class="mono">{{ loop.index }}</td>
+            <th>{{ item.label }}</th>
+            <td class="note">{{ item.why }}</td>
+            <td class="note mono">{{ item.detail }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% endif %}
+
+      {% if progress.cleared_items %}
+      <details class="advanced">
+        <summary>已解除的 {{ progress.cleared_items | length }} 項</summary>
+        <table>
+          <tbody>
+          {% for item in progress.cleared_items %}
+            <tr><th>{{ item.label }}</th>
+                <td class="note mono">{{ item.detail }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </details>
+      {% endif %}
+
+      <p class="note">
+        這一段由 <span class="mono">final_gate.evaluate()</span> 逐項判定推導，
+        與 <span class="mono">formal preflight --mode formal</span> 用的是
+        同一組判準 —— 畫面與 CLI 不會給出不同的答案。
+      </p>
+    {% endif %}
+  </div>
+</section>
+
 <section class="card">
   <h2>E1 關卡
     <span class="hint">

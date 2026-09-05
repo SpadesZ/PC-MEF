@@ -3079,10 +3079,12 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     就又多了一條需要各自驗證的路徑。
     """
     import subprocess
+    from datetime import datetime, timezone
 
     from pcmef.experiments.e2_formal import (
         LLM_MODE_EXECUTE, LLM_MODE_SKIP, FormalE2Error, run_formal_e2_full,
     )
+    from pcmef.experiments.run_claim import ClaimError
 
     report = _formal_preflight(args)
     print("pre-flight")
@@ -3155,9 +3157,23 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
             is_final_formal_e2=not dry_run,
             progress=say,
             artifact_cache_root=args.agent_cache,
+            # dry run 需要自己的 run_id，否則第二次預演會覆蓋第一次的
+            # trace 與 stress（NOTE-078）。formal 不需要 —— 它只有一個
+            # root，而那個 root 由 claim 保護。
+            run_id=(
+                getattr(args, "run_id", None)
+                or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+                if dry_run else None
+            ),
+            # formal 一律取 claim。一次性由狀態機保證，不由檔案存在推論。
+            claim=not dry_run,
+            resume=bool(getattr(args, "resume", False)),
         )
     except FormalE2Error as error:
         print(f"\nerror: {error}", file=sys.stderr)
+        return 2
+    except ClaimError as error:
+        print(f"\nSTART_FORMAL_RUN = BLOCKED\n  {error}", file=sys.stderr)
         return 2
 
     print(f"\n  report            {document['report_path']}")
@@ -4498,6 +4514,20 @@ def build_parser() -> argparse.ArgumentParser:
     formal_run.add_argument(
         "--allow-dirty", action="store_true",
         help="允許工作目錄有未提交變更（formal 模式預設拒絕）",
+    )
+    formal_run.add_argument(
+        "--run-id", default=None,
+        help=(
+            "這次 dry run 的目錄名。不給就用 UTC 時間戳。每次預演有自己的 "
+            "root，因此不會覆蓋上一次的 trace 與 stress。formal 忽略此旗標。"
+        ),
+    )
+    formal_run.add_argument(
+        "--resume", action="store_true",
+        help=(
+            "接續一次中斷的正式執行。final partition 一旦開封就不得重新開始；"
+            "resume 要求 identity（lineage + lock + 資料 + code revision）完全相同。"
+        ),
     )
     formal_run.add_argument(
         "--agent-cache", default=None, metavar="DIR",

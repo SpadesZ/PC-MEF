@@ -151,19 +151,74 @@ def preflight(
             str(error)[:220],
         )
 
-    target = Path(out) / (DRY_RUN_REPORT if mode == "dry-run" else FORMAL_REPORT)
-    occupied = target.exists()
-    record(
-        "output_location_is_free",
-        not occupied,
-        target.as_posix() + (
-            "  (a dry run may overwrite its own previous report)"
-            if occupied and mode == "dry-run"
-            else "  (already occupied: Formal E2 is one-shot)" if occupied else ""
-        ),
-        # dry run 可以覆寫自己的預演結果；formal 不行，那是 one-shot。
-        blocking=mode == "formal",
+    # --- one-shot：由 claim 判定，不由「報告檔在不在」推論（NOTE-079）------
+    from pcmef.experiments.e2_formal import run_artifact_root
+    from pcmef.experiments.run_claim import (
+        STATE_COMPLETE, STATE_INTERRUPTED, STATE_RESERVED, STATE_RUNNING,
+        read_claim,
     )
+
+    formal_root = run_artifact_root(out, dry_run=False)
+    claim = read_claim(formal_root)
+    # 舊版面沒有 claim 檔，跑完只留報告。那份報告一樣代表 one-shot 已被
+    # 消耗，因此同樣擋下第二次 —— 換機制不該讓舊資料失去保護。
+    legacy_report = (
+        (formal_root / FORMAL_REPORT).exists() or (Path(out) / FORMAL_REPORT).exists()
+    )
+    if mode == "formal":
+        state = None if claim is None else str(claim.get("state", ""))
+        record(
+            "formal_run_claim_is_available",
+            claim is None and not legacy_report,
+            "no claim; the one-shot has not been taken"
+            if claim is None and not legacy_report else
+            "a formal report exists without a claim (pre-2026-09-05 layout); "
+            "the one-shot has already been consumed" if claim is None else
+            f"claim {claim.get('claim_id')} is {state}"
+            + (
+                " — Formal E2 已完成，永久封閉" if state == STATE_COMPLETE
+                else " — 另一個請求持有它" if state in (STATE_RESERVED, STATE_RUNNING)
+                else " — 已開封，只能以相同 identity resume（--resume）"
+                if state == STATE_INTERRUPTED else " — 狀態不可讀，fail-closed"
+            ),
+        )
+    else:
+        # 預演不取 claim，但要看得到 formal 的現況：一個已經 COMPLETE 的
+        # 專案裡，再跑預演是合法的，而畫面必須說得出正式的那一次已經跑完。
+        record(
+            "formal_claim_state（僅供參考，不阻擋預演）",
+            True,
+            "none" if claim is None else str(claim.get("state", "")),
+            blocking=False,
+        )
+
+    # 預演各自有 run-specific root，因此不會互相覆蓋，也不會碰到 formal
+    # 的目錄 —— 這一條先前不成立（NOTE-078）。
+    if mode == "dry-run":
+        record(
+            "dry_run_writes_to_its_own_root",
+            True,
+            f"{Path(out).as_posix()}/dry_runs/<run_id>/  "
+            "（report、trace、stress、preview 同屬一次 run）",
+            blocking=False,
+        )
+
+    # --- Final E2 的八項前置條件（NOTE-077）--------------------------------
+    #
+    # 只在 formal 模式評估。預演不開封 final partition，那八項對它沒有意義，
+    # 而把它們掛在預演上只會讓「預演永遠 BLOCKED」。
+    final_gate_checks: list[dict[str, Any]] = []
+    if mode == "formal":
+        from pcmef.experiments.final_gate import evaluate as evaluate_final_gate
+
+        final_gate_checks = evaluate_final_gate(
+            resolved.freeze_dir,
+            generated_manifest=generated,
+            expected_scenario_set_hash=expected_hash,
+            final_family_indices=FINAL_FAMILY_INDICES,
+        )
+        for item in final_gate_checks:
+            record(item["check"], item["passed"], item["detail"])
 
     return {
         "mode": mode,
@@ -172,6 +227,9 @@ def preflight(
         "blockers": blockers,
         "allowed": not blockers,
         "frozen_severity": severity,
+        "claim": claim,
+        "formal_root": formal_root.as_posix(),
+        "final_gate": final_gate_checks,
     }
 
 
@@ -183,38 +241,104 @@ def formal_status(out: str | Path = "outputs/perception/e2_final") -> dict[str, 
     formal 尚未跑過時顯示 PASS —— 讀起來像「這個位置沒問題」，看不出它
     正是 one-shot 的閘門。
     """
-    directory = Path(out)
-    formal_path = directory / FORMAL_REPORT
-    dry_path = directory / DRY_RUN_REPORT
-    executed = formal_path.exists()
+    from pcmef.experiments.e2_formal import DRY_RUN_SUBDIR, run_artifact_root
+    from pcmef.experiments.run_claim import (
+        STATE_COMPLETE, STATE_INTERRUPTED, STATE_RESERVED, STATE_RUNNING,
+        claim_path, read_claim,
+    )
 
+    directory = Path(out)
+    formal_root = run_artifact_root(directory, dry_run=False)
+    formal_path = formal_root / FORMAL_REPORT
+    dry_root = directory / DRY_RUN_SUBDIR
+    dry_runs = sorted(
+        (p.name for p in dry_root.iterdir() if (p / DRY_RUN_REPORT).exists()),
+        reverse=True,
+    ) if dry_root.is_dir() else []
+    # 舊版面：報告直接放在 canonical 目錄底下。仍然認得它，否則
+    # 2026-09-05 之前跑出來的東西會從畫面上消失。
+    legacy_dry = directory / DRY_RUN_REPORT
+    dry_path = (
+        (dry_root / dry_runs[0] / DRY_RUN_REPORT) if dry_runs else legacy_dry
+    )
+
+    claim = read_claim(formal_root)
+    claim_state = None if claim is None else str(claim.get("state", ""))
+    # 「跑過了沒有」以 claim **或**報告檔為準。
+    #
+    # claim 是主判準：一次跑到一半失敗的正式執行沒有報告，但 final partition
+    # 已經開封 —— 那時說「尚未執行」是錯的（NOTE-079）。
+    #
+    # 報告檔仍然算數，是為了 2026-09-05 之前的版面：那時沒有 claim 檔，
+    # 跑完只留下報告。只看 claim 會把那種目錄判成「尚未執行」，於是畫面
+    # 會邀請使用者再跑一次一次性的實驗。舊資料不該因為機制換新而失去保護。
+    legacy_report = formal_path.exists() or (directory / FORMAL_REPORT).exists()
+    executed = claim is not None or legacy_report
+    completed = claim_state == STATE_COMPLETE or (claim is None and legacy_report)
+
+    # 讀實際存在的那一份：新版面在 formal root 底下，舊版面直接在 canonical
+    # 目錄。只讀新位置的話，舊資料會顯示成「已執行但沒有身分」。
     identity: dict[str, Any] = {}
-    if executed:
+    actual_report = next(
+        (p for p in (formal_path, directory / FORMAL_REPORT) if p.exists()), None
+    )
+    if actual_report is not None:
         try:
-            document = json.loads(formal_path.read_text(encoding="utf-8"))
+            document = json.loads(actual_report.read_text(encoding="utf-8"))
             identity = {
                 "report_id": document.get("report_id"),
                 "created_at": document.get("created_at"),
                 "code_version": str(document.get("code_version", ""))[:12],
                 "scientific_result": bool(document.get("scientific_result")),
+                "path": actual_report.as_posix(),
             }
         except (json.JSONDecodeError, OSError) as error:
-            identity = {"unreadable": f"{type(error).__name__}: {error}"}
+            identity = {
+                "unreadable": f"{type(error).__name__}: {error}",
+                "path": actual_report.as_posix(),
+            }
+
+    reason = ""
+    if claim_state == STATE_COMPLETE:
+        reason = (
+            f"claim 已 COMPLETE（{claim.get('finished_at')}）。Formal E2 是"
+            "一次性的：跑完就是結論，重跑會產生第二份互相矛盾的正式結果。"
+            "要再跑必須是新的 corrective lineage，那是另一個 identity。"
+        )
+    elif claim_state in (STATE_RESERVED, STATE_RUNNING):
+        reason = (
+            f"claim 目前是 {claim_state}（pid {claim.get('pid')} @ "
+            f"{claim.get('host')}）。同一時間只有一個請求能持有它。"
+        )
+    elif claim_state == STATE_INTERRUPTED:
+        reason = (
+            "上一次正式執行中斷，而 final partition 已經開封。不得重新開始，"
+            "只能以相同 identity resume（--resume）。"
+        )
+    elif claim_state:
+        reason = f"claim 狀態不可讀（{claim_state}），fail-closed。"
+    elif legacy_report:
+        reason = (
+            "找到一份正式報告，但沒有對應的 claim —— 這是 2026-09-05 之前的"
+            "版面。它仍然代表 Formal E2 已經跑過，因此一樣擋下第二次。"
+        )
 
     return {
         "one_shot": True,
         "canonical_out": directory.as_posix(),
+        "formal_root": formal_root.as_posix(),
+        "dry_runs_root": dry_root.as_posix(),
         "report_path": formal_path.as_posix(),
         "dry_run_report_path": dry_path.as_posix(),
+        "dry_run_ids": dry_runs,
         "already_executed": executed,
+        "completed": completed,
+        "claim": claim,
+        "claim_state": claim_state,
+        "claim_path": claim_path(formal_root).as_posix(),
         "dry_run_present": dry_path.exists(),
         "identity": identity,
-        "blocked_reason": (
-            f"{formal_path.as_posix()} 已存在。Formal E2 是一次性的："
-            "跑完就是結論，重跑會產生第二份互相矛盾的正式結果，"
-            "因此 pre-flight 的 output_location_is_free 會擋下第二次。"
-            if executed else ""
-        ),
+        "blocked_reason": reason,
         # 純文字，**不含** markdown 標記。這個字串直接進 HTML，星號不會被
         # 渲染成粗體，只會原樣印在畫面上；要強調就在樣板裡用 <strong>。
         "record_vs_report": (
@@ -225,16 +349,37 @@ def formal_status(out: str | Path = "outputs/perception/e2_final") -> dict[str, 
     }
 
 
+def report_candidates(out: str | Path) -> list[Path]:
+    """依「正式優先、預演取最新」列出可讀的報告。
+
+    formal 與每一次 dry-run 各有自己的 root（NOTE-078），因此這裡不能再
+    只看 canonical 目錄底下那兩個檔名。舊版面的兩個檔案仍然列入，讓
+    2026-09-05 之前跑出來的報告不會突然從畫面上消失。
+    """
+    from pcmef.experiments.e2_formal import DRY_RUN_SUBDIR, run_artifact_root
+
+    directory = Path(out)
+    found = [run_artifact_root(directory, dry_run=False) / FORMAL_REPORT]
+    dry_root = directory / DRY_RUN_SUBDIR
+    if dry_root.is_dir():
+        # 最新的 dry-run 排前面。取 mtime 而非目錄名：run_id 的格式由呼叫端
+        # 決定，這一層不該假設它可排序。
+        found += sorted(
+            (p / DRY_RUN_REPORT for p in dry_root.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+            reverse=True,
+        )
+    # 舊版面（report 直接放 canonical 目錄底下）。
+    found += [directory / FORMAL_REPORT, directory / DRY_RUN_REPORT]
+    return [p for p in found if p.exists()]
+
+
 def latest_report(out: str | Path = "outputs/perception/e2_final") -> dict[str, Any] | None:
     """讀出最近一次 run 的摘要。formal 優先於 dry run。
 
     只挑畫面需要的欄位，不整份丟給前端 —— traces 有幾百列。
     """
-    directory = Path(out)
-    for filename in (FORMAL_REPORT, DRY_RUN_REPORT):
-        path = directory / filename
-        if not path.exists():
-            continue
+    for path in report_candidates(out):
         document = json.loads(path.read_text(encoding="utf-8"))
         routing = document.get("routing", {})
         return {

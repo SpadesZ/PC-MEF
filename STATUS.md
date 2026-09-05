@@ -3,11 +3,134 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-09-05
+最後更新：2026-09-05（第二輪）
 
 ---
 
-## Formal execution correctness + UI transparency audit（2026-09-05，NOTE-072~076）
+## Formal E2 開封前的執行安全與 provenance（2026-09-05 第二輪，NOTE-077~083）
+
+**families 36-43 全程未生成、未讀取、未預覽、未掃描。
+`regression verify` = IDENTICAL，`FINAL_E2_36_43_TOUCHED = NO`。
+full suite 的 failure set 與整改前逐項相同（13 項既有失敗，0 新增）。**
+
+上一輪把 one-shot 從「每次 run 一個新目錄」修成 canonical 位置。這一輪發現
+那個修法自己留下三個洞，而三個都沒有症狀。
+
+### P0-1 dry-run 會覆蓋正式的 trace 與 stress
+
+canonical out 底下，formal 與 dry-run **共用** `trace/` 與 `stress/`，
+只有報告檔名不同。正式跑完之後再跑一次預演，會直接覆蓋正式的 trace 與
+stress —— 而報告還在，畫面看起來一切正常。**一次性保護了報告，卻沒保護
+它的證據。**
+
+改法：`run_artifact_root()` 讓兩者完全不共用任何路徑。
+
+```
+outputs/perception/e2_final/
+  formal/                    ← 正式的 immutable root
+    RUN_CLAIM.json  formal_e2_report.json  trace/  stress/  figures/
+  dry_runs/<run_id>/         ← 每次預演各一個
+    formal_e2_dry_run.json  trace/  stress/  figures/
+```
+
+report、trace、stress、preview、figures 因此必然同屬一次 run。
+「舊 run 頁讀不到新 run 產物」不是靠畫面過濾，是靠它們不在同一個目錄裡。
+console 指標改記 `artifact_root`，`run_view.artifact_root()` 照它走；
+舊指標（只有 `canonical_out`）仍然解析得到。
+
+**實測**：連跑兩次預演 `p1verify-a` / `p1verify-b`，各自 384/384
+`trace_status=complete`，目錄互不重疊。
+
+### P0-2 one-shot 靠「報告檔在不在」推論，有兩個洞
+
+- 一次**跑到一半失敗**的正式執行沒有報告，於是看起來還沒跑過 ——
+  而 final partition 已經開封。
+- 兩個**同時**發出的請求可以同時通過「檔案不存在」的檢查。
+
+改法：`pcmef/experiments/run_claim.py` 的狀態機。
+
+```
+無 claim              → 建立 RESERVED
+RESERVED / RUNNING    → 拒絕（另一個請求持有它）
+COMPLETE              → 拒絕，永久封閉
+INTERRUPTED_RESUMABLE → 只有 resume=True 且 identity 相符才放行
+CORRUPT               → 拒絕（狀態不明時不得假設可以重新開始）
+```
+
+claim 以 `os.open(O_CREAT|O_EXCL)` 建立 —— 檢查與建立由作業系統合成一個
+動作。identity = lineage + lock hashes + base manifest hash + code revision，
+**刻意不含** run_id / 時間戳 / pid / 主機名：含了的話任何 resume 都會被判成
+另一場實驗，`INTERRUPTED_RESUMABLE` 這個狀態就永遠無法被使用。
+
+CLI 新增 `--resume`；`ClaimError` 一律 exit 2。
+向後相容：舊版面沒有 claim 檔、跑完只留報告，那份報告一樣擋下第二次。
+
+**實測**：8 執行緒同時 reserve → 恰好 1 個成功；中斷後 fresh restart 被拒、
+換 identity 的 resume 被拒、同 identity 的 resume 放行且 `resume_count=1`；
+COMPLETE 之後 `resume=False/True` 都被拒。
+
+### P0-3 八項前置條件只寫在散文裡
+
+STATUS.md 說「必須先凍結」，而程式沒有一行檢查它 —— 唯一的防線是操作者
+記得。記得不是機制。
+
+`pcmef/experiments/final_gate.py` 把八項變成可機械判定的閘門，接進
+`formal_service.preflight(mode="formal")`，UI 與 CLI 共用同一個 `evaluate()`。
+
+| # | 前置條件 | 判準 | 現況 |
+|---|---|---|---|
+| 1 | AMD-007 real-provider validation | `READY_FOR_FINAL_E2=YES` ∧ `all_checks_passed` ∧ `real_calls>0` | **PASS** |
+| 2 | AMD-007 已凍結 | `AmendmentStore.exists` + hash 驗證 | FAIL |
+| 3 | AMD-008 已凍結 | 同上 | FAIL |
+| 4 | AMD-009 已凍結 | 同上 | FAIL |
+| 5 | llm_runtime 已重凍 | prompt/schema hash 集合相符 **且** `runtime_config_hash` 可比對 | FAIL |
+| 6 | formal_config 已重凍 | `agent.llm_runtime_hash == load_hash("llm_runtime")` | **PASS** |
+| 7 | canonical Golden Baseline | 快照 `canonical == true` | FAIL |
+| 8 | families 36-43 final manifest | manifest 的 `scenario_set_hash` 與 `family_indices`（**只讀 identity 欄位**） | FAIL |
+
+第 5 項最初寫成「prompt/schema 相符即通過」，而那會 PASS —— 但
+`CANONICAL_BLOCKERS` 明文說 lock 仍是 stale 的。timeout 與 connection
+topology 不在 prompt hash 裡，因此 prompt 相符**推論不出** runtime 相符。
+無法證明相符時必須 FAIL：一個在該擋的時候放行的閘門，比沒有閘門更糟。
+
+### P1（六項）
+
+| # | 先前 | 現在 |
+|---|---|---|
+| 4 | case 頁只顯示 F(x) 與 s_A，`arms` 只有三條且沒被渲染 | G1-G5 五條臂的四類分布 + prediction + 對錯；**dry-run 的 escalated 列 G5 顯示 `NOT EXECUTED` 且不帶分布** |
+| 5 | Inputs 只有參數與資料集摘要，看不到任何一筆實際資料 | case gallery：RGB preview + ToF 形狀/通道 + hash + Q_V/Q_T，可依 condition / family 篩選 |
+| 6 | `route_explanation` 把 q 唸成「感測品質」 | 一律「可靠度」。Q 才是感測品質，且不在 [0,1] |
+| 7 | Cost 頁沒有 `provider_calls_avoided` / `provenance_errors` | 兩者都顯示；沒有錯誤時也明說「provenance 完整」 |
+| 8 | Status 只有 E1 燈號與 lineage | 「目前階段 / 下一步 / 後續順序」由 `final_gate.progress()` **推導**，與 preflight 同一組判準 |
+| 9 | 出圖只能走 CLI | Outputs 頁「匯出論文品質圖表」，沿用 `reporting.figures.export_all`，唯讀重繪不重算 |
+
+第 4 項的臂順序另外修過一次：trace 以 `sort_keys=True` 落盤（為了逐 byte
+可重現），讀回來是字母序 G3/G5/G4/G2/G1。順序由 `ARM_LABELS` 在 route 層
+還原，不在樣板裡寫死第二份。
+
+**Viewport**：1280 / 1366×768 / 1920×1080 / 1024 四個寬度 × 14 頁，
+0 溢位。過程中修掉一個真的溢位：gallery 的 family id 是 40 字元 hash，
+不換行時把單格從 167px 撐到 407px，整頁因此橫向溢位 —— 症狀出現在整個
+頁面，原因卻在一格裡的一個字串。
+
+### 不變量（本輪未動）
+
+決策公式、threshold、anchor、prompt、schema、model weight 全部未改。
+trace / UI / reporting 仍然是唯讀旁路：`figures` 端點不重算指標、
+gallery 不回頭讀 dataset（有測試守）、trace 的失敗不影響決策。
+
+### 新增測試（69 項，全綠）
+
+| 檔案 | 項數 | 覆蓋 |
+|---|---|---|
+| `tests/e2/test_run_claim.py` | 17 | 競態只有一個贏、永久封閉、拒絕 fresh restart、identity 比對、corrupt 不當成 free |
+| `tests/e2/test_final_gate.py` | 15 | 八項齊全且全部 blocking、缺檔一律 FAIL、stub-only 不算驗證過、provisional 不是 Golden、讀檔失敗閘門不消失 |
+| `tests/e2/test_artifact_isolation.py` | 15 | formal/dry-run 無交集、兩次預演不碰撞、run_id 不得逃出 root、舊指標仍解析 |
+| `tests/console/test_ui_transparency_p1.py` | 22 | 六項 P1 各自的判準 |
+
+---
+
+## Formal execution correctness + UI transparency audit（2026-09-05 第一輪，NOTE-072~076）
 
 **families 36-43 全程未生成、未讀取。`regression verify` = IDENTICAL，
 `FINAL_E2_36_43_TOUCHED = NO`。全套 pytest 的失敗集合與修改前逐項相同（13 項既有失敗，0 新增）。**
@@ -222,18 +345,28 @@ log    [PASS] severity_is_restored_from_the_frozen_selection:
 
 **未完成 —— Final E2 的前置條件（本輪刻意不碰）**
 
-| # | 前置條件 | 現況 |
+> 2026-09-05 第二輪更新：這八項已由 `final_gate.evaluate()` 變成可機械
+> 判定的閘門，接進 `formal preflight --mode formal` 與 Status 頁。
+> 下表的「現況」欄自此由程式判定，不再需要人工同步 —— 以
+> `py -3.10 -m pcmef.cli formal preflight --mode formal` 為準。
+
+| # | 前置條件 | 現況（2026-09-05 判定） |
 |---|---|---|
-| 1 | **AMD-007 real-provider validation** | 未執行。四個 agent 從未對真實 provider 跑過一次完整 case |
+| 1 | **AMD-007 real-provider validation** | **已通過**。`real_agent_validation.json` 記 `READY_FOR_FINAL_E2=YES`、12 項檢查全過、`real_calls=8`（2026-08-31 執行） |
 | 2 | **AMD-007 freeze** | 未凍結 |
 | 3 | **AMD-008 freeze**（§208 紅線：Web 可觸發 formal） | spec 已寫，未凍結 |
 | 4 | **AMD-009 freeze**（worst-condition paired CI estimator） | spec 已寫，未凍結 |
-| 5 | **`llm_runtime.lock` re-freeze** | 目前的 binding 未經 real-provider 驗證；驗證後必須重凍 |
-| 6 | **`formal_config.lock` re-freeze** | 依賴上列，且 `scenario_set_hash` 必須對得上實際生成的 families 36-43 |
-| 7 | **canonical Golden Baseline** | 目前只有 `regression/provisional/`，`canonical: false`。provisional 不是 Golden |
+| 5 | **`llm_runtime.lock` re-freeze** | 未完成。prompt/schema hash 與驗證相符，但 validation 報告沒有記 `runtime_config_hash`，因此「lock 的 runtime 設定就是通過驗證的那一組」無法被證明 |
+| 6 | **`formal_config.lock` re-freeze** | **交叉引用一致**（`agent.llm_runtime_hash` 對得上）。但它繼承第 5 項的問題：llm_runtime 重凍後這一份必須跟著重凍 |
+| 7 | **canonical Golden Baseline** | 未確立。`regression/provisional/` 的 `canonical: false`，尚有 4 條 `canonical_blocker` |
 | 8 | families 36-43 生成 | **未生成**。生成即開封，必須在 1-7 全部完成之後 |
 
-以上八項在本輪**完全沒有動**，狀態與 2026-09-02 相同。
+第 1 項先前記為「未執行」，那是**錯的** —— 驗證產物 2026-08-31 就存在，
+只是沒有任何程式讀它。這正是把八項接進閘門要修的事：散文會與事實分岔，
+而分岔時看起來完全正常。
+
+**取得 claim 之後才會真正開封。** 八項全過只代表可以按下去；按下去的第一件
+事是以 `O_EXCL` 取得 `formal/RUN_CLAIM.json`，那一刻起 one-shot 被消耗。
 
 **既有失敗（與本輪無關，修改前後逐項相同）**
 

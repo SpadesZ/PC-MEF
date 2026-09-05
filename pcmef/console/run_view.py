@@ -85,8 +85,12 @@ def artifact_root(run_dir: Path) -> Path:
     `run_dir/artifacts`，行為與先前完全相同。
     """
     pointer = _read_json(run_dir / "formal_output.json")
-    if pointer and pointer.get("canonical_out"):
-        return Path(str(pointer["canonical_out"]))
+    if pointer:
+        # `artifact_root` 是這一次 run 自己的目錄；`canonical_out` 是 2026-09-05
+        # 之前的舊指標，那時 formal 與 dry-run 共用同一個目錄（NOTE-078）。
+        root = pointer.get("artifact_root") or pointer.get("canonical_out")
+        if root:
+            return Path(str(root))
     return run_dir / "artifacts"
 
 
@@ -666,6 +670,86 @@ def inputs_view(run_dir: Path, record: Any) -> dict[str, Any]:
         "severity": (report or {}).get("severity"),
         "severity_source": (report or {}).get("severity_source"),
         "config_path": str(next(iter(run_dir.glob("config*.yaml")), "") or ""),
+    }
+
+
+#: gallery 一次最多列幾筆。384 張 preview 全部塞進一頁只會讓瀏覽器變慢，
+#: 而使用者要的是「翻一下看看資料長什麼樣」，不是一次看完。
+_GALLERY_LIMIT = 60
+
+
+def case_gallery(
+    run_dir: Path, *, condition: str = "", family: str = "", limit: int = _GALLERY_LIMIT
+) -> dict[str, Any]:
+    """餵進去的資料長什麼樣：RGB preview + ToF 形狀與雜湊，可依條件篩選。
+
+    資料全部取自 trace index 與各 case trace 的 `inputs` 段落 —— **不回頭讀
+    dataset**。那些 preview 是 run 當下由記憶體裡的 RGB 產生的；回頭讀原始
+    資料會多開一條對正式資料集的存取路徑，而這一頁只需要「這次跑的是什麼」。
+    """
+    index = _trace_index(artifact_root(run_dir))
+    if index is None:
+        return {
+            "available": False,
+            "reason": (
+                "這次執行沒有 decision trace，因此沒有逐 case 的輸入紀錄。"
+                "只有 Full PC-MEF 的 E2 執行（formal 或預演）會產生它。"
+            ),
+            "cases": [],
+        }
+
+    rows = list(index.get("cases", []))
+    conditions = sorted({str(r.get("condition", "")) for r in rows if r.get("condition")})
+    families: set[str] = set()
+
+    cases: list[dict[str, Any]] = []
+    for row in rows:
+        case = _read_json(
+            artifact_root(run_dir) / "trace" / "cases" / f"{row.get('case_id')}.json"
+        )
+        if case is None:
+            continue
+        family_id = str(case.get("physical_scene_family", ""))
+        families.add(family_id)
+        if condition and str(case.get("condition")) != condition:
+            continue
+        if family and family_id != family:
+            continue
+        inputs = case.get("inputs") or {}
+        rgb = inputs.get("rgb") or {}
+        tof = inputs.get("tof") or {}
+        cases.append({
+            "case_id": case.get("case_id"),
+            "row_index": case.get("row_index"),
+            "condition": case.get("condition"),
+            "class_label": case.get("class_label"),
+            "family": family_id,
+            "route": (case.get("routing") or {}).get("route"),
+            "preview_path": rgb.get("preview_path"),
+            "rgb_shape": rgb.get("original_shape") or [],
+            "rgb_sha256": rgb.get("sha256", ""),
+            "tof_shape": tof.get("shape") or [],
+            "tof_channels": tof.get("channels") or [],
+            "stress_id": inputs.get("stress_id", ""),
+            # 四個通道各自的摘要。ToF 的原始 (500, 4) 不進 trace，但形狀與
+            # 通道語意進了 —— 那足以回答「這一筆餵進去的是什麼形狀的東西」。
+            "quality": {
+                "Q_tof": (case.get("quality") or {}).get("Q_tof"),
+                "Q_vision": (case.get("quality") or {}).get("Q_vision"),
+            },
+        })
+
+    return {
+        "available": True,
+        "reason": "",
+        "conditions": conditions,
+        "families": sorted(families),
+        "condition": condition,
+        "family": family,
+        "total": len(rows),
+        "matched": len(cases),
+        "shown": min(len(cases), limit),
+        "cases": cases[:limit],
     }
 
 
