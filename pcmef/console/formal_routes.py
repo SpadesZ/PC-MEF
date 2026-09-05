@@ -66,7 +66,9 @@ def _paths() -> dict[str, str]:
 
 
 def _collect(mode: str) -> dict[str, Any]:
-    from pcmef.experiments.formal_service import latest_report, preflight
+    from pcmef.experiments.formal_service import (
+        formal_status, latest_report, preflight,
+    )
 
     paths = _paths()
     return {
@@ -74,6 +76,7 @@ def _collect(mode: str) -> dict[str, Any]:
         "paths": paths,
         "preflight": preflight(mode=mode, **paths),
         "report": latest_report(paths["out"]),
+        "status": formal_status(paths["out"]),
     }
 
 
@@ -131,9 +134,17 @@ def page():
         dry=dry["preflight"],
         report=formal["report"],
         paths=formal["paths"],
+        status=formal["status"],
+        agent_cache=current_app.config.get("PCMEF_FORMAL_AGENT_CACHE"),
         csrf_token=token,
         confirm_phrase=FORMAL_CONFIRM_PHRASE,
         active=active,
+        # 已跑過的 formal run 紀錄。畫面要能說「是誰在什麼時候按的」，
+        # 而不是只說「位置被佔用了」。
+        formal_records=[
+            r for r in current_app.config["PCMEF_CONSOLE_RUNNER"].list_runs(limit=200)
+            if r.kind == "formal_e2" and str(r.params.get("mode")) == "formal"
+        ],
     )
 
 

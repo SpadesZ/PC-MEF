@@ -102,11 +102,28 @@ def create_app(
     app.config["PCMEF_ADMIN_BIND_ENABLED"] = bool(bind_enabled)
     app.config["PCMEF_ADMIN_TOKEN_CONFIGURED"] = bool(env.get(ADMIN_TOKEN_ENV))
     app.register_blueprint(blueprint)
-    _register_console(app, console_run_root, audit_paths)
+    _register_console(app, console_run_root, audit_paths, env)
     return app
 
 
-def _register_console(app, run_root, audit_paths) -> None:
+#: Formal 路徑的伺服器端設定。**這是唯一的來源** —— 表單裡沒有對應欄位，
+#: 而 pre-flight 檢查的位置與 runner 實際寫入的位置都讀這裡，兩者因此
+#: 不可能指向不同的目錄（見 console.runner.DEFAULT_FORMAL_OUT）。
+def _formal_config(env: Mapping[str, str]) -> dict[str, str | None]:
+    from pcmef.console.runner import DEFAULT_DRY_RUN_BASE, DEFAULT_FORMAL_OUT
+
+    return {
+        "base": env.get("PCMEF_FORMAL_BASE") or "outputs/perception/formal_e2",
+        "out": env.get("PCMEF_FORMAL_OUT") or DEFAULT_FORMAL_OUT,
+        "lineage_root": env.get("PCMEF_FORMAL_LINEAGE_ROOT") or "freeze",
+        "dry_run_base": env.get("PCMEF_FORMAL_DRY_RUN_BASE") or DEFAULT_DRY_RUN_BASE,
+        # 沒設就是完全不使用快取，與接線前逐 byte 相同。UI 不得補一個預設值
+        # 進來 —— 那等於畫面替使用者決定了要不要重新付費問模型。
+        "agent_cache": env.get("PCMEF_FORMAL_AGENT_CACHE") or None,
+    }
+
+
+def _register_console(app, run_root, audit_paths, env: Mapping[str, str]) -> None:
     """掛上探索用執行台。
 
     與 LLM Setup 共用同一個 Flask app 與同一套 CSRF/權杖檢查：
@@ -117,7 +134,19 @@ def _register_console(app, run_root, audit_paths) -> None:
     from pcmef.console.routes import blueprint as console_blueprint
     from pcmef.console.runner import ConsoleRunner
 
-    app.config["PCMEF_CONSOLE_RUNNER"] = ConsoleRunner(run_root)
+    formal = _formal_config(env)
+    app.config["PCMEF_FORMAL_BASE"] = formal["base"]
+    app.config["PCMEF_FORMAL_OUT"] = formal["out"]
+    app.config["PCMEF_FORMAL_LINEAGE_ROOT"] = formal["lineage_root"]
+    app.config["PCMEF_FORMAL_AGENT_CACHE"] = formal["agent_cache"]
+    app.config["PCMEF_CONSOLE_RUNNER"] = ConsoleRunner(
+        run_root,
+        dry_run_base=formal["dry_run_base"],
+        # runner 與 pre-flight 共用同一個 out：兩份路徑一旦分岔，
+        # output_location_is_free 就會檢查一個永遠不會被寫到的位置。
+        formal_out=formal["out"],
+        agent_cache_root=formal["agent_cache"],
+    )
     app.config["PCMEF_CONSOLE_CLASSES"] = list(CLASS_ORDER)
     resolved_paths = audit_paths or AuditPaths()
 

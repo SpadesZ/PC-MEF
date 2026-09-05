@@ -81,6 +81,60 @@
   </div>
 </section>
 
+{# --- 最初那一次實際執行 ------------------------------------------------
+   這一段是「命中之後還能不能解釋」的答案。cache 依 §48 只存六份答案，
+   四個角色實際收到的 payload 不在其中；沒有這一段的話，一次命中就只能
+   說「來自快取」，而說不出當時到底問了什麼（NOTE-074）。 #}
+<section class="card">
+  <h2>最初那一次 Agent 執行
+    <span class="hint">這些答案是誰、在什麼時候、看著什麼產生的</span>
+  </h2>
+  <div class="body">
+    {% if not entry.producer %}
+      <p class="lede"><span class="badge warn">沒有 producer trace</span></p>
+      <p class="note">{{ entry.producer_missing_reason }}</p>
+    {% else %}
+      <table>
+        <tbody>
+          <tr><th>產生它的 run</th>
+              <td class="mono">{{ entry.producer.producer_run.get('run_id', '—') }}</td>
+              <th>當時的 row index</th>
+              <td class="mono">{{ entry.producer.producer_row_index
+                                  if entry.producer.producer_row_index is not none else '—' }}</td></tr>
+          <tr><th>code revision</th>
+              <td class="mono">{{ (entry.producer.producer_run.get('code_version') or '—')[:12] }}</td>
+              <th>執行時間</th>
+              <td class="note">{{ (entry.producer.producer_run.get('started_at') or '')[:19] or '—' }}</td></tr>
+          <tr><th>lineage</th>
+              <td class="mono" colspan="3">{{ entry.producer.producer_run.get('freeze_dir', '—') }}</td></tr>
+          <tr><th>model</th>
+              <td class="mono">{{ entry.producer.model_id }}</td>
+              <th>revision</th>
+              <td class="mono">{{ entry.producer.provider_revision or '—' }}</td></tr>
+          <tr><th>provider request</th>
+              <td class="mono">{{ entry.producer.provider_request_id or '—' }}</td>
+              <th>角色數 / 總呼叫</th>
+              <td class="mono">{{ entry.producer.n_roles }} / {{ entry.producer.total_attempts }}</td></tr>
+          <tr><th>evidence hash</th>
+              <td class="mono" colspan="3">{{ entry.producer.evidence_hash }}</td></tr>
+        </tbody>
+      </table>
+      <p class="note">
+        這裡刻意<strong>沒有</strong> case_id、class_label 或 condition：
+        它們是 §48 明列不得進入快取的欄位。可追溯的身分是上面那個
+        evidence hash 加上產生它的那一次 run。
+      </p>
+
+      {% if entry.producer_agents %}
+        {% set agents = entry.producer_agents %}
+        {% include "_agent_evidence.html" %}
+      {% else %}
+        <p class="note">這份 producer trace 沒有角色紀錄。</p>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+
 <section class="card">
   <h2>六份 artifact
     <span class="hint">順序即 §48 Cache Contract 1 的順序</span>
@@ -110,6 +164,18 @@
     {% endfor %}
   </div>
 </section>
+
+{% if back %}
+<p>
+  <a class="btn" href="{{ back.url }}">← 回到 {{ back.case_id }}</a>
+</p>
+{% else %}
+<p class="note">
+  這一頁不掛在任何一次執行底下：同一把鑰匙可能同時是好幾次執行的來源，
+  掛進單一 run 會暗示它專屬於那次。要看使用它的案例，回
+  <a href="{{ url_for('results.page') }}">結果</a>頁挑一次執行的流程追蹤。
+</p>
+{% endif %}
 
 <p class="note">
   本頁唯讀。快取項目是某次執行的證據，清除它應該是明確的維運動作，

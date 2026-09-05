@@ -49,6 +49,14 @@
       </td>
       <td class="note">{{ run.started_at[:19] }}</td>
       <td class="actions">
+        {# 正式 Formal E2 的紀錄不可刪。這裡**不畫成可按再讓後端回 400**：
+           一個看起來能按、按下去卻失敗的危險按鈕，比沒有按鈕更糟 ——
+           使用者無從知道是自己做錯還是系統壞了。 #}
+        {% if run.protected %}
+          <button class="btn danger" type="button" disabled
+                  title="正式 Formal E2 的執行紀錄是一次性實驗的逐行證據，不可刪除">
+            不可刪除</button>
+        {% else %}
         <form class="inline" method="post"
               action="{{ url_for('console.delete_run', run_id=run.run_id) }}"
               onsubmit="return confirm('刪除 {{ run.run_id }}？\n輸出、設定與產物會一起刪掉。');">
@@ -57,6 +65,7 @@
                   {% if not run.finished %}disabled{% endif %}
                   title="{% if run.finished %}刪掉這次執行的紀錄與產物{% else %}執行中，跑完才能刪{% endif %}">刪除</button>
         </form>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}
@@ -93,18 +102,65 @@
         </tbody>
       </table>
 
+      {# Primary endpoint 與 overall 並排，而且 primary 在**右邊、有標題**。
+         只列 overall macro-F1 會讓讀者以為那是研究問題的答案 —— E2 問的是
+         穩健性，而一個把平均拉高卻讓最弱條件繼續崩掉的方法沒有展示穩健性
+         （實驗計畫 v1.2 §5）。 #}
+      <p class="note">
+        <strong>主要指標是 worst-condition macro-F1</strong>
+        {% if formal_report.primary_endpoint and formal_report.primary_endpoint.definition %}
+          —— {{ formal_report.primary_endpoint.definition }}。
+        {% endif %}
+        overall macro-F1 只是輔助：它會被表現好的條件拉高。
+      </p>
+      <div class="table-scroll">
       <table>
-        <thead><tr><th>方法</th><th>accuracy</th><th>macro-F1</th></tr></thead>
+        <thead><tr><th>方法</th><th>accuracy</th><th>macro-F1<span class="note">（輔助）</span></th>
+            <th>worst macro-F1<span class="note">（主要指標）</span></th>
+            <th>最弱條件</th></tr></thead>
         <tbody>
         {% for name, block in formal_report.results | dictsort %}
           <tr>
             <td class="mono">{{ name }}</td>
             <td>{{ '%.4f' | format(block.accuracy) }}</td>
-            <td>{{ '%.4f' | format(block.macro_f1) }}</td>
+            <td class="note">{{ '%.4f' | format(block.macro_f1) }}</td>
+            <td><strong>
+              {{ '%.4f' | format(formal_report.worst_condition[name])
+                 if name in (formal_report.worst_condition or {}) else '—' }}
+            </strong></td>
+            <td class="note">{{ (formal_report.worst_condition_at or {}).get(name, '—') }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
+      </div>
+
+      {% set worst_stats = (formal_report.worst_condition_statistics or {}).get('comparisons') %}
+      {% if worst_stats %}
+      <h3 class="note">PC-MEF vs 各 baseline 的成對 CI（primary endpoint）</h3>
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>比較</th><th>Δ worst macro-F1</th><th>95% CI</th></tr></thead>
+        <tbody>
+        {% for name, block in worst_stats | dictsort %}
+          <tr>
+            <td class="mono">{{ name }}</td>
+            <td>{{ '%+.4f' | format(block.delta) }}</td>
+            <td class="mono">[{{ '%+.4f' | format(block.ci_lower) }},
+                              {{ '%+.4f' | format(block.ci_upper) }}]</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% elif not formal_report.dry_run %}
+      <p class="note">這份報告沒有 primary endpoint 的成對 CI。</p>
+      {% else %}
+      <p class="note">
+        預演不產生成對統計：全部比較都是 pcmef_full vs baseline，
+        而那一臂在預演裡本來就不存在。
+      </p>
+      {% endif %}
       <p class="note">完整報告：<span class="mono">{{ formal_report.path }}</span></p>
     {% endif %}
   </div>

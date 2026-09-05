@@ -3141,7 +3141,13 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
             args.base, args.out,
             freeze_dir=freeze_dir,
             ds_dir=args.ds_dir,
-            severity={"vision": args.vision_severity, "tof": args.tof_severity},
+            # None 代表「沒有斷言」，executor 直接由 lock 還原。
+            # 不得在這裡填預設值：那會讓 CLI 又變成 severity 的來源。
+            severity=(
+                None
+                if args.vision_severity is None and args.tof_severity is None
+                else {"vision": args.vision_severity, "tof": args.tof_severity}
+            ),
             agent_runner=runner,
             formal=not dry_run,
             llm_mode=LLM_MODE_SKIP if dry_run else LLM_MODE_EXECUTE,
@@ -4464,8 +4470,20 @@ def build_parser() -> argparse.ArgumentParser:
             "--lineage-root", default="freeze",
             help="ACTIVE_LINEAGE.json 所在目錄；實際 lock 目錄由它解析",
         )
-        parser.add_argument("--vision-severity", type=float, default=2.0)
-        parser.add_argument("--tof-severity", type=float, default=0.05)
+        # severity **不是**可設定項。兩條旗標留著只為了讓既有腳本跑得動，
+        # 語意已改成斷言：給了就必須與 e2_sample_size.lock 的
+        # severity_allocation 相等，不等即 exit 2（NOTE-072）。
+        parser.add_argument(
+            "--vision-severity", type=float, default=None,
+            help=(
+                "斷言 frozen 的 vision severity 是這個值。不給就直接由 "
+                "e2_sample_size.lock 還原；給錯即 fail-closed，不會照著跑。"
+            ),
+        )
+        parser.add_argument(
+            "--tof-severity", type=float, default=None,
+            help="斷言 frozen 的 tof severity 是這個值。語意同上。",
+        )
 
     formal_preflight = formal_sub.add_parser(
         "preflight", help="只跑起跑前檢查，不執行任何 case"

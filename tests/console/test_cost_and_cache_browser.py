@@ -201,7 +201,7 @@ def test_an_unknown_key_is_absent(cache_root):
 
 
 @pytest.fixture()
-def client(tmp_path, run):
+def client(tmp_path, run, cache_root):
     from pcmef.admin.app import create_app
     from pcmef.console.runner import RunRecord
 
@@ -212,8 +212,11 @@ def client(tmp_path, run):
         finished_at="2026-01-01T00:01:00+00:00", exit_code=0,
     )
     (run / "run.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
+    # cache root 由**伺服器端設定**提供，不再從 URL 來：`?root=` 先前完全
+    # 沒有限制，配上只驗格式的 cache_key 就是一條讀取任意目錄的路徑。
     app = create_app(registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
-                     console_run_root=run.parent)
+                     console_run_root=run.parent,
+                     environ={"PCMEF_FORMAL_AGENT_CACHE": str(cache_root)})
     app.config["TESTING"] = True
     return app.test_client()
 
@@ -241,24 +244,39 @@ def test_the_cost_page_loads_no_script(client, run):
     assert body.count("<script") == 0
 
 
-def test_the_cache_page_renders(client, cache_root):
-    response = client.get(f"/console/cache/{KEY}?root={cache_root}")
+def test_the_cache_page_renders(client):
+    response = client.get(f"/console/cache/{KEY}")
     assert response.status_code == 200
     body = response.get_data(as_text=True)
     assert "六份齊全" in body
     assert "observation_raw" in body
 
 
-def test_the_cache_page_has_no_delete_control(client, cache_root):
-    """快取項目是某次執行的證據，不得在瀏覽時順手清掉。"""
+def test_the_cache_root_cannot_come_from_the_url(client, tmp_path):
+    """`?root=` 必須被忽略。
+
+    兩個理由：它是一條讀取任意含 manifest.json 目錄的路徑，而且它讓畫面
+    可以指向「不是這次 run 真正用的那一份」快取 —— 兩者長得一模一樣。
+    """
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / KEY).mkdir(parents=True)
+    (elsewhere / KEY / "manifest.json").write_text(
+        json.dumps({"cache_key": KEY, "artifacts": []}), encoding="utf-8"
+    )
     body = client.get(
-        f"/console/cache/{KEY}?root={cache_root}"
+        f"/console/cache/{KEY}?root={elsewhere}"
     ).get_data(as_text=True)
+    # 仍然讀伺服器端設定的那一份，因此六份 artifact 齊全。
+    assert "六份齊全" in body
+    assert str(elsewhere) not in body
+
+
+def test_the_cache_page_has_no_delete_control(client):
+    """快取項目是某次執行的證據，不得在瀏覽時順手清掉。"""
+    body = client.get(f"/console/cache/{KEY}").get_data(as_text=True)
     for control in ("<form", "<button", "<input"):
         assert control not in body, control
 
 
-def test_a_bad_cache_key_is_404(client, cache_root):
-    assert client.get(
-        f"/console/cache/{'z' * 64}?root={cache_root}"
-    ).status_code == 404
+def test_a_bad_cache_key_is_404(client):
+    assert client.get(f"/console/cache/{'z' * 64}").status_code == 404

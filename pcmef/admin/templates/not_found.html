@@ -1,0 +1,49 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/routes.py 在 run / case 找不到時繪製。
+ #         extends _layout.html，不讀任何檔案。
+ # 檔案路徑: pcmef/admin/templates/not_found.html
+ # 產生時間: 2026-09-05 01:10 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 找不到的執行紀錄或 case，用一頁說明而不是一段 JSON。
+ # 模組定位: §20 資訊架構的收尾。打錯網址、或紀錄被刪掉之後回到書籤，
+ #           都是正常情境 —— 正常情境不得只剩 {"error": ...}。
+ # 主要責任:
+ #   1. 說出找不到的是什麼
+ #   2. 給回得去的路，不留死路
+ # 維護提醒:
+ #   - 不得把它變成通用錯誤頁。這一頁只講「找不到」；把伺服器錯誤也導過來
+ #     會讓 500 看起來像使用者打錯網址。
+ #   - v0.1.0 新增：首版，對應 UI audit 的 Error / Empty State。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_console_routes.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}找不到{% endblock %}
+
+{% block content %}
+<header class="masthead">
+  <h1>找不到這筆紀錄</h1>
+  <p><span class="badge warn">404</span> {{ what }}</p>
+</header>
+
+<section class="card">
+  <h2>可能的原因</h2>
+  <div class="body">
+    <ul class="note">
+      <li>網址打錯，或這是一個已經失效的書籤。</li>
+      <li>這筆執行紀錄被刪除了。探索用紀錄可以刪；正式 Formal E2 的不行。</li>
+      {% if kind == 'case' %}
+      <li>這次執行的 decision trace 不完整，這一列的 case trace 沒有寫出來 ——
+        流程追蹤頁會列出寫入失敗的列。</li>
+      {% endif %}
+    </ul>
+    <p>
+      <a class="btn" href="{{ url_for('results.page') }}">回到結果 Results</a>
+      {% if run_id %}
+      <a class="btn" href="{{ url_for('console.run_page', run_id=run_id, section='trace') }}">
+        回到這次執行的流程追蹤</a>
+      {% endif %}
+    </p>
+  </div>
+</section>
+{% endblock %}

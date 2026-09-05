@@ -1,10 +1,50 @@
 {# 由 console_run.html 於 section=overview 時 include。
    內容是原本 run 詳情頁的全部卡片，未改動。 #}
+  {# ---------------- formal run 的科學結果在哪裡 ---------------- #}
+  {# 這張卡片必須在最上面。一次 formal run 的報告**不在**這個 run 目錄底下，
+     而使用者是從執行紀錄點進來的 —— 不說清楚的話，Artifacts 分頁列出的
+     canonical 目錄看起來會像是「這次 run 自己的產物」，而刪除紀錄看起來
+     會像是會連報告一起刪掉（P0-1）。 #}
+  {% if formal_pointer %}
+  <section class="card" id="formal-pointer">
+    <h2>這是一次 {{ '正式' if formal_pointer.one_shot else '預演' }} Formal E2
+      <span class="hint">科學結果寫在 canonical 位置，不在這個執行紀錄裡</span>
+    </h2>
+    <div class="body">
+      {% if formal_pointer.one_shot %}
+      <p class="lede"><span class="badge bad">一次性</span>
+        這筆紀錄不可刪除：它是這場實驗確實跑過、跑的是哪一條路徑的逐行證據。</p>
+      {% else %}
+      <p class="lede"><span class="badge warn">預演</span>
+        零 provider 呼叫。這筆紀錄可以刪除，刪掉不會動到報告。</p>
+      {% endif %}
+      <table>
+        <tbody>
+          <tr><th>報告</th><td class="mono" colspan="3">{{ formal_pointer.report }}</td></tr>
+          <tr><th>trace</th><td class="mono" colspan="3">{{ formal_pointer.trace_index }}</td></tr>
+        </tbody>
+      </table>
+      <p class="note">{{ formal_pointer.note }}</p>
+      <p class="note">
+        起跑前檢查與一次性狀態在
+        <a href="{{ url_for('formal.page') }}">Formal Research Workspace</a>。
+      </p>
+    </div>
+  </section>
+  {% endif %}
+
   {# ---------------- 即時輸出 ---------------- #}
   <section class="card" id="live-log">
-    <h2>執行輸出<span class="hint" id="stream-hint">連線中…</span></h2>
+    {# 初始文字由伺服器端決定，不是一律 "連線中…"。已經結束的執行不會
+       建立任何連線，那句話從第一個 frame 就是假的 —— 而 JS 只是事後
+       把它改掉，在 JS 尚未執行或被停用時仍然留著。 #}
+    <h2>執行輸出<span class="hint" id="stream-hint">{{
+      '已結束' if record.finished else '連線中…' }}</span></h2>
     <div class="body">
       <pre id="log" class="log">{{ initial_log }}</pre>
+      {% if record.finished and not initial_log.strip() %}
+      <p class="note">這次執行沒有留下任何輸出。</p>
+      {% endif %}
       {% if record.note %}
       <p class="note" style="margin-top:10px">{{ record.note }}</p>
       {% endif %}

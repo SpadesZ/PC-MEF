@@ -274,6 +274,12 @@ header.masthead p { margin: 0; color: var(--muted); font-size: 13px; }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+/* 欄數會隨資料變動的表（隔離矩陣有 N 個角色、support chain 有 N 個類別、
+   per-condition 有 N 個 condition）自己捲，而不是把整頁撐寬。
+   後者在 1280 px 下會讓導覽列與所有文字一起橫向溢位，而溢位的是
+   「一張表太寬」這件小事，代價卻是整頁都不能讀。 */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.table-scroll > table { min-width: max-content; }
 th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 tr:last-child td { border-bottom: none; }
 /* 操作欄的按鈕群。每顆按鈕各自是一個 <form>（零 script 的代價），

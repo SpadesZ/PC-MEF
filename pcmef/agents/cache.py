@@ -46,6 +46,7 @@ from pcmef.core.hash import combine_hashes, hash_object
 __all__ = [
     "CacheError",
     "AGENT_ARTIFACT_NAMES",
+    "PRODUCER_TRACE_NAME",
     "PAIR_SPECIFIC_FIELDS",
     "AgentCacheKey",
     "AgentBundle",
@@ -65,6 +66,17 @@ AGENT_ARTIFACT_NAMES: tuple[str, ...] = (
     "arbitration_raw",
     "arbitration_validated",
 )
+
+#: 產生這把鑰匙的那一次實際執行留下的稽核紀錄。
+#:
+#: **刻意不在 AGENT_ARTIFACT_NAMES 裡。** 命中的判準是六份 artifact 齊全
+#: （§48），把它算成第七份會讓所有既有目錄一夜之間變成未命中，而它承載的
+#: 也不是答案 —— 它承載的是「當時四個角色各自看到什麼」。
+#:
+#: 存在的理由：cache 依 §48 只存答案，不存 role-projected payload。於是
+#: 命中時畫面只能說「來自之前的快取」，而說不出之前那一次到底問了什麼、
+#: 送了哪張圖、重試幾次。解釋能力不該因為省下一次呼叫就消失（NOTE-074）。
+PRODUCER_TRACE_NAME = "producer_trace"
 
 #: Appendix J2 右欄：不可跨 checkpoint pair 共用的量。
 #: 它們一旦進了共用快取，就等於宣稱不同 pair 會得到相同的 p_rel 與 F。
@@ -309,3 +321,43 @@ class AgentArtifactCache:
                 latency_ms=bundle.latency_ms,
             )
         return folder
+
+    # -- 產生者稽核紀錄 ---------------------------------------------------
+
+    def provenance_path(self, key: AgentCacheKey) -> Path:
+        return self.path_for(key) / f"{PRODUCER_TRACE_NAME}.json"
+
+    def write_provenance(self, key: AgentCacheKey, payload: Mapping[str, Any]) -> Path:
+        """記下「是哪一次執行產生了這把鑰匙的答案，當時四個角色各看到什麼」。
+
+        與六份 artifact 一樣不可覆寫：同一把鑰匙代表同一份證據配同一組
+        模型／prompt／schema／runtime，第二次產生的內容若不同，那是輸入變了，
+        而輸入變了就該是另一把鑰匙。這裡不比對內容、只認先到先得 ——
+        provenance 記的是**執行**而不是答案，兩次執行的 run_id 與時間本來
+        就會不同，拿它們去比對必然誤判成衝突。
+
+        `assert_pair_independent()` 刻意**不**套用在這裡。那條規則管的是
+        「什麼可以跨 checkpoint pair 共用」；producer trace 不會被任何決策
+        讀取（`get()` 只讀六份 artifact 與 manifest），它是那一次執行的
+        歷史紀錄，本來就只描述那一組 pair 看到的東西（NOTE-074）。
+        """
+        path = self.provenance_path(key)
+        if path.exists():
+            return path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True,
+                       default=str),
+            encoding="utf-8",
+        )
+        return path
+
+    def read_provenance(self, cache_key: str) -> dict[str, Any] | None:
+        """以 digest 讀回 producer trace。找不到回 None（舊目錄沒有這一份）。"""
+        path = self.root / str(cache_key) / f"{PRODUCER_TRACE_NAME}.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None

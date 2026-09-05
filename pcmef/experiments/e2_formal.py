@@ -91,6 +91,8 @@ __all__ = [
     "FormalE2Error",
     "CountingAdapter",
     "load_frozen_decision_stack",
+    "frozen_severity",
+    "resolve_severity",
     "prepare_cases",
     "execute_full_pcmef_cases",
     "worst_condition_macro_f1",
@@ -98,6 +100,12 @@ __all__ = [
 ]
 
 DS_V2 = Path("outputs/perception/ds_v2")
+
+#: Formal E2 的 severity 凍在哪裡。`stress.select_severity()` 在
+#: gate-validation 上選出後寫進這份 lock 的 `severity_allocation`，
+#: 且該 payload 自帶 `reselection_forbidden: true`。
+SEVERITY_LOCK = "e2_sample_size"
+SEVERITY_FIELD = "severity_allocation"
 
 #: 正式執行：escalated case 呼叫四個真 agent。
 LLM_MODE_EXECUTE = "execute"
@@ -221,6 +229,96 @@ def load_frozen_decision_stack(freeze_dir: str | Path) -> dict[str, Any]:
             if store.exists(name)
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# severity：由 frozen 身分還原，不由呼叫端挑
+# ---------------------------------------------------------------------------
+
+
+def frozen_severity(freeze_dir: str | Path) -> tuple[dict[str, float], dict[str, Any]]:
+    """由 `e2_sample_size.lock` 還原 gate-validation 選出的 severity。
+
+    回傳 `(severity, allocation)`：前者是 executor 真正要用的兩個數字，
+    後者是 lock 裡那一段的原文，供報告記錄出處。
+
+    **不接受缺欄位的 lock。** severity 是 stress set 的形狀，也就是整場
+    Formal E2 吃進去的資料本身；讀不到就沒有任何預設值可以退，因為任何
+    預設值都等於這個 executor 自己選了 severity —— 而 `select_severity()`
+    的整套事前判準存在的理由，就是不讓執行階段做這個選擇。
+    """
+    from pcmef.core.locks import LockStore
+
+    store = LockStore(freeze_dir)
+    store.require(SEVERITY_LOCK)
+    allocation = (store.load(SEVERITY_LOCK) or {}).get(SEVERITY_FIELD)
+    if not isinstance(allocation, Mapping):
+        raise FormalE2Error(
+            f"{SEVERITY_LOCK}.lock has no {SEVERITY_FIELD!r}; the Formal E2 "
+            "severity must come from the frozen gate-validation selection and "
+            "this executor must not choose it"
+        )
+    try:
+        severity = {
+            "vision": float(allocation["vision"]),
+            "tof": float(allocation["tof"]),
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise FormalE2Error(
+            f"{SEVERITY_LOCK}.lock {SEVERITY_FIELD} does not carry a numeric "
+            f"vision/tof pair ({error}); refusing to guess the severity"
+        ) from None
+    return severity, dict(allocation)
+
+
+def resolve_severity(
+    freeze_dir: str | Path, requested: Mapping[str, float] | None
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Formal E2 實際要用的 severity，加上它的出處。
+
+    `requested` 是呼叫端（實務上是 CLI 旗標）傳進來的值。**它不是設定，
+    是斷言**：給定時必須與 frozen 值逐項相等，否則 fail-closed。
+
+    保留這條旗標而不是直接刪掉，是為了讓既有腳本與文件裡的
+    `--vision-severity 2.0` 仍然跑得動；但它現在的語意變成「我聲稱 frozen
+    值是這個」，不相等時中止。差別在於：先前傳一個不同的數字會安靜地換掉
+    整份 stress set，而報告仍然寫著 severity 來自 frozen 選擇 —— 那份報告
+    因此是不實的，且不實之處沒有任何機械痕跡。
+    """
+    frozen, allocation = frozen_severity(freeze_dir)
+    provenance: dict[str, Any] = {
+        "lock": SEVERITY_LOCK,
+        "field": SEVERITY_FIELD,
+        "selected_on": allocation.get("selected_on"),
+        "scheme": allocation.get("scheme"),
+        "reselection_forbidden": bool(allocation.get("reselection_forbidden")),
+        "restored_from_lock": True,
+        "cli_override_supplied": requested is not None,
+        "cli_override_verified_equal": None,
+        "note": (
+            "restored from the frozen gate-validation selection; the executor "
+            "does not select it and a supplied value is verified, not applied"
+        ),
+    }
+    if requested is None:
+        return frozen, provenance
+
+    mismatched = {
+        modality: {"supplied": requested.get(modality), "frozen": frozen[modality]}
+        for modality in ("vision", "tof")
+        if requested.get(modality) is not None
+        and float(requested[modality]) != frozen[modality]
+    }
+    if mismatched:
+        raise FormalE2Error(
+            "the supplied severity does not match the frozen gate-validation "
+            f"selection: {json.dumps(mismatched, sort_keys=True)}. Severity fixes "
+            "the stress set, which is the data the whole of Formal E2 consumes; "
+            f"it is frozen in {SEVERITY_LOCK}.lock with reselection_forbidden. "
+            "Drop the flag to run at the frozen severity."
+        )
+    provenance["cli_override_verified_equal"] = True
+    return frozen, provenance
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +593,10 @@ def execute_full_pcmef_cases(
         )
 
         if escalated and not skipping:
+            # 讓 arbiter 在寫 producer trace 時說得出是哪一列。純標註 ——
+            # 它不進 cache key，因為那會讓內容定址的鑰匙帶上 case 身分。
+            if case_arbiter is not None and hasattr(case_arbiter, "case_index"):
+                case_arbiter.case_index = index
             # 證據只在真的要送出去時才組裝：non-escalated 與 dry run 連 payload
             # 都不建，因此不可能不小心送出去。
             evidence = build_case_evidence(
@@ -709,6 +811,16 @@ def run_formal_e2_full(
         f"routing={stack['routing_policy_version']} D>{rule.disagreement_threshold:.6f}"
     )
 
+    # severity 由 frozen 身分還原。傳進來的值是斷言而非設定：不相等就中止，
+    # 因為換掉 severity 等於換掉整份 stress set，而報告仍會宣稱它來自
+    # frozen 選擇（NOTE-072）。
+    severity, severity_provenance = resolve_severity(freeze_dir, severity)
+    severity_provenance["lock_hash"] = stack["lock_hashes"].get(SEVERITY_LOCK)
+    say(
+        f"frozen severity vision={severity['vision']} tof={severity['tof']} "
+        f"(from {SEVERITY_LOCK}.lock)"
+    )
+
     prepared = prepare_cases(
         base_manifest_dir, stack, out, ds_dir=ds_dir, severity=severity,
         code_version=code_version, progress=say,
@@ -732,27 +844,50 @@ def run_formal_e2_full(
         arbiter = CachedArbiter(
             cache=AgentArtifactCache(root=artifact_cache_root),
             identity=binding,
+            # 命中時四個角色的投影不會重新發生，因此「是誰在什麼版本下產生
+            # 這把鑰匙的答案」只能在未命中的那一次記下來（NOTE-074）。
+            run_identity={
+                "run_id": Path(out_dir).name,
+                "code_version": code_version,
+                "freeze_dir": str(freeze_dir),
+                "base_manifest": Path(base_manifest_dir).as_posix(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
         say(f"agent artifact cache at {artifact_cache_root} "
             f"(model {binding.model_id})")
 
     # --- decision trace（旁路觀測，NOTE-064）-------------------------------
-    from pcmef.experiments.decision_trace import TraceWriter, build_case_trace
+    from pcmef.experiments.decision_trace import (
+        RUN_STATUS_COMPLETE, TRACE_UNAVAILABLE, TraceWriter, build_case_trace,
+    )
 
     fused_all = rule.fusion_weight * p_vision + (1.0 - rule.fusion_weight) * p_tof
     writer = TraceWriter(
         out, run_id=Path(out_dir).name, code_revision=code_version,
         runtime_identity=stack["lock_hashes"], dry_run=dry_run,
+        # 分母。少了它，「寫出 381 筆」在畫面上看起來就是完整的。
+        expected_cases=len(rows),
     )
 
     def emit_trace(payload: dict[str, Any]) -> None:
         """把一個 case 的決策落盤。由 executor 在決策完成後呼叫。
 
-        這個函式的例外由呼叫端吞掉 —— 它是觀測，不是決策路徑的一環。
+        失敗時**先記進 writer 再往外拋**：往外拋讓 executor 印出警告，
+        記進 writer 讓 index 的分母對不上時說得出是哪幾列（NOTE-073）。
+        兩者都不影響決策 —— 決策在呼叫本函式之前就已經完成。
         """
         index = payload["row_index"]
-        row = payload["row"]
         case_id = f"case_{index:04d}"
+        try:
+            _write_one_trace(payload, case_id)
+        except BaseException as error:
+            writer.record_failure(index, case_id, error)
+            raise
+
+    def _write_one_trace(payload: dict[str, Any], case_id: str) -> None:
+        index = payload["row_index"]
+        row = payload["row"]
 
         # preview 由**這次 run 記憶體裡**的 RGB 產生，不讓 Web 之後回頭讀
         # dataset：那會多開一條對正式資料集的存取路徑。
@@ -976,7 +1111,10 @@ def run_formal_e2_full(
         "frozen_lock_hashes": stack["lock_hashes"],
         "gate_rule": rule.to_dict(),
         "severity": severity,
-        "severity_source": "frozen gate-validation selection; not re-selected here",
+        # 具名的出處而不是一句自述。先前這裡是一個固定字串，於是不論
+        # `--vision-severity` 傳了什麼，報告都寫著「來自 frozen 選擇」——
+        # 一句永遠為真的話證明不了任何事（NOTE-072）。
+        "severity_source": severity_provenance,
         "dataset": {
             "base": Path(base_manifest_dir).as_posix(),
             "family_indices": prepared["base_manifest"].get("family_indices"),
@@ -1055,6 +1193,39 @@ def run_formal_e2_full(
             "or F(x). The escalation rate is a finding, not a tuning target."
         ),
     }
+    # trace 的 index 在報告落盤**之前**寫，而且只在 run 真的跑完之後。
+    # 中途失敗時上面的 except 已經寫過一份 aborted index。
+    #
+    # 順序是刻意的：完整度必須進報告本身。報告才是科研產物，而一份
+    # 「381/384」的 trace 若只出現在 index 裡，讀報告的人不會知道
+    # 逐 case 檢視時會缺列（NOTE-073）。
+    #
+    # finalise() 的失敗**不得**讓這一整場 run 變成失敗。此時統計已經算完，
+    # 科學結果在任何意義上都已經成立；寫不出 index 只代表那份旁路紀錄少了
+    # 目錄。先前這一行沒有包例外，於是一次磁碟寫入錯誤會讓
+    # run_formal_e2_full 拋例外 —— 而呼叫端會把它報成「Formal E2 失敗」，
+    # 一個已經完成的一次性實驗因此被宣告成失敗（NOTE-073）。
+    trace_index_path: str | None = None
+    try:
+        trace_index_path = writer.finalise().as_posix()
+        trace_status = writer.trace_status(RUN_STATUS_COMPLETE)
+    except Exception as error:  # noqa: BLE001
+        say(f"warning: the trace index could not be written: "
+            f"{type(error).__name__}: {error}")
+        trace_status = TRACE_UNAVAILABLE
+        document["trace_index_error"] = f"{type(error).__name__}: {error}"
+    document["trace"] = {
+        "status": trace_status,
+        "expected_cases": len(rows),
+        "written_cases": len(writer.index_rows),
+        "failed_cases": list(writer.failures),
+        "index_path": trace_index_path,
+        "note": (
+            "decision trace 是旁路觀測，寫不出來不影響上面任何一個數字。"
+            "status 不是 complete 時，逐 case 檢視會缺列。"
+        ),
+    }
+
     # 檔名分開：dry run 不得寫進 formal report 的位置。同名會讓一份預演
     # 在目錄裡與正式結果長得一模一樣，而唯一的差別藏在 JSON 欄位裡。
     filename = "formal_e2_dry_run.json" if dry_run else "formal_e2_report.json"
@@ -1062,9 +1233,8 @@ def run_formal_e2_full(
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    # report_path / trace_index_path 只給呼叫端，不進檔案：一份報告記著自己
+    # 的絕對路徑，複製到別處之後那一欄就是錯的。
     document["report_path"] = (out / filename).as_posix()
-
-    # trace 的 index 最後才寫，而且只在 run 真的跑完之後。中途失敗時
-    # 上面的 except 已經寫過一份 aborted index。
-    document["trace_index_path"] = writer.finalise().as_posix()
+    document["trace_index_path"] = trace_index_path
     return document

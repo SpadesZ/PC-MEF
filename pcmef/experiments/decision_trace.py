@@ -46,6 +46,10 @@ __all__ = [
     "RUN_STATUS_RUNNING",
     "RUN_STATUS_COMPLETE",
     "RUN_STATUS_ABORTED",
+    "TRACE_COMPLETE",
+    "TRACE_PARTIAL",
+    "TRACE_UNAVAILABLE",
+    "TRACE_ABORTED",
     "CaseTrace",
     "build_case_trace",
     "TraceWriter",
@@ -67,6 +71,18 @@ DISAGREEMENT_KEY = "D"
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_COMPLETE = "complete"
 RUN_STATUS_ABORTED = "aborted"
+
+#: trace 自身的完整度。與 `run_status` **刻意分開**：run_status 說的是那一次
+#: formal run 有沒有跑完，trace_status 說的是這份旁路紀錄有沒有記全。
+#:
+#: 兩者可以不同，而且正是不同的那一種情況最需要看見 —— 一次成功的 run
+#: 配上三筆寫失敗的 case trace，先前會寫出 `run_status=complete` 與
+#: `n_cases=381`，畫面因此宣稱一切正常，而讀的人沒有任何線索知道應該是
+#: 384 筆。少掉的三筆不會讓任何欄位變成紅色（NOTE-073）。
+TRACE_COMPLETE = "complete"
+TRACE_PARTIAL = "partial"
+TRACE_UNAVAILABLE = "unavailable"
+TRACE_ABORTED = "aborted"
 
 def route_explanation(
     route: str,
@@ -356,6 +372,7 @@ class TraceWriter:
         code_revision: str = "",
         runtime_identity: Mapping[str, Any] | None = None,
         dry_run: bool = False,
+        expected_cases: int | None = None,
     ) -> None:
         self.root = Path(out_dir) / "trace"
         self.cases_dir = self.root / "cases"
@@ -370,6 +387,12 @@ class TraceWriter:
             "dry_run": bool(dry_run),
         }
         self.index_rows: list[dict[str, Any]] = []
+        #: 這次 run 應該有幾筆 case trace。由 executor 在建立時告知 ——
+        #: 沒有這個分母，「寫了 381 筆」看起來就是完整的。
+        self.expected_cases = None if expected_cases is None else int(expected_cases)
+        #: 寫失敗的 case。每一筆記下它是哪一列與失敗原因，但**不記證據內容**
+        #: —— 這份 index 是給還沒開 case 檔的人看的。
+        self.failures: list[dict[str, Any]] = []
         self._finalised = False
 
     # -- preview ---------------------------------------------------------
@@ -414,6 +437,46 @@ class TraceWriter:
         )
         return path.as_posix()
 
+    # -- 失敗 ------------------------------------------------------------
+
+    def record_failure(
+        self, row_index: int, case_id: str, error: BaseException | str
+    ) -> None:
+        """某一列的 trace 寫不出來。
+
+        **不重試、不中止。** trace 是旁路，一筆寫不出來只損失可讀性；但它
+        必須留下痕跡，否則 index 會安靜地少一列而看起來仍然完整。這就是
+        `expected_cases` 與這份清單存在的全部理由（NOTE-073）。
+        """
+        detail = (
+            error if isinstance(error, str)
+            else f"{type(error).__name__}: {error}"
+        )
+        self.failures.append(
+            {
+                "row_index": int(row_index),
+                "case_id": str(case_id),
+                "error": detail[:300],
+            }
+        )
+
+    def trace_status(self, run_status: str) -> str:
+        """這份 trace 的完整度。四種狀態互斥，判斷順序即優先序。"""
+        if run_status == RUN_STATUS_ABORTED:
+            return TRACE_ABORTED
+        written = len(self.index_rows)
+        if written == 0:
+            # 一筆都沒寫出來。分母是 0 時（例如空資料集）不算異常，
+            # 但那時也沒有東西可看，一樣是 unavailable。
+            return TRACE_UNAVAILABLE
+        if self.failures:
+            return TRACE_PARTIAL
+        if self.expected_cases is not None and written != self.expected_cases:
+            # 沒有記錄到失敗卻對不上分母，同樣不是 complete —— 差額的來源
+            # 未知，而「未知」比「已知少三筆」更需要被看見。
+            return TRACE_PARTIAL
+        return TRACE_COMPLETE
+
     # -- index -----------------------------------------------------------
 
     def _write_index(self, run_status: str, note: str = "") -> Path:
@@ -421,12 +484,38 @@ class TraceWriter:
 
         半寫入的 index 比沒有 index 更糟：它看起來是完整的。
         """
+        written = len(self.index_rows)
+        status = self.trace_status(run_status)
         document = {
             **self.header,
             "run_status": run_status,
+            "trace_status": status,
+            "expected_cases": self.expected_cases,
+            "written_cases": written,
+            "failed_trace_cases": sorted(
+                self.failures, key=lambda row: row["row_index"]
+            ),
+            "missing_cases": (
+                None if self.expected_cases is None
+                else max(self.expected_cases - written, 0)
+            ),
+            "trace_status_meaning": {
+                TRACE_COMPLETE: "每一列都有 case trace。",
+                TRACE_PARTIAL: (
+                    # 純文字：這個字串會直接進 HTML，markdown 的星號不會被
+                    # 渲染成粗體，只會原樣印在畫面上。
+                    "有列沒有寫出 case trace。科學結果不受影響 —— trace 是"
+                    "旁路觀測，決策在它之前就完成了 —— 但這份紀錄不完整，"
+                    "逐 case 檢視時會缺列。"
+                ),
+                TRACE_UNAVAILABLE: "一筆 case trace 都沒有寫出來。",
+                TRACE_ABORTED: (
+                    "run 中途失敗。已寫的 case 保留，但這不是一份完整的 run。"
+                ),
+            }[status],
             "note": note,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "n_cases": len(self.index_rows),
+            "n_cases": written,
             "cases": sorted(self.index_rows, key=lambda row: row["row_index"]),
         }
         target = self.root / "trace_index.json"

@@ -3,7 +3,243 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-09-02
+最後更新：2026-09-05
+
+---
+
+## Formal execution correctness + UI transparency audit（2026-09-05，NOTE-072~076）
+
+**families 36-43 全程未生成、未讀取。`regression verify` = IDENTICAL，
+`FINAL_E2_36_43_TOUCHED = NO`。全套 pytest 的失敗集合與修改前逐項相同（13 項既有失敗，0 新增）。**
+
+這一輪的起因是兩個「守衛存在但永遠不會觸發」的缺陷，以及一次以第一次
+使用者視角做的全 Web UI 走查。共通的形態是：**畫面與後端各自看向不同的位置**，
+而兩邊都不會報錯。
+
+### P0-1 Formal E2 的 one-shot 先前只存在於 CLI
+
+`ConsoleRunner._command()` 把 `--out` 指到 `outputs/console/runs/<run_id>/artifacts`。
+每次 console run 都有新的 `run_id`，因此那個位置永遠是空的 —— 而
+`formal_service.preflight()` 檢查的是 `outputs/perception/e2_final`。
+
+後果有兩層，兩層都沒有症狀：
+
+| | 先前 |
+|---|---|
+| one-shot | `output_location_is_free` 檢查 A，執行寫到 B，第二次 formal run 照樣放行 |
+| 結果可見性 | `/formal` 的「最近一次執行」讀 A，Web 跑完的報告在 B —— 畫面上看不到自己剛跑完的東西 |
+
+改法：
+
+- `ConsoleRunner` 取得 `formal_out`，與 `preflight()` 讀**同一個**伺服器端設定
+  （`admin.app._formal_config()`，唯一來源）。
+- console run 目錄改放一份 `formal_output.json` 指標；科學結果不在其中。
+- `run_view.artifact_root()` 依指標解析，六個分頁因此仍找得到報告與 trace。
+- `RunRecord.protected`：正式 formal run 的紀錄拒絕刪除（畫面上按鈕直接
+  disabled，不是按下去才回 400）。dry-run 紀錄仍可刪，且刪掉不動 canonical。
+- `formal_service.formal_status()`：畫面回答「是不是一次性 / 跑過沒有 /
+  報告在哪 / 為什麼被擋 / 執行紀錄與科學報告的差別」。
+
+**衍生修正（審計中發現）**：canonical 位置是共用的，因此「檔案存在」不等於
+「這次 run 產生的」。`report_attribution()` 依 run 的成敗與報告 `created_at`
+是否落在 run 時間窗內，回 `this_run` / `not_produced` / `superseded` / `unknown`。
+先前一次 **exit 2 的 formal run** 的 Outputs 分頁會顯示目錄裡既有的報告，
+看起來像它跑完了。
+
+### P0-2 Formal severity 先前可由 CLI 自由改，而報告仍宣稱它來自 frozen
+
+`--vision-severity` / `--tof-severity` 有預設值 2.0 / 0.05 且**完全不驗證**，
+報告卻無條件寫 `severity_source = "frozen gate-validation selection"`。
+severity 決定 stress set，也就是整場 Formal E2 吃進去的資料 —— 改掉它等於
+換了一個實驗，而換掉的痕跡只有那一句永遠為真的話。
+
+改法：
+
+- `frozen_severity()` 由 `e2_sample_size.lock` 的 `severity_allocation` 還原
+  （該 payload 自帶 `reselection_forbidden: true`）；讀不到即 fail-closed，
+  不取任何預設值。
+- CLI 兩條旗標改成**斷言**：預設 `None`（不斷言），給了就必須逐項相等，
+  不等即 exit 2。既有腳本仍跑得動，語意變成「我聲稱 frozen 值是這個」。
+- `severity_source` 改成結構化出處：lock 名、欄位、lock hash、`selected_on`、
+  `reselection_forbidden`、以及 `cli_override_supplied` /
+  `cli_override_verified_equal`。
+
+實測：
+
+```
+--vision-severity 5.0   -> exit 2   BLOCK
+--tof-severity   0.5    -> exit 2   BLOCK
+--vision-severity 2.0 --tof-severity 0.05  -> exit 0，且報告記
+                                              cli_override_verified_equal = true
+不給旗標                -> exit 0，cli_override_supplied = false
+```
+
+### P1-1 Decision trace 的完整度先前沒有分母
+
+`TraceWriter` 只寫 `n_cases`。384 列裡寫成功 381 筆，index 會是
+`run_status=complete` + `n_cases=381` —— 而 381 在沒有分母時看起來就是完整的。
+`emit_trace` 的例外被吞掉，且**不留任何痕跡**。
+
+改法：`expected_cases` / `written_cases` / `failed_trace_cases` /
+`trace_status`（`complete` / `partial` / `unavailable` / `aborted`）。
+畫面顯示：
+
+```
+Trace PARTIAL
+381 / 384 case traces available
+3 case traces failed to persist        ← 逐列列出 row index / case id / 失敗原因
+```
+
+兩個附帶修正：
+
+- 完整度寫進**報告本身**，且在報告落盤**之前**。先前那幾個欄位加在
+  `write_text()` 之後，只存在於回傳值，檔案裡沒有。
+- `writer.finalise()` 的例外改成接住。先前一次磁碟寫入錯誤會讓
+  `run_formal_e2_full` 拋例外 —— 一個統計已經算完的一次性實驗被宣告成失敗。
+- 舊 index 沒有這些欄位時顯示「完整度未知」，**不得**預設成 complete。
+
+### P1-2 Cache hit 先前會永久失去解釋能力
+
+§48 的 cache 只存六份答案，不存 role-projected payload。一次命中之後，
+「那四個角色當初看到什麼」再也組不出來，畫面只能說「答案來自之前的 cache」。
+
+改法：未命中（= 這次真的問了模型）時，`CachedArbiter` 把那一次的
+`producer_trace.json` 寫進 cache 目錄 —— 四個角色的實際 payload、
+`received_image` 與 digest、`attempt_count`、raw 與 validated 回覆、
+provider request id、model/revision、以及鑰匙的七個組成。
+
+**刻意不進 `AGENT_ARTIFACT_NAMES`**：命中的判準是六份齊全，加進去會讓所有
+既有目錄一夜之間變成未命中。也刻意不寫 case_id / class_label / condition —— 
+那些是 §48 明列不得進入快取的欄位。
+
+畫面因此可以走完整條鏈：
+
+```
+命中的 case → cache entry → 產生它的那一次 run
+            → 四個角色的隔離矩陣（由實際 payload 算出）
+            → raw / validated → s_A 的前兩步
+            → 回到原 case（breadcrumb + 返回鈕）
+```
+
+**審計中發現的第二個缺陷**：`agents_view()` 只看 artifacts，命中時 artifacts
+是空的，於是 `_case_agents.html` 的第一個分支 `{% if not agents %}` 把命中的
+案例畫成 **「未執行 cache_hit」** —— 一句與事實相反的話，配上一個沒有解釋的
+識別字。現在命中會載入 producer trace 並顯示完整證據，標題是
+「仲裁已發生 · 本次命中快取」。
+
+### P1-3 Web formal 先前沒有接上正式 agent cache
+
+CLI 早有 `--agent-cache`，`ConsoleRunner._command()` 沒傳。從畫面啟動的正式
+執行會對每一筆 escalated case 重新付費，而畫面上沒有任何跡象。
+
+改法：由伺服器端 `PCMEF_FORMAL_AGENT_CACHE` 提供，UI 不得指定
+（`FORMAL_PARAM_WHITELIST` 仍然只有 `mode` + `confirm`）。`/formal` 顯示
+啟用狀態與 root；`summary()` 增加 `provider_calls_avoided`。
+
+**附帶的安全修正**：`/console/cache/<key>` 先前接受 `?root=`，而 `root`
+完全沒有限制 —— 配上只驗格式的 cache_key 就是一條讀取任意含 `manifest.json`
+目錄的路徑。改成只讀伺服器端設定。這同時修掉一條死連結：cache root 一經
+設定到別處，case 頁「追溯到最初那一次 Agent 執行」必然 404。
+
+### UI transparency audit
+
+實際啟動 `pcmef admin serve`，在 **1280 / 1366×768 / 1920×1080 / 1024** 四個
+寬度下走查 17 個頁面：
+
+| 檢查 | 結果 |
+|---|---|
+| 橫向溢位 | 4 個寬度 × 17 頁 = 68 組，全部 `scrollWidth == clientWidth` |
+| 元素超出視窗 | 0 |
+| 寫入端點的 CSRF | 4/4 端點回 403 |
+| 路徑遍歷（preview 檔名） | 404 |
+| dead button / 404 連結 | 0 |
+
+修掉的 UI 缺陷（每一項都是走查時發現，不是靠讀 code）：
+
+| # | 症狀 | 修法 |
+|---|---|---|
+| 1 | cache hit 顯示「未執行 cache_hit」 | 分支順序 + 載入 producer trace |
+| 2 | 失敗的 formal run 顯示別人的報告 | `report_attribution()` |
+| 3 | 正式 run 的「刪除」看似可按，按了才 400 | 畫面直接 disabled，判準與後端同一份 |
+| 4 | 已結束的 run 顯示「連線中…」 | 初始文字改由伺服器端決定 |
+| 5 | 不存在的 run/case 回 400 JSON | 404 + `not_found.html`，含回得去的路 |
+| 6 | `severity_source` 印成 Python repr | 結構化顯示 |
+| 7 | `**粗體**` 的星號原樣印在畫面上 | 進 HTML 的字串一律純文字 |
+| 8 | Results 頁只有 overall macro-F1 | 補 worst-condition（主要指標）與成對 CI |
+| 9 | 欄數隨資料變動的表會撐寬整頁 | `.table-scroll` 讓表自己捲 |
+| 10 | cache 頁是死路 | `?from_run/from_case` 導覽參數（格式白名單）+ breadcrumb |
+
+**既有的 flaky test 一併修掉**：`ConsoleRunner.list_runs()` 依目錄名排序，
+而 `run_id` 只有**秒**級解析度，同一秒內建立的幾筆只差 6 個隨機字元 ——
+排序退化成 uuid 字典序。改以 `started_at`（ISO，帶微秒）為主鍵。
+**不動 `run_id` 格式**：那是既有目錄的名字與使用者手上連結的一部分。
+
+### 實測（不是只有 unit test）
+
+從 Web 按下「執行預演」，384 列跑完：
+
+```
+指令   ... formal run-e2 --mode dry-run --out outputs\perception\e2_final
+                                        ^^^ canonical 位置，不是 run 目錄
+log    [PASS] severity_is_restored_from_the_frozen_selection:
+              vision=2.0 tof=0.05 (e2_sample_size.lock, reselection_forbidden=True)
+       frozen severity vision=2.0 tof=0.05 (from e2_sample_size.lock)
+報告   trace = {status: complete, expected: 384, written: 384, failed: []}
+指標   vision_only 0.7711/0.5345 · reliability_routing 0.7215/0.1806
+       tof_only 0.6309/0.1450 · fixed_fusion 0.6388/0.1635(tof_degraded)
+```
+
+### 新增測試
+
+| 檔案 | 覆蓋 |
+|---|---|
+| `tests/e2/test_frozen_severity.py` | 13 項：還原、斷言不符 BLOCK、缺欄位 fail-closed、CLI 預設為 None |
+| `tests/console/test_formal_one_shot.py` | 17 項：同一 canonical 位置、第二次 exit 2、刪除保護、`formal_status` |
+| `tests/e2/test_trace_completeness.py` | 15 項：四種狀態、失敗列具名、完整度必須在落盤前寫進報告 |
+| `tests/cache/test_cache_provenance.py` | 11 項：未命中才寫、命中不覆寫、不含 case 身分、不影響命中判準 |
+| `tests/console/test_formal_agent_cache.py` | 8 項：cache root 只能來自伺服器端 |
+
+### 本輪狀態總表：完成 / 未完成 / 未驗證
+
+**已完成且已驗證**（程式改動 + regression test + 實跑）
+
+| 項目 | 驗證方式 |
+|---|---|
+| ① Web Formal 共用 canonical output、第二次 fail-closed、formal 紀錄不可刪 | `test_formal_one_shot.py`（17）+ 實際從 UI 跑完 384 列，指令為 `--out outputs\perception\e2_final` |
+| ② severity 由 frozen lock 取得，CLI 僅做一致性 assertion | `test_frozen_severity.py`（13）+ CLI 實測 exit 2 ×2、exit 0 ×2 |
+| ③ decision trace 記 expected / written / failed | `test_trace_completeness.py`（15）+ 畫面實測 `Trace PARTIAL 381/384` |
+| ④ cache hit 可追溯 producer 的實際 role-projected payload | `test_cache_provenance.py`（11）+ 實跑 cache hit 案例走完 case→cache→回 case |
+| ⑤ Web Formal 與 CLI 共用同一 AgentArtifactCache | `test_formal_agent_cache.py`（8） |
+| ⑥ cache browser 不接受 client-controlled `?root=` | `test_cost_and_cache_browser.py::test_the_cache_root_cannot_come_from_the_url` |
+
+**已完成但只在 dry-run / stub provider 下驗證**（尚未經真實 provider）
+
+- ④ 的 producer trace：實跑用的是 stub adapter（回 schema-valid JSON）。
+  真實 provider 下的 `provider_request_id`、token 計數與 retry 行為**未驗證**。
+- ⑤ 的 agent cache 接線：`--agent-cache` 只在 formal 模式送出，而 formal 模式
+  尚未真實執行過。**接線本身有測試，端到端的省錢效果未驗證。**
+- `token_usage` / Cost 頁的金額：目前所有數字來自 stub 的固定 token 數。
+
+**未完成 —— Final E2 的前置條件（本輪刻意不碰）**
+
+| # | 前置條件 | 現況 |
+|---|---|---|
+| 1 | **AMD-007 real-provider validation** | 未執行。四個 agent 從未對真實 provider 跑過一次完整 case |
+| 2 | **AMD-007 freeze** | 未凍結 |
+| 3 | **AMD-008 freeze**（§208 紅線：Web 可觸發 formal） | spec 已寫，未凍結 |
+| 4 | **AMD-009 freeze**（worst-condition paired CI estimator） | spec 已寫，未凍結 |
+| 5 | **`llm_runtime.lock` re-freeze** | 目前的 binding 未經 real-provider 驗證；驗證後必須重凍 |
+| 6 | **`formal_config.lock` re-freeze** | 依賴上列，且 `scenario_set_hash` 必須對得上實際生成的 families 36-43 |
+| 7 | **canonical Golden Baseline** | 目前只有 `regression/provisional/`，`canonical: false`。provisional 不是 Golden |
+| 8 | families 36-43 生成 | **未生成**。生成即開封，必須在 1-7 全部完成之後 |
+
+以上八項在本輪**完全沒有動**，狀態與 2026-09-02 相同。
+
+**既有失敗（與本輪無關，修改前後逐項相同）**
+
+13 項：`simulation/test_paired`(2)、`test_repo_integrity`(1)、
+`unit/test_calibration_objective`(5)、`unit/test_calibration_plan`(1)、
+`unit/test_calibration_prereg`(4)。本輪未嘗試修復。
 
 ---
 

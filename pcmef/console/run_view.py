@@ -73,25 +73,124 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def artifact_root(run_dir: Path) -> Path:
+    """這次 run 的產物實際落在哪裡。
+
+    formal run 的科學結果寫在 **canonical** 目錄而不是 run 目錄底下 ——
+    否則每次 console run 都會給 formal report 一個沒人佔用的新位置，
+    pre-flight 的 one-shot 檢查就永遠不會觸發（見 console.runner）。
+    run 目錄裡留一份指標，這個函式就是照它走。
+
+    指標不存在（一般探索用 run，或 2026-09-04 之前的舊紀錄）時回到
+    `run_dir/artifacts`，行為與先前完全相同。
+    """
+    pointer = _read_json(run_dir / "formal_output.json")
+    if pointer and pointer.get("canonical_out"):
+        return Path(str(pointer["canonical_out"]))
+    return run_dir / "artifacts"
+
+
+def formal_pointer(run_dir: Path) -> dict[str, Any] | None:
+    """這次 run 的 formal 指標。不是 formal run 就回 None。"""
+    return _read_json(run_dir / "formal_output.json")
+
+
 def _trace_index(artifacts: Path) -> dict[str, Any] | None:
     return _read_json(artifacts / "trace" / "trace_index.json")
 
 
-def _report(artifacts: Path) -> tuple[dict[str, Any] | None, str]:
-    for name in _REPORT_NAMES:
+def _report(artifacts: Path, pointer: Mapping[str, Any] | None = None
+            ) -> tuple[dict[str, Any] | None, str]:
+    """這次 run 的報告。
+
+    `pointer` 存在時**只認它指名的那一個檔名**，不掃描 `_REPORT_NAMES`。
+    canonical 目錄同時放得下 formal 與 dry-run 兩份報告，掃描會讓一次
+    dry run 讀到別人的正式報告，或反過來。
+    """
+    names = (
+        (Path(str(pointer.get("report", ""))).name,) if pointer else _REPORT_NAMES
+    )
+    for name in names:
+        if not name:
+            continue
         document = _read_json(artifacts / name)
         if document is not None:
             return document, name
     return None, ""
 
 
-def availability(run_dir: Path, kind: str) -> dict[str, bool]:
+def report_attribution(
+    run_dir: Path, record: Any = None
+) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
+    """這次 run 的報告，以及**它是不是真的由這次 run 產生的**。
+
+    formal run 的報告寫在 canonical 位置，而那個位置是共用的。單靠「檔案
+    存在」把它算成這次 run 的產物會產生兩種假話：
+
+      * 一次**失敗**的 formal run（exit 2，pre-flight 擋下或中途中止）
+        會顯示出目錄裡既有的報告，看起來像它跑完了。
+      * 兩次 dry run 之後，較早那一次的頁面會顯示較晚那一次的報告。
+
+    因此這裡回傳 attribution：`this_run` / `not_produced` / `superseded` /
+    `unknown`。判準是 run 的成敗與報告的 `created_at` 是否落在這次 run 的
+    時間窗內 —— 兩者都是既有欄位，不需要新的紀錄。
+    """
+    pointer = formal_pointer(run_dir)
+    document, name = _report(artifact_root(run_dir), pointer)
+
+    if pointer is None:
+        # 一般探索用 run：產物就在自己的目錄裡，不會有歸屬問題。
+        return document, name, {"kind": "this_run", "shared_location": False}
+
+    status = getattr(record, "status", None)
+    if status == "failed" or document is None:
+        return None, name, {
+            "kind": "not_produced",
+            "shared_location": True,
+            "canonical_out": pointer.get("canonical_out"),
+            "expected": pointer.get("report"),
+            "reason": (
+                "這次執行以 exit code 非零結束，沒有產生報告。"
+                if status == "failed"
+                else f"{pointer.get('report')} 不存在，這次執行沒有留下報告。"
+            ),
+        }
+
+    created = str(document.get("created_at", ""))
+    started = str(getattr(record, "started_at", "") or "")
+    finished = str(getattr(record, "finished_at", "") or "")
+    within = bool(created and started and created >= started
+                  and (not finished or created <= finished))
+    if created and started and not within:
+        return document, name, {
+            "kind": "superseded",
+            "shared_location": True,
+            "canonical_out": pointer.get("canonical_out"),
+            "report_created_at": created,
+            "run_window": f"{started[:19]} → {finished[:19] or '—'}",
+            "reason": (
+                "canonical 位置現在這一份報告的產生時間不在這次執行的時間窗內，"
+                "代表它是另一次執行寫的。這一頁顯示的是那一份，不是這次的。"
+            ),
+        }
+    return document, name, {
+        "kind": "this_run" if within else "unknown",
+        "shared_location": True,
+        "canonical_out": pointer.get("canonical_out"),
+        "report_created_at": created,
+        "reason": "" if within else (
+            "無法判斷這份報告是不是這次執行寫的：缺少可比對的時間欄位。"
+        ),
+    }
+
+
+def availability(run_dir: Path, kind: str, record: Any = None) -> dict[str, bool]:
     """哪些分頁對這次 run 有內容。
 
     Overview 與 Artifacts 永遠有（至少有 log 與 run.json）；其餘依實際產物。
     """
-    artifacts = run_dir / "artifacts"
-    report, _ = _report(artifacts)
+    artifacts = artifact_root(run_dir)
+    report, _, _ = report_attribution(run_dir, record)
     return {
         "overview": True,
         "trace": _trace_index(artifacts) is not None,
@@ -116,7 +215,7 @@ def trace_view(
     run_dir: Path, *, condition: str = "", route: str = "", limit: int = 200
 ) -> dict[str, Any]:
     """case 列表。支援依 condition 與 route 篩選。"""
-    index = _trace_index(run_dir / "artifacts")
+    index = _trace_index(artifact_root(run_dir))
     if index is None:
         return {
             "available": False,
@@ -136,14 +235,34 @@ def trace_view(
         cases = [c for c in cases if str(c.get("route")) == route]
 
     correct = sum(1 for c in cases if c.get("correct"))
+    written = len(index.get("cases", []))
+    expected = index.get("expected_cases")
+    failed = list(index.get("failed_trace_cases") or [])
+    # 舊 trace 沒有這些欄位。此時不得假設 complete —— 缺欄位代表「不知道」，
+    # 而把不知道畫成 complete 正是這一段要修掉的事（NOTE-073）。
+    status = index.get("trace_status")
+    if status is None:
+        status = "unknown" if expected is None else (
+            "complete" if written == expected and not failed else "partial"
+        )
     return {
         "available": True,
         "reason": "",
         "run_status": index.get("run_status"),
+        "trace_status": status,
+        "trace_status_meaning": index.get("trace_status_meaning", ""),
+        "expected_cases": expected,
+        "written_cases": written,
+        "failed_cases": failed,
+        "missing_cases": (
+            index.get("missing_cases")
+            if index.get("missing_cases") is not None
+            else (None if expected is None else max(int(expected) - written, 0))
+        ),
         "dry_run": bool(index.get("dry_run")),
         "schema_version": index.get("trace_schema_version"),
         "note": index.get("note", ""),
-        "total": len(index.get("cases", [])),
+        "total": written,
         "shown": min(len(cases), limit),
         "filtered": len(cases),
         "correct": correct,
@@ -159,7 +278,7 @@ def trace_view(
 def case_view(run_dir: Path, case_id: str) -> dict[str, Any] | None:
     """單一 case 的完整 decision trace。找不到回 None，由呼叫端決定 404。"""
     safe = case_id.replace("/", "").replace("\\", "").replace("..", "")
-    return _read_json(run_dir / "artifacts" / "trace" / "cases" / f"{safe}.json")
+    return _read_json(artifact_root(run_dir) / "trace" / "cases" / f"{safe}.json")
 
 
 #: 隔離矩陣要追蹤的欄位，以及它們在畫面上的意義。
@@ -348,6 +467,25 @@ def cache_entry_view(cache_root: Path, cache_key: str) -> dict[str, Any] | None:
             "body": json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
                     if payload is not None else "",
         })
+
+    # 產生這把鑰匙的那一次實際執行。命中時四個角色的投影不會重新發生，
+    # 因此少了這一份，畫面就只能說「答案來自快取」而說不出當時問了什麼。
+    from pcmef.agents.cache import PRODUCER_TRACE_NAME
+
+    producer = _read_json(folder / f"{PRODUCER_TRACE_NAME}.json")
+    producer_agents = None
+    if producer and producer.get("artifacts"):
+        records = list(producer["artifacts"])
+        producer_agents = {
+            "isolation": agent_isolation(records),
+            "roles": [role_detail(a) for a in records],
+            # s_A 的最後一步（ε_s 位移）發生在 bridge 而不是 cache 裡，
+            # 因此這裡只還原到 normalised support；final 給空 dict，
+            # support_chain 會據此把 s_a 那一欄留白而不是編一個值出來。
+            "support": support_chain(records, {}),
+            "total_attempts": producer.get("total_attempts"),
+        }
+
     return {
         "cache_key": key,
         "folder": str(folder),
@@ -356,20 +494,34 @@ def cache_entry_view(cache_root: Path, cache_key: str) -> dict[str, Any] | None:
         # 六份缺一即不算命中（§48）。半套目錄要看得出來，否則使用者會以為
         # 這把鑰匙可用，而執行時卻仍然重問。
         "complete": all(a["present"] for a in artifacts),
+        "producer": producer,
+        "producer_agents": producer_agents,
+        "producer_missing_reason": (
+            "" if producer else
+            "這個目錄是 2026-09-04 之前寫的，沒有 producer_trace.json。"
+            "當時的 cache 只保存六份答案，四個角色實際收到的 payload 沒有"
+            "被記下來，因此無法追溯。之後未命中而新寫入的鑰匙都會有。"
+        ),
     }
 
 
-def cost_view(run_dir: Path, kind: str) -> dict[str, Any]:
+def cost_view(run_dir: Path, kind: str, record: Any = None) -> dict[str, Any]:
     """這次執行的 token 用量與據此換算的成本。
 
     定價由 `experiments.e2_cost.PRICING` 匯入而不是在這裡重寫一份。
     兩份費率遲早會分岔，而分岔時畫面上的金額看起來仍然很正常。
+
+    報告經 `report_attribution()` 取得而不是直接讀檔：canonical 位置是共用的，
+    直接讀會把**別次**執行的花費算到這一次頭上。
     """
-    report = _read_json(run_dir / "artifacts" / "formal_e2_report.json") or \
-        _read_json(run_dir / "artifacts" / "formal_e2_dry_run.json")
+    report, _, attribution = report_attribution(run_dir, record)
     if report is None:
-        return {"available": False,
-                "reason": "這次執行沒有產生 formal report，因此沒有用量紀錄。"}
+        return {
+            "available": False,
+            "reason": attribution.get("reason")
+            or "這次執行沒有產生 formal report，因此沒有用量紀錄。",
+            "attribution": attribution,
+        }
 
     usage = report.get("token_usage") or {}
     if not usage.get("measured"):
@@ -382,6 +534,7 @@ def cost_view(run_dir: Path, kind: str) -> dict[str, Any]:
                 "而 2026-09-04 之前的報告則是量了卻沒有寫出（NOTE-071）。"
             ),
             "dry_run": bool(report.get("dry_run")),
+            "attribution": attribution,
         }
 
     from pcmef.experiments.e2_cost import PRICING
@@ -429,27 +582,67 @@ def cost_view(run_dir: Path, kind: str) -> dict[str, Any]:
     }
 
 
-def agents_view(trace: Mapping[str, Any]) -> dict[str, Any] | None:
-    """一筆 case 的多代理段落。沒有真的呼叫過就回 None。
+def agents_view(
+    trace: Mapping[str, Any], cache_root: Path | str | None = None
+) -> dict[str, Any] | None:
+    """一筆 case 的多代理段落。真的沒有發生過才回 None。
 
-    未 escalate 與 dry-run 都沒有 artifacts。這兩種情況要由樣板說明
-    「為什麼沒有」，而不是在這裡湊出一張空表。
+    三種來源，順序即優先序：
+
+    1. `this_run` —— 這次 run 自己呼叫了四個角色，紀錄在 call_log 裡。
+    2. `cache_producer` —— 這次命中快取，四次投影在**這一次**沒有發生，
+       但在產生這把鑰匙的那一次發生過，紀錄在 producer_trace.json 裡。
+       此時仍然回傳完整內容：命中省下的是一次付費，不該連帶省掉解釋能力
+       （NOTE-074）。
+    3. None —— 未 escalate 或 dry run，也就是**真的**沒有發生過。
+       由樣板說明「為什麼沒有」，不在這裡湊一張空表。
+
+    第 2 種先前落進第 3 種：`agents_view` 只看 artifacts，命中時 artifacts
+    是空的，於是畫面顯示「未執行 cache_hit」—— 一句與事實相反的話配上一個
+    沒有解釋的識別字。
     """
     execution = trace.get("agent_execution") or {}
-    artifacts = execution.get("artifacts") or []
-    if not execution.get("invoked") or not artifacts:
+    if not execution.get("invoked"):
         return None
+
+    artifacts = list(execution.get("artifacts") or [])
+    if artifacts:
+        return _agents_block(artifacts, trace.get("final") or {}, "this_run", None)
+
+    if execution.get("reason") != "cache_hit" or not execution.get("cache_key"):
+        return None
+    producer = _read_json(
+        Path(cache_root or "") / str(execution["cache_key"]) / "producer_trace.json"
+    ) if cache_root else None
+    if not producer or not producer.get("artifacts"):
+        return None
+    # s_A 用**這一筆的** final：命中的是 arbitration 的答案，而 ε_s 之後的
+    # 向量屬於這一次決策，兩者本來就該一起看。
+    return _agents_block(
+        list(producer["artifacts"]), trace.get("final") or {},
+        "cache_producer", producer,
+    )
+
+
+def _agents_block(
+    artifacts: Sequence[Mapping[str, Any]],
+    final: Mapping[str, Any],
+    source: str,
+    producer: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     return {
+        "source": source,
+        "producer": producer,
         "isolation": agent_isolation(artifacts),
         "roles": [role_detail(a) for a in artifacts],
-        "support": support_chain(artifacts, trace.get("final") or {}),
+        "support": support_chain(artifacts, final),
         "total_attempts": sum(int(a.get("attempt_count") or 0) for a in artifacts),
     }
 
 
 def case_neighbours(run_dir: Path, case_id: str) -> dict[str, str | None]:
     """前後相鄰的 case，讓人可以逐筆翻閱而不必回列表。"""
-    index = _trace_index(run_dir / "artifacts")
+    index = _trace_index(artifact_root(run_dir))
     if index is None:
         return {"previous": None, "next": None}
     ids = [str(row.get("case_id")) for row in index.get("cases", [])]
@@ -464,8 +657,7 @@ def case_neighbours(run_dir: Path, case_id: str) -> dict[str, str | None]:
 
 def inputs_view(run_dir: Path, record: Any) -> dict[str, Any]:
     """餵進去的是什麼：執行參數、指令，以及資料來源。"""
-    artifacts = run_dir / "artifacts"
-    report, _ = _report(artifacts)
+    report, _, _ = report_attribution(run_dir, record)
     dataset = report.get("dataset", {}) if report else {}
     return {
         "params": dict(getattr(record, "params", {}) or {}),
@@ -477,11 +669,11 @@ def inputs_view(run_dir: Path, record: Any) -> dict[str, Any]:
     }
 
 
-def intermediate_view(run_dir: Path) -> dict[str, Any]:
+def intermediate_view(run_dir: Path, record: Any = None) -> dict[str, Any]:
     """中途產生了什麼：stress set 與感知階段的中間量。"""
-    artifacts = run_dir / "artifacts"
+    artifacts = artifact_root(run_dir)
     stress = _read_json(artifacts / "stress" / "stress_manifest.json")
-    report, _ = _report(artifacts)
+    report, _, _ = report_attribution(run_dir, record)
     routing = (report or {}).get("routing", {})
     return {
         "available": stress is not None or bool(routing),
@@ -495,18 +687,22 @@ def intermediate_view(run_dir: Path) -> dict[str, Any]:
     }
 
 
-def outputs_view(run_dir: Path) -> dict[str, Any]:
+def outputs_view(run_dir: Path, record: Any = None) -> dict[str, Any]:
     """得到什麼結論。"""
-    report, name = _report(run_dir / "artifacts")
+    report, name, attribution = report_attribution(run_dir, record)
     if report is None:
         return {
             "available": False,
-            "reason": "這次執行沒有產生 E2 報告。",
+            "reason": attribution.get("reason") or "這次執行沒有產生 E2 報告。",
+            "attribution": attribution,
         }
     return {
         "available": True,
         "reason": "",
         "filename": name,
+        # 報告寫在共用的 canonical 位置時，畫面必須說得出它到底是不是
+        # 這次執行寫的。單靠「檔案存在」會把別次的結果算到這一次頭上。
+        "attribution": attribution,
         "report_id": report.get("report_id"),
         "dry_run": bool(report.get("dry_run")),
         "scientific_result": bool(report.get("scientific_result")),
@@ -529,7 +725,7 @@ _MAX_ARTIFACT_ROWS = 200
 
 def artifacts_view(run_dir: Path) -> dict[str, Any]:
     """檔案落在哪裡。目錄先摺疊成一列，避免幾百個 preview 淹沒頁面。"""
-    artifacts = run_dir / "artifacts"
+    artifacts = artifact_root(run_dir)
     if not artifacts.is_dir():
         return {"available": False, "reason": "這次執行沒有產生 artifacts 目錄。",
                 "entries": []}

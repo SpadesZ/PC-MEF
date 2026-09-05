@@ -15,16 +15,63 @@
 <section class="card">
   <h2>逐 case 決策
     <span class="hint">
-      {{ trace.total }} 筆 · schema {{ trace.schema_version }}
+      {% if trace.expected_cases is not none %}
+        {{ trace.written_cases }} / {{ trace.expected_cases }} 筆
+      {% else %}{{ trace.total }} 筆{% endif %}
+      · schema {{ trace.schema_version }}
     </span>
   </h2>
   <div class="body">
+    {# trace 的完整度必須自己講。少掉的列不會讓任何既有欄位變紅，
+       而「381 筆」在沒有分母時看起來就是完整的（NOTE-073）。 #}
+    {% if trace.trace_status == 'complete' %}
+      <p class="lede"><span class="badge ok">Trace COMPLETE</span>
+        {{ trace.written_cases }} / {{ trace.expected_cases }} 筆 case trace 齊全。</p>
+    {% elif trace.trace_status == 'partial' %}
+      <p class="lede"><span class="badge bad">Trace PARTIAL</span>
+        {{ trace.written_cases }} / {{ trace.expected_cases }} case traces available
+        {% if trace.missing_cases %}
+          · {{ trace.missing_cases }} case traces failed to persist
+        {% endif %}
+      </p>
+      <p class="note">
+        {{ trace.trace_status_meaning or
+           '有列沒有寫出 case trace。科學結果不受影響 —— trace 是旁路觀測，
+            決策在它之前就完成了 —— 但逐 case 檢視時會缺列。' }}
+      </p>
+      {% if trace.failed_cases %}
+      <details class="advanced" open>
+        <summary>寫入失敗的 {{ trace.failed_cases | length }} 列</summary>
+        <table>
+          <thead><tr><th>row index</th><th>case id</th><th>失敗原因</th></tr></thead>
+          <tbody>
+          {% for f in trace.failed_cases %}
+            <tr><td class="mono">{{ f.row_index }}</td>
+                <td class="mono">{{ f.case_id }}</td>
+                <td class="note">{{ f.error }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </details>
+      {% endif %}
+    {% elif trace.trace_status == 'unavailable' %}
+      <p class="lede"><span class="badge bad">Trace UNAVAILABLE</span>
+        一筆 case trace 都沒有寫出來。</p>
+    {% elif trace.trace_status == 'aborted' %}
+      <p class="lede"><span class="badge bad">Trace ABORTED</span>
+        這次執行中途失敗，以下只是中止前已寫入的部分。</p>
+    {% else %}
+      <p class="lede"><span class="badge warn">Trace 完整度未知</span>
+        這份 trace 是 2026-09-04 之前的格式，沒有記錄應有筆數，
+        因此無法判斷有沒有缺列。</p>
+    {% endif %}
+
     {% if trace.dry_run %}
     <p class="lede"><span class="badge warn">DRY RUN</span>
       escalated 的案例停在仲裁邊界，沒有呼叫 provider。</p>
     {% endif %}
     {% if trace.run_status != 'complete' %}
-    <p class="lede"><span class="badge bad">{{ trace.run_status }}</span>
+    <p class="lede"><span class="badge bad">run: {{ trace.run_status }}</span>
       這次執行沒有跑完，以下只是中止前已寫入的部分。</p>
     <p class="note">{{ trace.note }}</p>
     {% endif %}

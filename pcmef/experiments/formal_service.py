@@ -31,7 +31,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-__all__ = ["preflight", "latest_report", "FINAL_FAMILY_INDICES"]
+__all__ = [
+    "preflight", "latest_report", "formal_status", "FINAL_FAMILY_INDICES",
+]
 
 #: Final E2 的 family 身分。凍在 e2_sample_size.lock，這裡只是複述。
 FINAL_FAMILY_INDICES: tuple[int, ...] = tuple(range(36, 44))
@@ -129,6 +131,26 @@ def preflight(
             f"base={base_path.as_posix()} family_indices={indices or '<none>'}",
         )
 
+    # severity 是 stress set 的形狀，也就是整場 Formal E2 吃進去的資料。
+    # 它不可設定，因此這裡不是「檢查使用者填得對不對」，而是把 executor
+    # 屆時會還原到的那兩個數字先攤在畫面上（NOTE-072）。
+    severity: dict[str, float] | None = None
+    try:
+        from pcmef.experiments.e2_formal import frozen_severity
+
+        severity, allocation = frozen_severity(resolved.freeze_dir)
+        record(
+            "severity_is_restored_from_the_frozen_selection", True,
+            f"vision={severity['vision']} tof={severity['tof']} "
+            f"(e2_sample_size.lock, reselection_forbidden="
+            f"{bool(allocation.get('reselection_forbidden'))})",
+        )
+    except Exception as error:  # noqa: BLE001 - 讀不到就是阻擋理由
+        record(
+            "severity_is_restored_from_the_frozen_selection", False,
+            str(error)[:220],
+        )
+
     target = Path(out) / (DRY_RUN_REPORT if mode == "dry-run" else FORMAL_REPORT)
     occupied = target.exists()
     record(
@@ -136,7 +158,8 @@ def preflight(
         not occupied,
         target.as_posix() + (
             "  (a dry run may overwrite its own previous report)"
-            if occupied and mode == "dry-run" else ""
+            if occupied and mode == "dry-run"
+            else "  (already occupied: Formal E2 is one-shot)" if occupied else ""
         ),
         # dry run 可以覆寫自己的預演結果；formal 不行，那是 one-shot。
         blocking=mode == "formal",
@@ -148,6 +171,57 @@ def preflight(
         "lineage": resolved.to_manifest(),
         "blockers": blockers,
         "allowed": not blockers,
+        "frozen_severity": severity,
+    }
+
+
+def formal_status(out: str | Path = "outputs/perception/e2_final") -> dict[str, Any]:
+    """Formal E2 的 one-shot 現況。**唯讀，不執行任何 case。**
+
+    畫面必須能回答「已經跑過了嗎、報告在哪、為什麼不能再跑」。先前這三件
+    事只存在於 pre-flight 的一列 `output_location_is_free`，而那一列在
+    formal 尚未跑過時顯示 PASS —— 讀起來像「這個位置沒問題」，看不出它
+    正是 one-shot 的閘門。
+    """
+    directory = Path(out)
+    formal_path = directory / FORMAL_REPORT
+    dry_path = directory / DRY_RUN_REPORT
+    executed = formal_path.exists()
+
+    identity: dict[str, Any] = {}
+    if executed:
+        try:
+            document = json.loads(formal_path.read_text(encoding="utf-8"))
+            identity = {
+                "report_id": document.get("report_id"),
+                "created_at": document.get("created_at"),
+                "code_version": str(document.get("code_version", ""))[:12],
+                "scientific_result": bool(document.get("scientific_result")),
+            }
+        except (json.JSONDecodeError, OSError) as error:
+            identity = {"unreadable": f"{type(error).__name__}: {error}"}
+
+    return {
+        "one_shot": True,
+        "canonical_out": directory.as_posix(),
+        "report_path": formal_path.as_posix(),
+        "dry_run_report_path": dry_path.as_posix(),
+        "already_executed": executed,
+        "dry_run_present": dry_path.exists(),
+        "identity": identity,
+        "blocked_reason": (
+            f"{formal_path.as_posix()} 已存在。Formal E2 是一次性的："
+            "跑完就是結論，重跑會產生第二份互相矛盾的正式結果，"
+            "因此 pre-flight 的 output_location_is_free 會擋下第二次。"
+            if executed else ""
+        ),
+        # 純文字，**不含** markdown 標記。這個字串直接進 HTML，星號不會被
+        # 渲染成粗體，只會原樣印在畫面上；要強調就在樣板裡用 <strong>。
+        "record_vs_report": (
+            "console 的執行紀錄（run.json、log）是這次操作的痕跡，可以有很多筆；"
+            "科學結果只有上面這一份，寫在 canonical 位置。"
+            "刪掉一筆執行紀錄不會刪掉報告，也不會讓 one-shot 重新開放。"
+        ),
     }
 
 
@@ -182,6 +256,15 @@ def latest_report(out: str | Path = "outputs/perception/e2_final") -> dict[str, 
             "skipped_escalated_cases": document.get("skipped_escalated_cases"),
             "results": document.get("results", {}),
             "per_condition": document.get("per_condition", {}),
+            # Primary endpoint。少了這三個欄位，Results 首頁就只剩 overall
+            # macro-F1，而那個數字回答的不是 E2 問的問題 —— 一個把平均拉高
+            # 卻讓最弱條件繼續崩掉的方法沒有展示穩健性（實驗計畫 v1.2 §5）。
+            "worst_condition": document.get("worst_condition_macro_f1", {}),
+            "worst_condition_at": document.get("worst_condition_at", {}),
+            "worst_condition_statistics": document.get(
+                "worst_condition_statistics", {}
+            ),
+            "primary_endpoint": document.get("primary_endpoint", {}),
             "statistics": document.get("statistics", {}),
             "statistics_config": document.get("statistics_config", {}),
             "frozen_lock_hashes": document.get("frozen_lock_hashes", {}),

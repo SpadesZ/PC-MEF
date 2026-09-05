@@ -7,6 +7,14 @@
     <h2>輸出</h2>
     <div class="body">
       <p><span class="badge warn">沒有報告</span> {{ outputs.reason }}</p>
+      {% if outputs.attribution and outputs.attribution.shared_location %}
+      <p class="note">
+        formal run 的報告寫在共用的 canonical 位置
+        <span class="mono">{{ outputs.attribution.canonical_out }}</span>，
+        不在這個執行紀錄底下。這一頁刻意<strong>不</strong>顯示那個位置現有的
+        報告 —— 那一份不是這次執行寫的，把它算成這次的結論就是一句假話。
+      </p>
+      {% endif %}
     </div>
   </section>
 {% else %}
@@ -16,6 +24,27 @@
   <div class="body">
     {% if outputs.dry_run %}
     <p class="lede"><span class="badge warn">DRY RUN — 不是正式結果</span></p>
+    {% endif %}
+    {# canonical 位置是共用的，因此「這份報告是不是這次執行寫的」必須說出來，
+       不能靠讀者自己比對時間（P0-1）。 #}
+    {% if outputs.attribution and outputs.attribution.kind == 'superseded' %}
+    <p class="lede"><span class="badge bad">這份報告不是這次執行寫的</span></p>
+    <p class="note">
+      {{ outputs.attribution.reason }}
+      報告產生於
+      <span class="mono">{{ outputs.attribution.report_created_at[:19] }}</span>，
+      這次執行的時間窗是
+      <span class="mono">{{ outputs.attribution.run_window }}</span>。
+    </p>
+    {% elif outputs.attribution and outputs.attribution.kind == 'unknown' %}
+    <p class="note"><span class="badge warn">歸屬未知</span>
+      {{ outputs.attribution.reason }}</p>
+    {% elif outputs.attribution and outputs.attribution.shared_location %}
+    <p class="note">
+      報告寫在共用的 canonical 位置
+      <span class="mono">{{ outputs.attribution.canonical_out }}</span>；
+      它的產生時間落在這次執行的時間窗內，因此這一份就是這次執行的結論。
+    </p>
     {% endif %}
     <table>
       <tbody>

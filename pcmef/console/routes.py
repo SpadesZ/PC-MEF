@@ -119,6 +119,23 @@ def page():
     )
 
 
+def _not_found(what: str, run_id: str | None = None, kind: str = "run") -> str:
+    """找不到的東西用一頁說明，不是一段 JSON。
+
+    這一頁刻意**只**處理「找不到」。把伺服器錯誤也導過來的話，一次 500
+    會被畫成「你可能打錯網址」，而那正好會讓真正的故障被略過。
+    """
+    from flask import render_template
+
+    return render_template(
+        "not_found.html",
+        **nav_context("results"),
+        breadcrumb=breadcrumb(("結果 Results", url_for("results.page")),
+                              ("找不到", None)),
+        what=what, run_id=run_id, kind=kind,
+    )
+
+
 @blueprint.get("/console/runs/<run_id>")
 @blueprint.get("/console/runs/<run_id>/<section>")
 def run_page(run_id: str, section: str = "overview"):
@@ -136,9 +153,17 @@ def run_page(run_id: str, section: str = "overview"):
         abort(404)
 
     runner = _runner()
-    record = runner.get(run_id)
+    try:
+        record = runner.get(run_id)
+    except RunnerError:
+        # 打錯網址、或紀錄被刪掉之後回到書籤，都是**正常情境**。先前這裡讓
+        # RunnerError 冒到 errorhandler，於是瀏覽器上出現一段 400 JSON ——
+        # 狀態碼也錯了（找不到是 404，不是請求格式錯誤）。
+        return _not_found(f"執行紀錄 {run_id} 不存在。"), 404
     run_dir = runner.run_dir(run_id)
-    available = run_view.availability(run_dir, record.kind)
+    # record 一路傳下去：formal run 的報告寫在共用的 canonical 位置，
+    # 沒有它就分不出「這次寫的」與「上一次留下的」（P0-1）。
+    available = run_view.availability(run_dir, record.kind, record)
 
     context: dict = {
         "record": record,
@@ -163,6 +188,9 @@ def run_page(run_id: str, section: str = "overview"):
         context.update(
             bundle=bundle, curves_svg=curves_svg, energy_svg=energy_svg,
             initial_log=runner.tail(run_id)[0],
+            # formal run 的科學結果不在這個目錄底下。指標存在時要說出來，
+            # 否則使用者會以為刪掉這筆紀錄就等於刪掉報告（P0-1）。
+            formal_pointer=run_view.formal_pointer(run_dir),
         )
     elif section == "trace":
         context["trace"] = run_view.trace_view(
@@ -173,11 +201,11 @@ def run_page(run_id: str, section: str = "overview"):
     elif section == "inputs":
         context["inputs"] = run_view.inputs_view(run_dir, record)
     elif section == "intermediate":
-        context["intermediate"] = run_view.intermediate_view(run_dir)
+        context["intermediate"] = run_view.intermediate_view(run_dir, record)
     elif section == "outputs":
-        context["outputs"] = run_view.outputs_view(run_dir)
+        context["outputs"] = run_view.outputs_view(run_dir, record)
     elif section == "cost":
-        context["cost"] = run_view.cost_view(run_dir, record.kind)
+        context["cost"] = run_view.cost_view(run_dir, record.kind, record)
     else:
         context["artifacts"] = run_view.artifacts_view(run_dir)
 
@@ -198,17 +226,25 @@ def run_page(run_id: str, section: str = "overview"):
 @blueprint.get("/console/runs/<run_id>/trace/<case_id>")
 def case_page(run_id: str, case_id: str):
     """單一 case 的完整 decision trace（SAI §20 第三層）。**唯讀。**"""
-    from flask import abort, render_template
+    from flask import render_template
 
     from pcmef.console import run_view
     from pcmef.console.navigation import run_subnav
 
     runner = _runner()
-    record = runner.get(run_id)
+    try:
+        record = runner.get(run_id)
+    except RunnerError:
+        return _not_found(f"執行紀錄 {run_id} 不存在。"), 404
     run_dir = runner.run_dir(run_id)
     trace = run_view.case_view(run_dir, case_id)
     if trace is None:
-        abort(404)
+        # 缺 case 是 trace PARTIAL 的正常後果，不是系統故障。頁面要說得出
+        # 「這一列的 trace 沒有寫出來」並給回流程追蹤的路。
+        return _not_found(
+            f"{run_id} 沒有 {case_id} 的 decision trace。",
+            run_id=run_id, kind="case",
+        ), 404
 
     return render_template(
         "case_trace.html",
@@ -223,14 +259,21 @@ def case_page(run_id: str, case_id: str):
         record=record,
         section="trace",
         subnav=run_subnav(
-            run_id, "trace", run_view.availability(run_dir, record.kind)
+            run_id, "trace", run_view.availability(run_dir, record.kind, record)
         ),
         trace=trace,
         neighbours=run_view.case_neighbours(run_dir, case_id),
         # 只有真的呼叫過 agent 才算得出隔離矩陣。未 escalate 或 dry-run
         # 的 artifacts 是空的，這時給 None 讓樣板說明原因，而不是渲染一張
         # 全部 absent 的表 —— 那看起來會像隔離失敗，而不是沒有發生。
-        agents=run_view.agents_view(trace),
+        #
+        # cache 命中是第三種：投影在這一次沒有發生，但在產生這把鑰匙的那一次
+        # 發生過。給它 cache root，讓那一次的紀錄也能攤在同一頁上（NOTE-074）。
+        agents=run_view.agents_view(
+            trace,
+            cache_root=current_app.config.get("PCMEF_FORMAL_AGENT_CACHE")
+            or DEFAULT_CACHE_ROOT,
+        ),
     )
 
 
@@ -240,25 +283,62 @@ def cache_entry_page(cache_key: str):
 
     快取以內容定址，刻意與 case 身分無關 —— 因此這一頁不掛在某個 run 底下。
     同一把鑰匙可能同時是好幾次 run 的來源，掛進單一 run 會暗示它專屬於那次。
+
+    cache 位置取**伺服器端設定**，不再接受 `?root=`。兩個理由，都不是風格
+    問題：
+      1. `root` 先前完全沒有限制，而 cache_key 只被限制成 64 位十六進位 ——
+         合起來就是一條「讀取任意含 manifest.json 目錄」的路徑。
+      2. 正式執行的 cache 由 PCMEF_FORMAL_AGENT_CACHE 決定。畫面若能指向
+         另一個 root，使用者看到的就可能不是這次 run 真正用的那一份，
+         而兩者長得一模一樣。
+    先前寫死 DEFAULT_CACHE_ROOT 也有第二個症狀：cache root 一經設定到別處，
+    case 頁「追溯到最初那一次 Agent 執行」就是一條必然 404 的死連結。
     """
-    from flask import abort, render_template, request
+    import re
+
+    from flask import abort, render_template
 
     from pcmef.console import run_view
 
-    root = Path(request.args.get("root") or DEFAULT_CACHE_ROOT)
+    root = Path(
+        current_app.config.get("PCMEF_FORMAL_AGENT_CACHE") or DEFAULT_CACHE_ROOT
+    )
     entry = run_view.cache_entry_view(root, cache_key)
     if entry is None:
         abort(404)
 
+    # 從哪一筆 case 過來的。**純導覽用**：不影響顯示的任何內容，只是讓這一頁
+    # 不成為死路。快取以內容定址、與 case 身分無關，所以它不能掛在某個 run
+    # 底下 —— 但「我剛剛是從哪裡點進來的」仍然應該回得去。
+    #
+    # 兩個值都經過格式白名單再交給 url_for：它們來自 query string，
+    # 不驗就是一條把任意字串寫進頁面連結的路徑。
+    back = None
+    from_run = request.args.get("from_run", "")
+    from_case = request.args.get("from_case", "")
+    if re.fullmatch(r"[0-9A-Za-z._-]{1,64}", from_run) and re.fullmatch(
+        r"case_[0-9]{1,8}", from_case
+    ):
+        back = {
+            "run_id": from_run,
+            "case_id": from_case,
+            "url": url_for("console.case_page", run_id=from_run, case_id=from_case),
+        }
+
+    crumbs = [("結果 Results", url_for("results.page"))]
+    if back:
+        crumbs += [
+            (back["run_id"], url_for("console.run_page", run_id=back["run_id"])),
+            (back["case_id"], back["url"]),
+        ]
+    crumbs += [("Agent cache", None), (cache_key[:12], None)]
+
     return render_template(
         "cache_entry.html",
         **nav_context("results"),
-        breadcrumb=breadcrumb(
-            ("結果 Results", url_for("results.page")),
-            ("Agent cache", None),
-            (cache_key[:12], None),
-        ),
+        breadcrumb=breadcrumb(*crumbs),
         entry=entry,
+        back=back,
     )
 
 
@@ -274,9 +354,13 @@ def trace_preview(run_id: str, filename: str):
 
     from flask import abort, send_from_directory
 
+    from pcmef.console import run_view
+
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.png", filename):
         abort(404)
-    folder = _runner().run_dir(run_id) / "artifacts" / "trace" / "previews"
+    # formal run 的 preview 落在 canonical 目錄，不在 run 目錄底下 ——
+    # 走同一個解析器，否則 case 頁的圖會對著一個空目錄（P0-1）。
+    folder = run_view.artifact_root(_runner().run_dir(run_id)) / "trace" / "previews"
     if not folder.is_dir():
         abort(404)
     return send_from_directory(folder.resolve(), filename)

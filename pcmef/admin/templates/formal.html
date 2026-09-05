@@ -39,6 +39,88 @@
     全部來自已凍結的 lock，按鈕只決定「跑不跑」。
   </p>
 
+  {# --- One-shot 現況 -------------------------------------------------- #}
+  {# 這張卡片放在最上面，因為它回答的是進到本頁最先要問的一句：
+     「正式的跑過了沒有？」先前這件事只藏在 pre-flight 的一列
+     output_location_is_free 裡，而那一列在尚未跑過時顯示 PASS —— 讀起來
+     像「這個位置沒問題」，看不出它就是 one-shot 的閘門。 #}
+  <section class="card">
+    <h2>Formal E2 是一次性的
+      <span class="hint">跑完就是結論；第二次會被 pre-flight 擋下</span>
+    </h2>
+    <div class="body">
+      {% if status.already_executed %}
+        <p class="lede"><span class="badge bad">已執行 — 不可再跑</span></p>
+        <p class="note">{{ status.blocked_reason }}</p>
+        {% if status.identity %}
+        <table>
+          <tbody>
+            <tr><th>報告</th><td class="mono" colspan="3">{{ status.report_path }}</td></tr>
+            <tr><th>report_id</th><td class="mono">{{ status.identity.report_id }}</td>
+                <th>產生時間</th><td class="note">{{ (status.identity.created_at or '')[:19] }}</td></tr>
+            <tr><th>code revision</th><td class="mono">{{ status.identity.code_version }}</td>
+                <th>scientific_result</th>
+                <td><span class="badge {{ 'ok' if status.identity.scientific_result else 'warn' }}">
+                    {{ status.identity.scientific_result }}</span></td></tr>
+          </tbody>
+        </table>
+        {% endif %}
+      {% else %}
+        <p class="lede"><span class="badge warn">尚未執行</span></p>
+        <p class="note">
+          正式執行還沒發生過。它跑完會把最終報告寫到下面這個
+          <strong>canonical 位置</strong>，而那個位置一旦被佔用，
+          pre-flight 的 <span class="mono">output_location_is_free</span>
+          就會擋下第二次 —— 這就是 one-shot 的實作方式。
+        </p>
+      {% endif %}
+      <table>
+        <tbody>
+          <tr><th>canonical 輸出目錄</th>
+              <td class="mono" colspan="3">{{ status.canonical_out }}</td></tr>
+          <tr><th>正式報告</th><td class="mono">{{ status.report_path }}</td>
+              <th>是否存在</th>
+              <td><span class="badge {{ 'bad' if status.already_executed else 'warn' }}">
+                  {{ '是' if status.already_executed else '否' }}</span></td></tr>
+          <tr><th>預演報告</th><td class="mono">{{ status.dry_run_report_path }}</td>
+              <th>是否存在</th>
+              <td><span class="badge {{ 'ok' if status.dry_run_present else 'warn' }}">
+                  {{ '是' if status.dry_run_present else '否' }}</span></td></tr>
+        </tbody>
+      </table>
+      <p class="note"><strong>執行紀錄 ≠ 科學報告。</strong>{{ status.record_vs_report }}</p>
+      {% if formal_records %}
+      <table>
+        <thead><tr><th>正式執行紀錄</th><th>狀態</th><th>開始時間</th><th></th></tr></thead>
+        <tbody>
+        {% for r in formal_records %}
+          <tr>
+            <td class="mono">{{ r.run_id }}</td>
+            <td><span class="badge {{ 'ok' if r.status == 'succeeded' else 'bad' }}">{{ r.status }}</span></td>
+            <td class="note">{{ r.started_at[:19] }}</td>
+            <td><a href="{{ url_for('console.run_page', run_id=r.run_id) }}">逐行輸出 →</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="note">正式執行的紀錄不可刪除：它是「這一次確實跑過、跑的是哪一條路徑」唯一的逐行證據。</p>
+      {% endif %}
+      <p class="note">
+        Agent artifact cache：
+        {% if agent_cache %}
+          <span class="badge ok">啟用</span>
+          <span class="mono">{{ agent_cache }}</span>
+          — 由伺服器端 <span class="mono">PCMEF_FORMAL_AGENT_CACHE</span> 設定，
+          畫面上改不到。同一份證據配同一組模型／prompt／schema／runtime 只問一次。
+        {% else %}
+          <span class="badge warn">未啟用</span>
+          未設定 <span class="mono">PCMEF_FORMAL_AGENT_CACHE</span>，
+          正式執行會對每一筆 escalated case 實際呼叫 provider。
+        {% endif %}
+      </p>
+    </div>
+  </section>
+
   {# --- Run Controls（§19.9）------------------------------------------ #}
   <section class="card">
     <h2>啟動
@@ -75,8 +157,13 @@
           <input type="hidden" name="mode" value="formal">
           <p class="note">
             <strong>正式執行</strong>：一次性，會呼叫 provider 並產生研究結論。
-            {% if not formal.allowed %}
-              目前 <span class="badge bad">BLOCKED</span>，見下方起跑前檢查。
+            {% if status.already_executed %}
+              <span class="badge bad">已經跑過，永久封閉</span>
+              報告已在 <span class="mono">{{ status.report_path }}</span>；
+              重跑會產生第二份互相矛盾的正式結果，因此按鈕停用。
+            {% elif not formal.allowed %}
+              目前 <span class="badge bad">BLOCKED</span>：
+              {{ formal.blockers | join('；') }}
             {% endif %}
           </p>
           <div class="field">

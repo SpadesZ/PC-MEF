@@ -62,8 +62,44 @@
       {% endfor %}
       </tbody>
     </table>
-    {% if inputs.severity_source %}
-    <p class="note">{{ inputs.severity_source }}</p>
+    {# severity_source 自 2026-09-04 起是結構化出處而不是一句話（NOTE-072）。
+       字典直接丟給樣板會印成 Python repr —— 一整行 `{'cli_override...'}`，
+       正是「不要為了讓頁面看起來資訊很多而塞 JSON」要擋的東西。 #}
+    {% if inputs.severity_source is mapping %}
+      {% set src = inputs.severity_source %}
+      <p class="note">
+        這兩個值<strong>不是這次執行選的</strong>，而是從
+        <span class="mono">{{ src.lock }}.lock</span> 的
+        <span class="mono">{{ src.field }}</span> 還原的。
+        {% if src.reselection_forbidden %}該 lock 自帶
+        <span class="mono">reselection_forbidden</span>，執行時不得重選。{% endif %}
+      </p>
+      <table>
+        <tbody>
+          <tr><th>來源</th>
+              <td class="mono">{{ src.lock }}.lock · {{ src.field }}</td>
+              <th>lock hash</th>
+              <td class="mono">{{ (src.lock_hash or '—')[:16] }}</td></tr>
+          <tr><th>選定於</th><td class="note" colspan="3">{{ src.selected_on or '—' }}</td></tr>
+          <tr><th>CLI 是否傳了值</th>
+              <td>{% if src.cli_override_supplied %}
+                    <span class="badge warn">有</span>
+                  {% else %}<span class="badge ok">沒有</span>{% endif %}</td>
+              <th>與 frozen 值相符</th>
+              <td>{% if src.cli_override_verified_equal is none %}
+                    <span class="note">不適用（沒有傳值）</span>
+                  {% elif src.cli_override_verified_equal %}
+                    <span class="badge ok">已驗證相符</span>
+                  {% else %}<span class="badge bad">不符</span>{% endif %}</td></tr>
+        </tbody>
+      </table>
+      <p class="note">
+        CLI 的 <span class="mono">--vision-severity</span> /
+        <span class="mono">--tof-severity</span> 是<strong>斷言</strong>而不是設定：
+        傳了不同的值會 fail-closed，不會照著跑。
+      </p>
+    {% elif inputs.severity_source %}
+      <p class="note">{{ inputs.severity_source }}</p>
     {% endif %}
   </div>
 </section>

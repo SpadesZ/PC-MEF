@@ -85,6 +85,14 @@ class CachedArbiter:
     misses: int = 0
     #: 最近一次的結果。e2_formal 在每個 case 之後讀它寫進 trace。
     last: CaseCacheOutcome | None = field(default=None)
+    #: 這一場 run 的身分，寫進 producer trace 供日後追溯。
+    run_identity: Mapping[str, Any] = field(default_factory=dict)
+    #: 目前正在決定哪一列。由 executor 在每個 case 之前設定；只用於
+    #: producer trace 的可讀性，不參與 cache key（那會破壞內容定址）。
+    case_index: int | None = None
+    #: 寫 producer trace 時發生的錯誤。summary() 會帶出去，讓畫面看得到
+    #: 「這次有幾筆命中之後將無法追溯」。
+    provenance_errors: list[str] = field(default_factory=list)
 
     def __call__(self, runner: Any, evidence: Mapping[str, Any]):
         from pcmef.agents.pcmef_agents import case_cache_key, run_pcmef_case
@@ -98,6 +106,10 @@ class CachedArbiter:
         )
         digest = key.digest()
 
+        # 這個 case 開始前 call_log 的長度。命中時不會有新紀錄，未命中時
+        # 新增的那幾筆就是四個角色實際送出／收回的內容。
+        before = len(getattr(runner, "call_log", []) or [])
+
         # resolve() 內部：命中就絕不呼叫 producer。把實際呼叫包在 producer
         # 裡而不是先 get 再自行判斷，是為了讓「命中不呼叫」由 cache 保證，
         # 而不是由這裡的一個 if 保證。
@@ -108,8 +120,64 @@ class CachedArbiter:
             self.hits += 1
         else:
             self.misses += 1
+            # 未命中 = 這一次真的問了模型，也就是這把鑰匙的**產生者**。
+            # 四個角色的實際 payload 只有現在存在：cache 依 §48 不存它們，
+            # 之後任何一次命中都再也組不出來（NOTE-074）。
+            self._write_provenance(key, digest, runner, before, bundle)
         self.last = CaseCacheOutcome(cache_key=digest, hit=hit)
         return bundle
+
+    def _write_provenance(
+        self, key: Any, digest: str, runner: Any, before: int, bundle: Any
+    ) -> None:
+        """把這一次實際執行的四份角色紀錄寫進 cache 目錄。
+
+        寫入失敗**不中止決策**：答案已經拿到、六份 artifact 已經落盤，
+        少一份稽核紀錄不該讓一次 formal run 失敗。但它必須被說出來 ——
+        沉默地少掉解釋能力，正是這一段要修的東西。
+        """
+        writer = getattr(self.cache, "write_provenance", None)
+        if writer is None:
+            return
+        try:
+            records = [
+                r.to_json() for r in list(getattr(runner, "call_log", []) or [])[before:]
+            ]
+            writer(
+                key,
+                {
+                    "schema_version": "agent_producer_trace_v1",
+                    "cache_key": digest,
+                    # 內容定址的身分。case_id / class_label / condition 刻意
+                    # 缺席：它們是 §48 明列不得進入 cache 的欄位，寫進來就
+                    # 等於讓這個目錄帶上 case 身分。
+                    "evidence_hash": key.components().get("evidence_hash"),
+                    "key_components": key.components(),
+                    "producer_run": dict(self.run_identity),
+                    "producer_row_index": self.case_index,
+                    "model_id": self.identity.model_id,
+                    "provider_revision": self.identity.provider_revision,
+                    "runtime_config_hash": self.identity.runtime_config_hash,
+                    "provider_request_id": getattr(bundle, "provider_request_id", ""),
+                    "token_usage": getattr(bundle, "token_usage", 0),
+                    "latency_ms": getattr(bundle, "latency_ms", 0),
+                    "n_roles": len(records),
+                    "total_attempts": sum(
+                        int(r.get("attempt_count") or 0) for r in records
+                    ),
+                    "artifacts": records,
+                    # 純文字：這份 JSON 會被畫面讀出來直接顯示，markdown 的
+                    # 星號不會被渲染成粗體，只會原樣印在頁面上。
+                    "note": (
+                        "這一份記錄的是產生這把鑰匙的那一次執行：四個角色"
+                        "各自實際收到的 payload、有沒有收到影像、重試幾次、"
+                        "原始與驗證後的回覆。任何一次命中都不會重新產生這些"
+                        "投影，因此解釋能力只能靠這一份保存。"
+                    ),
+                },
+            )
+        except Exception as error:  # noqa: BLE001
+            self.provenance_errors.append(f"{type(error).__name__}: {error}")
 
     def summary(self) -> dict[str, Any]:
         total = self.hits + self.misses
@@ -120,7 +188,11 @@ class CachedArbiter:
             "misses": self.misses,
             "cases": total,
             "hit_rate": (self.hits / total) if total else None,
+            # 命中一次就是省下四次呼叫（四個角色各一次，不含 retry）。
+            # 沒有這個換算，畫面上的 hits 說不出它到底省了什麼。
+            "provider_calls_avoided": self.hits * 4,
             "model_id": self.identity.model_id,
             "provider_revision": self.identity.provider_revision,
             "runtime_config_hash": self.identity.runtime_config_hash,
+            "provenance_errors": list(self.provenance_errors),
         }

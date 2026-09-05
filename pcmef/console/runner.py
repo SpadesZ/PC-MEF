@@ -146,6 +146,22 @@ FORMAL_CONFIRM_PHRASE = "RUN FINAL E2"
 #: 預演預設讀的資料集。已開封的 gate-validation，不是 final partition。
 DEFAULT_DRY_RUN_BASE = "outputs/perception/gate_validation"
 
+#: Formal E2 的 **canonical** 輸出位置。與 `pcmef formal run-e2` 的 `--out`
+#: 預設值、以及 `formal_service.preflight()` 檢查的位置是同一個。
+#:
+#: 這三者必須是同一個路徑，否則 one-shot 不成立：pre-flight 的
+#: `output_location_is_free` 檢查 A，而執行寫到 B，於是第二次 formal run
+#: 仍然看到 A 是空的並放行 —— 阻擋看起來存在，實際上永遠不會觸發。
+DEFAULT_FORMAL_OUT = "outputs/perception/e2_final"
+
+#: 一次 formal run 在 console run 目錄裡留下的指標檔。
+#:
+#: console run 目錄保存的是 **UI 紀錄**（log、參數、指令、狀態）；
+#: 科學結果落在 canonical 目錄。兩者分開之後，刪掉一筆 UI 紀錄不會動到
+#: 任何 formal artifact —— 但畫面仍然要知道那次 run 的報告在哪裡，
+#: 這份指標就是那條線。
+FORMAL_POINTER = "formal_output.json"
+
 
 @dataclass(frozen=True)
 class RunSpec:
@@ -183,6 +199,24 @@ class RunRecord:
     @property
     def finished(self) -> bool:
         return self.status in ("succeeded", "failed")
+
+    @property
+    def protected(self) -> bool:
+        """這筆紀錄是不是一次正式 Formal E2 的執行證據，因而不可刪除。
+
+        判準取 `kind` 與 `params.mode`，**不取 `status`**：一次失敗的正式
+        執行同樣消耗掉了 one-shot，而它的 log 正是之後要拿來說明「為什麼
+        擋住」的東西。
+
+        做成 RunRecord 的性質而不是 ConsoleRunner 的方法，是為了讓樣板
+        能直接問這筆紀錄 —— 樣板拿不到 runner，而在樣板裡重寫一次
+        `kind == 'formal_e2' and params.mode == 'formal'` 就會出現第二份
+        判準，且畫面上那一份出錯時看起來完全正常（只是按鈕能按了）。
+        """
+        return (
+            self.kind == "formal_e2"
+            and str(self.params.get("mode", "dry-run")) == "formal"
+        )
 
     def matches(self, query: str) -> bool:
         """搜尋比對。涵蓋編號、種類、標籤、狀態與參數值。
@@ -231,6 +265,8 @@ class ConsoleRunner:
         run_root: str | Path = DEFAULT_RUN_ROOT,
         python_executable: str | None = None,
         dry_run_base: str | Path = DEFAULT_DRY_RUN_BASE,
+        formal_out: str | Path = DEFAULT_FORMAL_OUT,
+        agent_cache_root: str | Path | None = None,
     ) -> None:
         self.run_root = Path(run_root)
         self.run_root.mkdir(parents=True, exist_ok=True)
@@ -239,6 +275,14 @@ class ConsoleRunner:
         # 預演用的資料位置由**伺服器端**決定，不從表單來。讓 UI 指定 base
         # 等於讓它挑要用哪一批資料，而 families 36-43 生成即開封。
         self.dry_run_base = Path(dry_run_base)
+        # canonical formal output。同樣是伺服器端設定 —— 表單改不到它，
+        # 而且它必須與 pre-flight 檢查的位置相同（見 DEFAULT_FORMAL_OUT）。
+        self.formal_out = Path(formal_out)
+        # agent artifact cache 的根目錄，由伺服器端設定提供。UI 不得指定：
+        # 那會變成第二條決定「要不要重新付費問模型」的通道。
+        self.agent_cache_root = (
+            None if agent_cache_root in (None, "") else Path(agent_cache_root)
+        )
 
     # -- 路徑 -------------------------------------------------------------
 
@@ -424,14 +468,61 @@ class ConsoleRunner:
         if spec.kind == "formal_e2":
             # 只有 --mode 來自使用者。--base 由伺服器端設定決定，
             # lineage 由 CLI 自己解析 ACTIVE_LINEAGE —— 兩者都不經表單。
+            #
+            # --out 刻意**不是**這次 run 的 artifacts 目錄。每次 console run
+            # 都有新的 run_id，寫進去等於每次都給 formal report 一個沒人佔用
+            # 的新位置，於是 pre-flight 的 output_location_is_free 永遠通過，
+            # one-shot 只存在於 CLI。canonical 位置才是 pre-flight 檢查的
+            # 那一個，寫在那裡才擋得住第二次。
             mode = str(spec.params.get("mode", "dry-run"))
             command = base + [
-                "formal", "run-e2", "--mode", mode, "--out", str(out_dir),
+                "formal", "run-e2", "--mode", mode, "--out", str(self.formal_out),
             ]
             if mode == "dry-run":
                 command += ["--base", str(self.dry_run_base)]
+            elif self.agent_cache_root is not None:
+                # 正式執行才接快取：dry run 本來就不呼叫 provider。
+                command += ["--agent-cache", str(self.agent_cache_root)]
             return command
         return base + ["audit", "e1-gates", "--out", str(out_dir)]
+
+    def formal_pointer(self, run_id: str) -> dict[str, Any] | None:
+        """這次 run 的 formal 報告落在哪裡。不是 formal run 就回 None。"""
+        path = self.run_dir(run_id) / FORMAL_POINTER
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _write_formal_pointer(self, run_id: str, mode: str) -> None:
+        """把 canonical 輸出位置寫進 run 目錄。
+
+        run 目錄不再放科學結果，因此畫面需要一條線才找得到報告。指標本身
+        是 UI metadata：刪掉它不會失去任何科學證據，而報告仍在原處。
+        """
+        one_shot = mode == "formal"
+        filename = "formal_e2_report.json" if one_shot else "formal_e2_dry_run.json"
+        payload = {
+            "kind": "formal_e2",
+            "mode": mode,
+            "one_shot": one_shot,
+            "canonical_out": self.formal_out.as_posix(),
+            "report": (self.formal_out / filename).as_posix(),
+            "trace_index": (self.formal_out / "trace" / "trace_index.json").as_posix(),
+            "written_at": _now(),
+            "note": (
+                "科學結果寫在 canonical_out，不在這個 console run 目錄裡。"
+                "這筆 run 紀錄只保存 UI 用的 log、參數與狀態；刪掉它不會"
+                "動到報告，也不會讓 one-shot 重新開放。"
+            ),
+        }
+        self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+        (self.run_dir(run_id) / FORMAL_POINTER).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
     # -- 執行 -------------------------------------------------------------
 
@@ -451,6 +542,8 @@ class ConsoleRunner:
         )
         self._save(record)
         self.log_path(run_id).write_text("", encoding="utf-8")
+        if spec.kind == "formal_e2":
+            self._write_formal_pointer(run_id, str(spec.params.get("mode", "dry-run")))
 
         thread = threading.Thread(
             target=self._pump, args=(record,), name=f"console-run-{run_id}", daemon=True
@@ -532,12 +625,22 @@ class ConsoleRunner:
         要搜尋」的情境，要找的通常正好就是那些舊的。
         """
         records = []
-        for folder in sorted(self.run_root.iterdir(), reverse=True):
+        for folder in self.run_root.iterdir():
             path = folder / "run.json"
             if path.exists():
                 records.append(
                     RunRecord.from_json(json.loads(path.read_text(encoding="utf-8")))
                 )
+        # 以 started_at 排序，不以目錄名。run_id 只有**秒**級解析度
+        # （`%Y%m%dT%H%M%S-` + 6 個十六進位字元），因此同一秒內建立的幾筆
+        # 在目錄名上只差那 6 個隨機字元 —— 排序於是退化成 uuid 的字典序，
+        # 「最新的在最上面」變成擲骰子。started_at 是 ISO 時間戳，帶微秒，
+        # 而且已經在 run.json 裡；run_id 留作次鍵，讓完全同時的兩筆仍然
+        # 有穩定順序。
+        #
+        # 刻意不改 run_id 的格式：那是既有目錄的名字，也是使用者手上連結的
+        # 一部分，換格式會讓舊紀錄與新紀錄變成兩種身分。
+        records.sort(key=lambda r: (r.started_at, r.run_id), reverse=True)
         if query:
             records = [r for r in records if r.matches(query)]
         return records[:limit]
@@ -550,12 +653,27 @@ class ConsoleRunner:
 
         這些是**探索用**紀錄，outputs/ 本來就不進版控，因此刪除沒有科學風險；
         真正有科學意義的東西在 freeze/ 與 artifacts/，不在這裡。
+
+        **正式 formal run 的紀錄例外，一律拒絕刪除。** Formal E2 是一次性的，
+        而這筆紀錄裡的 log 與指令是「它確實跑過、跑的是哪一條路徑」唯一的
+        逐行證據。canonical 報告本身不在這個目錄底下（見
+        `_write_formal_pointer`），所以刪掉不會直接毀掉報告 —— 但會毀掉
+        audit trail 的另一半，而那一半沒有第二份。dry run 不在此限：預演
+        可以重跑，紀錄也就可以丟。
         """
         record = self.get(run_id)
         if not record.finished:
             raise RunnerError(
                 f"run {run_id!r} is still running; wait for it to finish before "
                 "deleting it"
+            )
+        if record.protected:
+            raise RunnerError(
+                f"run {run_id!r} is the execution record of a one-shot Formal E2 "
+                "and must not be deleted. The scientific report lives in "
+                f"{self.formal_out.as_posix()}; this record holds the only "
+                "line-by-line evidence that the run happened and what it ran. "
+                "A dry-run record may be deleted."
             )
         shutil.rmtree(self.run_dir(run_id))
         self._threads.pop(run_id, None)
