@@ -84,6 +84,14 @@
         <form method="post" action="{{ url_for('projects.archive', project_id=project.project_id) }}" class="inline">
           <button type="submit">封存</button>
         </form>
+        {% else %}
+        {# 封存不刪除任何 artifact，因此解除封存必須存在 ——
+         # 否則封存等同於單向遺失。 #}
+        <form method="post" action="{{ url_for('projects.unarchive', project_id=project.project_id) }}" class="inline">
+          <button type="submit">解除封存</button>
+        </form>
+        <span class="note small">封存只影響能不能被開啟與執行；
+          artifact 與 hash 都沒有改變，仍可唯讀稽核。</span>
         {% endif %}
         <details class="inline">
           <summary>Clone</summary>
@@ -135,8 +143,9 @@
   <label>顯示名稱 <input name="display_name" placeholder="Sand Extension"></label>
   <label>模板
     <select name="template">
-      <option value="blank">Blank Project</option>
-      <option value="blank-multimodal">Blank Multimodal Project</option>
+      {% for item in templates %}
+      <option value="{{ item.id }}" title="{{ item.description }}">{{ item.name }}</option>
+      {% endfor %}
     </select>
   </label>
   <button type="submit">建立</button>

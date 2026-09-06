@@ -98,10 +98,27 @@ def test_a_blank_project_shows_no_pcmef_design(client):
         )
 
 
-def test_a_blank_project_says_it_has_no_profile_yet(client):
+def test_a_blank_project_gets_a_starter_profile_with_no_design(client):
+    """template 給的是**起點**：一份 DRAFT Profile，但還沒有研究設計。
+
+    「有 Profile、沒有設計」與「連 Profile 都沒有」是兩種狀態，
+    畫面必須分得出來 —— 前者是「該來填設計了」，後者是「還沒開始」。
+    """
     _form(client, "/projects/create", project_id="blank-demo",
-          display_name="Blank Demo")
+          display_name="Blank Demo", template="blank")
     _form(client, "/projects/select", project_id="blank-demo")
+
+    body = client.get("/projects/design").get_data(as_text=True)
+    assert "Development Profile v1" in body
+    assert "DRAFT" in body
+    assert "尚未寫入 Research Design" in body
+
+
+def test_a_project_with_no_profile_at_all_says_so(client, tmp_path):
+    """沒有起始 Profile 的專案（例如未知 template）要明說。"""
+    _form(client, "/projects/create", project_id="no-template-demo",
+          display_name="No Template Demo", template="not-a-template")
+    _form(client, "/projects/select", project_id="no-template-demo")
 
     body = client.get("/projects/design").get_data(as_text=True)
     assert "還沒有任何 Research Profile" in body

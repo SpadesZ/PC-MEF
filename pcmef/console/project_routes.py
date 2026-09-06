@@ -15,6 +15,7 @@
 #   2b. POST /projects/select-profile  切換目前 Research Profile
 #   3. POST /projects/create     建立新專案
 #   4. POST /projects/<id>/archive  封存專案
+#   4b. POST /projects/<id>/unarchive 解除封存
 #   5. POST /projects/<id>/clone    Clone 專案（不帶科學結果）
 #   6. install_project_context() 讓每一頁都拿得到目前專案
 # 維護提醒:
@@ -51,6 +52,7 @@ from pcmef.platform.projects.registry import (
 )
 from pcmef.platform.profiles.registry import ProfileNotFoundError
 from pcmef.platform.projects.resolver import ProjectIdError
+from pcmef.platform.templates import apply_template, template_choices
 
 __all__ = ["blueprint", "install_project_context", "request_context"]
 
@@ -125,6 +127,7 @@ def page():
         current_project_id=context.project_id,
         current_profiles=_profile_registry().list_profiles(context.project_id),
         current_profile_id=context.profile_id,
+        templates=template_choices(),
         paths=context.paths.as_dict(),
     )
 
@@ -200,6 +203,11 @@ def create():
     template = request.form.get("template", "blank").strip() or "blank"
     try:
         registry.create(project_id, display_name or project_id, template=template)
+        # template 只給起點：一份 DRAFT 起始 Profile 並宣告為預設。
+        # 不複製任何結果或 frozen evidence。
+        apply_template(
+            template, project_id, projects=registry, profiles=_profile_registry()
+        )
     except (ProjectIdError, ProjectExistsError, ValueError):
         return redirect(url_for("projects.page", error="create"))
     return redirect(url_for("projects.page"))
@@ -211,6 +219,15 @@ def archive(project_id: str):
         _registry().archive(project_id)
     except (ProjectNotFoundError, ProjectIdError, ValueError):
         return redirect(url_for("projects.page", error="archive"))
+    return redirect(url_for("projects.page"))
+
+
+@blueprint.post("/projects/<project_id>/unarchive")
+def unarchive(project_id: str):
+    try:
+        _registry().unarchive(project_id)
+    except (ProjectNotFoundError, ProjectIdError, ValueError):
+        return redirect(url_for("projects.page", error="unarchive"))
     return redirect(url_for("projects.page"))
 
 
