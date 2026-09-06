@@ -67,7 +67,10 @@
 
 <section class="card">
   <h2>Simulation → Final Decision
-    <span class="hint">共 {{ pipeline.nodes | length }} 個節點，順序即資料流順序</span>
+    <span class="hint">
+      {% if definition %}{{ definition.display_name }} ·
+      {% endif %}共 {{ pipeline.nodes | length }} 個節點，順序即資料流順序
+    </span>
   </h2>
   <div class="body">
     <ol class="pipeline">
@@ -77,8 +80,16 @@
           <span class="pipeline-index">{{ node.index }}</span>
           <span class="pipeline-label">{{ node.label }}</span>
           <span class="pipeline-en mono">{{ node.english }}</span>
+          {% if node.optional %}
+          <span class="tag" title="不是每一筆都會經過這一步">選擇性</span>
+          {% endif %}
         </div>
         <p class="note">{{ node.summary }}</p>
+        {% if node.artifact_roles %}
+        <p class="note">產出 artifact：
+          {% for role in node.artifact_roles %}<span class="mono">{{ role }}</span>{% if not loop.last %}、{% endif %}{% endfor %}
+        </p>
+        {% endif %}
         <p class="pipeline-carries">
           <span class="note">交給下一步：</span>
           <span class="mono">{{ node.carries }}</span>

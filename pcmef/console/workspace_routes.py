@@ -59,6 +59,16 @@ class _LifecycleContext:
         self.gate_summary = gate_summary
 
 
+class _PipelineContext:
+    """傳給 pipeline provider 的唯讀輸入。"""
+
+    __slots__ = ("freeze_dir", "profile")
+
+    def __init__(self, freeze_dir, profile) -> None:
+        self.freeze_dir = freeze_dir
+        self.profile = profile
+
+
 status_blueprint = Blueprint("status", __name__)
 results_blueprint = Blueprint("results", __name__)
 pipeline_blueprint = Blueprint("pipeline", __name__)
@@ -192,15 +202,46 @@ def page():
 
 @pipeline_blueprint.get("/pipeline")
 def page():
-    from pcmef.console.pipeline import build_pipeline
+    """目前 Profile 的流程定義。**節點數量由定義決定，不是固定七個。**"""
     from pcmef.console.project_routes import request_context
+    from pcmef.platform.pipeline import build_definition
 
     context = request_context()
+    profile = getattr(context.selected, "profile", None)
+    definition = build_definition(
+        getattr(profile, "extra", {}).get("pipeline_template")
+        or context.project.template,
+        _PipelineContext(context.paths.freeze, profile),
+    )
+
+    extra = dict(definition.extra)
     return render_template(
         "pipeline.html",
         **nav_context("pipeline"),
         breadcrumb=breadcrumb(
             ("流程 Pipeline", None), project_name=context.display_name
         ),
-        pipeline=build_pipeline(context.paths.freeze),
+        definition=definition,
+        profile=profile,
+        pipeline={
+            "nodes": [
+                {
+                    "key": stage.stage_id,
+                    "label": stage.display_name,
+                    "english": stage.english,
+                    "summary": stage.summary,
+                    "carries": stage.carries,
+                    "index": index + 1,
+                    "detail": stage.detail,
+                    "optional": stage.optional,
+                    "artifact_roles": list(stage.artifact_roles),
+                    "depends_on": list(stage.depends_on),
+                }
+                for index, stage in enumerate(definition.stages)
+            ],
+            "detail_available": extra.get("detail_available", False),
+            "detail_note": definition.note,
+            "lineage": extra.get("lineage", {}),
+            "threshold_caveat": extra.get("threshold_caveat", ""),
+        },
     )
