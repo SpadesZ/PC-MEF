@@ -654,3 +654,24 @@ td .note.mono { margin-left: 6px; }
 }
 .profile-switch { display: flex; align-items: center; gap: 6px; margin: 10px 0 0; }
 .profile-switch select { font: inherit; padding: 3px 8px; border: 1px solid var(--line); border-radius: 5px; }
+
+/* ---------- Research Lifecycle ---------- */
+/* 階段是清單而不是表格：它有順序，而順序本身就是資訊。 */
+.stages { list-style: none; margin: 10px 0 0; padding: 0; }
+.stage { border-left: 2px solid var(--line); padding: 8px 0 10px 14px; margin: 0; }
+.stage.complete { border-left-color: var(--ok); }
+.stage.blocked { border-left-color: #b4443a; }
+.stage.in_progress { border-left-color: var(--accent); }
+/* 目前階段要一眼看到 —— 這一頁最先被問的就是「現在在哪」。 */
+.stage.current { background: #f2fafb; border-left-color: var(--accent); }
+.stage-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.stage-mark { width: 1.1em; text-align: center; color: var(--muted); font-weight: 700; }
+.stage.complete .stage-mark { color: var(--ok); }
+.stage.blocked .stage-mark { color: #b4443a; }
+.stage.in_progress .stage-mark, .stage.current .stage-mark { color: var(--accent); }
+.stage-title { font-weight: 700; }
+.stage-summary { margin: 3px 0 0 calc(1.1em + 8px); }
+.gates { width: 100%; margin: 6px 0 0 calc(1.1em + 8px); font-size: 13px; }
+.gates th { text-align: left; font-weight: 600; vertical-align: top; width: 34%; }
+.gates td { vertical-align: top; }
+.gates tr.blocked th { color: #8f3229; }

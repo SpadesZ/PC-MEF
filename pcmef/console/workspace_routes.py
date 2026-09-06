@@ -44,6 +44,21 @@ from pcmef.console.routes import RECENT_RUN_COUNT
 
 __all__ = ["status_blueprint", "results_blueprint", "pipeline_blueprint"]
 
+class _LifecycleContext:
+    """傳給 lifecycle provider 的唯讀輸入。
+
+    刻意是一個小物件而不是整個 Flask request：provider 不該碰得到
+    session 或 app config，否則它就有能力改變自己被判定的條件。
+    """
+
+    __slots__ = ("freeze_dir", "profile", "gate_summary")
+
+    def __init__(self, freeze_dir, profile, gate_summary) -> None:
+        self.freeze_dir = freeze_dir
+        self.profile = profile
+        self.gate_summary = gate_summary
+
+
 status_blueprint = Blueprint("status", __name__)
 results_blueprint = Blueprint("results", __name__)
 pipeline_blueprint = Blueprint("pipeline", __name__)
@@ -101,6 +116,17 @@ def page():
     except Exception as error:  # noqa: BLE001 - Status 是觀察頁，不得 500
         progress = {"error": f"{type(error).__name__}: {error}"}
 
+    # Lifecycle 由 provider 依 Profile 的 template 推導 —— 階段結構通用，
+    # 判準是該研究自己的。畫面上不寫死任何階段或 gate。
+    from pcmef.platform.lifecycle import build_lifecycle
+
+    profile = getattr(context.selected, "profile", None)
+    lifecycle = build_lifecycle(
+        getattr(profile, "extra", {}).get("lifecycle_template")
+        or context.project.template,
+        _LifecycleContext(freeze_dir, profile, gate_summary),
+    )
+
     return render_template(
         "status.html",
         **nav_context("status"),
@@ -110,6 +136,9 @@ def page():
         gate_summary=gate_summary,
         lineage=_lock_summary(freeze_dir),
         progress=progress,
+        lifecycle=lifecycle,
+        profile=profile,
+        profile_reason=getattr(context.selected, "reason", ""),
     )
 
 

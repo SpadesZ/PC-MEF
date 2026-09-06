@@ -29,6 +29,96 @@
   <p>研究目前做到哪裡。本頁<strong>唯讀</strong>：狀態由稽核與 lock 決定，不在這裡設定。</p>
 </header>
 
+{# Research Lifecycle。階段結構是平台通用的；底下的判準由 provider 依
+   Profile 推導，**不在此寫死** —— 寫死的階段清單在換一個研究時會說謊。 #}
+<section class="card lifecycle">
+  <h2>研究階段 Research Lifecycle
+    <span class="hint">
+      {% if profile %}{{ profile.display_name }} · {{ profile.state }}{% else %}尚未選擇 Research Profile{% endif %}
+    </span>
+  </h2>
+  <div class="body">
+    {% if not profile %}
+    <p><span class="badge warn">尚未選擇 Research Profile</span>
+      <span class="note">{{ profile_reason }}</span></p>
+    {% endif %}
+
+    {% if lifecycle %}
+    <p class="note">
+      {{ lifecycle.note }}
+      判定來源：<span class="mono">{{ lifecycle.provider }}</span>。
+    </p>
+
+    <ol class="stages">
+      {% for stage in lifecycle.stages %}
+      {% set is_current = lifecycle.current and stage.stage_id == lifecycle.current.stage_id %}
+      <li class="stage {{ stage.status|lower }}{{ ' current' if is_current else '' }}">
+        <div class="stage-head">
+          <span class="stage-mark" aria-hidden="true">
+            {%- if stage.status == 'COMPLETE' %}✓
+            {%- elif stage.status == 'BLOCKED' %}✕
+            {%- elif stage.status == 'IN_PROGRESS' %}▶
+            {%- else %}○{% endif -%}
+          </span>
+          <span class="stage-title">{{ stage.title }}</span>
+          <span class="badge {{ 'ok' if stage.status == 'COMPLETE' else ('warn' if stage.status in ('BLOCKED','IN_PROGRESS') else 'pending') }}">
+            {{ stage.status }}
+          </span>
+          {% if stage.gates %}
+          <span class="note">{{ stage.cleared }} / {{ stage.total }}</span>
+          {% else %}
+          <span class="note">尚無判準</span>
+          {% endif %}
+          {% if is_current %}<span class="tag current">現在在這裡</span>{% endif %}
+        </div>
+        <p class="note stage-summary">{{ stage.summary }}</p>
+
+        {% if stage.gates %}
+        <table class="gates">
+          <tbody>
+            {% for gate in stage.gates %}
+            <tr class="{{ gate.status|lower }}">
+              <th>
+                {{ gate.label }}
+                {% if gate.project_specific %}
+                <span class="tag" title="這是本研究自己的判準，不是平台共有的">專案判準</span>
+                {% endif %}
+              </th>
+              <td><span class="badge {{ 'ok' if gate.status in ('PASS','COMPLETE') else ('warn' if gate.status == 'BLOCKED' else 'pending') }}">{{ gate.status }}</span></td>
+              <td class="note">{{ gate.detail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+
+    <h3 class="note">下一步</h3>
+    {% if lifecycle.current %}
+    <p>
+      目前在 <strong>{{ lifecycle.current.title }}</strong>；
+      {% if lifecycle.next_stage %}其後為 <strong>{{ lifecycle.next_stage.title }}</strong>。
+      {% else %}這是最後一個階段。{% endif %}
+    </p>
+    {% if lifecycle.blockers %}
+    <table class="gates">
+      <thead><tr><th>擋住的判準</th><th>為什麼</th></tr></thead>
+      <tbody>
+        {% for gate in lifecycle.blockers %}
+        <tr><th>{{ gate.label }}</th><td class="note">{{ gate.why }}<br>{{ gate.detail }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% else %}
+    <p>所有階段皆已完成。</p>
+    {% endif %}
+    {% endif %}
+  </div>
+</section>
+
 {# 這張卡片放最上面，因為它回答進本頁最先要問的一句：現在卡在哪。
    內容由 final_gate 的八項判定推導，不是手寫的進度敘述 —— 手寫的會過期，
    而且過期時看起來完全正常（NOTE-082）。 #}
