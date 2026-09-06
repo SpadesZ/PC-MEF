@@ -43,6 +43,51 @@
   </header>
 
   {# 第二層分頁。沒有內容的仍然列出但不可點 —— 見檔頭。 #}
+{# 這一筆執行**屬於誰**。放在最上面，因為 Run 頁可以從書籤直接打開，
+ # 而版型頂端顯示的是「目前選中的 Project」——兩者不必然相同。
+ # 沒有這一條，使用者會把歷史 run 讀成當下工作區的東西。 #}
+<section class="card runidentity">
+  <h2>執行歸屬 Run Attribution
+    <span class="hint">啟動當下固定，不隨之後切換而改變</span>
+  </h2>
+  <div class="body">
+    {% if attribution %}
+    <dl class="identity-grid">
+      <dt>Project</dt>
+      <dd>{{ attribution.project_name or attribution.project_id }}
+        <span class="muted mono small">{{ attribution.project_id }}</span></dd>
+      <dt>Profile</dt>
+      <dd>
+        {% if attribution.profile_id %}
+        {{ attribution.profile_name or attribution.profile_id }}
+        <span class="tag">{{ attribution.profile_state }}</span>
+        <span class="muted mono small">{{ attribution.profile_id }} · {{ attribution.profile_version }}</span>
+        {% else %}<span class="muted">啟動時未選定 Profile</span>{% endif %}
+      </dd>
+      <dt>Pipeline</dt>
+      <dd class="mono">{{ attribution.pipeline_id }}
+        · {{ attribution.stage_ids | length }} stages
+        <span class="muted small">digest {{ attribution.pipeline_digest }}</span></dd>
+      {% if attribution.design_digest %}
+      <dt>Research Design</dt>
+      <dd class="mono small">digest {{ attribution.design_digest }}</dd>
+      {% endif %}
+    </dl>
+    <p class="note">
+      以上是<strong>啟動當下</strong>的身分。之後切換 Profile、修改研究設計或
+      更換流程定義，都不會改變這一頁的解讀。
+    </p>
+    {% else %}
+    <p class="note">
+      <span class="badge pending">無歸屬紀錄</span>
+      這筆執行早於歸屬機制，因此沒有留下啟動當下的 Project / Profile 快照。
+      它依 legacy 佈局歸屬於既有碩論專案 ——
+      <strong>這是推得的，不是快照</strong>。
+    </p>
+    {% endif %}
+  </div>
+</section>
+
 {# Stage 進度。放在分頁之上：進本頁最先要問的是「現在跑到哪」，
  # 而那個答案不屬於任何一個分頁。內容全部由 executor 寫下的事件重播，
  # **前端不估算任何進度**。 #}
@@ -53,6 +98,8 @@
       {% if stage_progress.available %}
         {{ stage_progress.progress.completed_count }} / {{ stage_progress.progress.total_stages }} 個 stage 完成
       {% else %}此次執行沒有 stage 級記錄{% endif %}
+      {% if stage_progress.snapshot %}· 依啟動當下的流程快照重播
+      {% else %}· <strong>無流程快照</strong>，以通用流程顯示{% endif %}
     </span>
   </h2>
   <div class="body">

@@ -59,6 +59,27 @@ class _LifecycleContext:
         self.gate_summary = gate_summary
 
 
+def _owned_runs(runner, context, query):
+    """只列出屬於目前 Project 的執行紀錄。
+
+    **後端過濾，不是畫面過濾。** 全域 runs 根目錄本身沒有專案概念，
+    因此清單必須逐筆比對歸屬；少了這一步，B 專案的 Results 會列出
+    A 專案的執行紀錄（audit P0-2）。
+    """
+    from pcmef.platform.projects.resolver import LEGACY_THESIS_PROJECT_ID
+    from pcmef.platform.runs import owned_by, read_attribution
+
+    kept = []
+    for record in runner.list_runs(query=query):
+        attribution = read_attribution(runner.run_dir(record.run_id))
+        if owned_by(
+            attribution, context.project_id,
+            legacy_project_id=LEGACY_THESIS_PROJECT_ID,
+        ):
+            kept.append(record)
+    return kept
+
+
 class _PipelineContext:
     """傳給 pipeline provider 的唯讀輸入。"""
 
@@ -186,7 +207,7 @@ def page():
         breadcrumb=breadcrumb(
             ("結果 Results", None), project_name=context.display_name
         ),
-        runs=runner.list_runs(query=query),
+        runs=_owned_runs(runner, context, query),
         query=query,
         recent_count=RECENT_RUN_COUNT,
         csrf_token=token,

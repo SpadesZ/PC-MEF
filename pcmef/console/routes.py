@@ -48,12 +48,18 @@ from pcmef.agents.cache import DEFAULT_CACHE_ROOT
 __all__ = ["blueprint"]
 
 
-def _stage_progress(run_dir):
-    """這一次 run 的 stage 進度。讀事件，不寫事件。"""
+def _stamp_attribution(run_dir, run_id: str) -> None:
+    """把目前的 Project / Profile / pipeline 形狀寫成這次 run 的身分。
+
+    寫一次就不再改。失敗不阻斷執行 —— run 已經起跑，擋下來只會多留
+    一個沒有紀錄的孤兒；缺歸屬的情況畫面會明說。
+    """
     try:
         from pcmef.console.project_routes import request_context
         from pcmef.platform.pipeline import build_definition
-        from pcmef.platform.runs import build_progress, read_events
+        from pcmef.platform.runs import (
+            AttributionExistsError, RunAttribution, digest_of, write_attribution,
+        )
 
         context = request_context()
         profile = getattr(context.selected, "profile", None)
@@ -62,16 +68,102 @@ def _stage_progress(run_dir):
             or context.project.template,
             _RunPipelineContext(context.paths.freeze, profile),
         )
+        design_digest = ""
+        if profile is not None:
+            design = _profile_registry_for_runs().read_design(
+                context.project_id, profile.profile_id
+            )
+            design_digest = digest_of(design.to_json() if design else None)
+
+        write_attribution(run_dir, RunAttribution(
+            run_id=run_id,
+            project_id=context.project_id,
+            project_name=context.display_name,
+            profile_id=getattr(profile, "profile_id", ""),
+            profile_name=getattr(profile, "display_name", ""),
+            profile_version=getattr(profile, "version", ""),
+            profile_state=getattr(profile, "state", ""),
+            design_digest=design_digest,
+            pipeline_id=definition.pipeline_id,
+            pipeline_digest=digest_of(definition.to_json()),
+            stage_ids=definition.stage_ids,
+            artifact_roots=context.paths.as_dict(),
+        ))
+    except AttributionExistsError:
+        pass
+    except Exception:  # noqa: BLE001 - 已起跑的 run 不因記錄失敗而中止
+        pass
+
+
+def _profile_registry_for_runs():
+    from pcmef.console.project_routes import _profile_registry
+
+    return _profile_registry()
+
+
+def _require_run_ownership(run_id: str):
+    """這次 run 是否屬於目前 Project。**後端強制，不是 UI 過濾。**
+
+    回傳 (attribution, owned)。不擁有時呼叫端一律 404 —— 直接貼 URL
+    看別的專案的執行紀錄，與從清單點進去是同一件事。
+    """
+    from pcmef.console.project_routes import request_context
+    from pcmef.platform.projects.resolver import LEGACY_THESIS_PROJECT_ID
+    from pcmef.platform.runs import owned_by, read_attribution
+
+    attribution = read_attribution(_runner().run_dir(run_id))
+    context = request_context()
+    return attribution, owned_by(
+        attribution, context.project_id,
+        legacy_project_id=LEGACY_THESIS_PROJECT_ID,
+    )
+
+
+def _stage_progress(run_dir, attribution=None):
+    """這一次 run 的 stage 進度。讀事件，不寫事件。
+
+    **依這筆 run 自己的 pipeline 快照重播**，不是目前 UI 選中的那一份。
+    用當下選擇去解讀歷史，會讓同一筆 run 在 A 專案下有七個 stage、
+    切到 B 之後變成三個 —— 歷史被現在改寫（audit P0-1）。
+    """
+    try:
+        from pcmef.platform.pipeline import build_definition
+        from pcmef.platform.pipeline.models import PipelineDefinition, PipelineStage
+        from pcmef.platform.runs import build_progress, read_events
+
+        if attribution is not None and attribution.stage_ids:
+            # 由快照還原形狀。名稱盡量沿用目前定義（純顯示），
+            # 但 stage 的組成與順序一律以快照為準。
+            live = build_definition(attribution.pipeline_id, None)
+            by_id = {s.stage_id: s for s in live.stages}
+            definition = PipelineDefinition(
+                pipeline_id=attribution.pipeline_id or "snapshot",
+                display_name=live.display_name,
+                stages=tuple(
+                    by_id.get(sid, PipelineStage(stage_id=sid, display_name=sid))
+                    for sid in attribution.stage_ids
+                ),
+            )
+            snapshot = True
+        else:
+            definition = build_definition(None, None)
+            snapshot = False
+
         events, skipped = read_events(run_dir)
         if not events:
-            return {"definition": definition, "progress": None, "available": False}
+            return {
+                "definition": definition, "progress": None,
+                "available": False, "snapshot": snapshot,
+            }
         return {
             "definition": definition,
             "progress": build_progress(definition, events, skipped_lines=skipped),
             "available": True,
+            "snapshot": snapshot,
         }
     except Exception:  # noqa: BLE001 - Run 頁不得因進度讀取失敗而 500
-        return {"definition": None, "progress": None, "available": False}
+        return {"definition": None, "progress": None,
+                "available": False, "snapshot": False}
 
 
 class _RunPipelineContext:
@@ -207,6 +299,16 @@ def run_page(run_id: str, section: str = "overview"):
         # RunnerError 冒到 errorhandler，於是瀏覽器上出現一段 400 JSON ——
         # 狀態碼也錯了（找不到是 404，不是請求格式錯誤）。
         return _not_found(f"執行紀錄 {run_id} 不存在。"), 404
+
+    # 歸屬檢查在後端，不是清單過濾。直接貼別的專案的 run URL
+    # 與從清單點進去是同一件事，兩者都必須被擋（audit P0-2）。
+    attribution, owned = _require_run_ownership(run_id)
+    if not owned:
+        return _not_found(
+            f"執行紀錄 {run_id} 不屬於目前的 Project。"
+            "切換到它所屬的 Project 才能檢視。"
+        ), 404
+
     run_dir = runner.run_dir(run_id)
     # record 一路傳下去：formal run 的報告寫在共用的 canonical 位置，
     # 沒有它就分不出「這次寫的」與「上一次留下的」（P0-1）。
@@ -214,6 +316,7 @@ def run_page(run_id: str, section: str = "overview"):
 
     context: dict = {
         "record": record,
+        "attribution": attribution,
         "section": section,
         "subnav": run_subnav(run_id, section, available),
         "available": available,
@@ -266,7 +369,7 @@ def run_page(run_id: str, section: str = "overview"):
     # Stage 進度：由 executor 寫下的事件重播而來。**前端不估算任何進度。**
     # 沒有事件檔就是沒有 stage 級記錄（舊的 run 都是這樣），
     # 畫面會說明這件事而不是顯示一條假的進度條。
-    context["stage_progress"] = _stage_progress(run_dir)
+    context["stage_progress"] = _stage_progress(run_dir, attribution)
 
     label = next(s.label for s in RUN_SECTIONS if s.key == section)
     return render_template(
@@ -292,11 +395,26 @@ def case_page(run_id: str, case_id: str):
     from pcmef.console.navigation import run_subnav
     from pcmef.experiments.decision_trace import ARM_LABELS
 
+    # 直接貼 case URL 也要驗歸屬（audit P0-2）。
+    _attribution, _owned = _require_run_ownership(run_id)
+    if not _owned:
+        return _not_found(f"執行紀錄 {run_id} 不屬於目前的 Project。"), 404
+
     runner = _runner()
     try:
         record = runner.get(run_id)
     except RunnerError:
         return _not_found(f"執行紀錄 {run_id} 不存在。"), 404
+
+    # 歸屬檢查在後端，不是清單過濾。直接貼別的專案的 run URL
+    # 與從清單點進去是同一件事，兩者都必須被擋（audit P0-2）。
+    attribution, owned = _require_run_ownership(run_id)
+    if not owned:
+        return _not_found(
+            f"執行紀錄 {run_id} 不屬於目前的 Project。"
+            "切換到它所屬的 Project 才能檢視。"
+        ), 404
+
     run_dir = runner.run_dir(run_id)
     trace = run_view.case_view(run_dir, case_id)
     if trace is None:
@@ -463,14 +581,20 @@ def start_run():
     if kind == "surrogate_smoke":
         params["simulation_out"] = str(form.get("simulation_out", "")).strip()
 
-    record = _runner().start(RunSpec(kind=kind, params=params))
+    runner = _runner()
+    record = runner.start(RunSpec(kind=kind, params=params))
+    # 歸屬在**啟動當下**固定下來。之後切換 Profile 或改設計都不再
+    # 影響這一筆的解讀；沒有這一步，同一筆 run 在不同專案下會顯示
+    # 不同的 stage 數量（post-platform audit P0-1）。
+    _stamp_attribution(runner.run_dir(record.run_id), record.run_id)
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201
 
 
 @blueprint.post("/api/console/runs/<run_id>/figures")
-def export_figures(run_id: str):
+def export_figures(run_id: str):  # noqa: D401
+
     """由這次 run 的報告產出論文用圖。**唯讀重繪，不重算任何指標。**
 
     沿用 `pcmef.reporting.figures` —— 與 `pcmef figures export` 是同一個
@@ -520,8 +644,14 @@ def export_figures(run_id: str):
 
 @blueprint.post("/api/console/runs/<run_id>/delete")
 def delete_run(run_id: str):
-    """刪掉一次執行紀錄。執行中的由 runner 拒絕。"""
+    """刪掉一次執行紀錄。執行中的由 runner 拒絕。
+
+    刪除別的專案的紀錄與檢視它一樣，都要先擁有它（audit P0-2）。
+    """
     _guard()
+    _attribution, _owned = _require_run_ownership(run_id)
+    if not _owned:
+        return jsonify({"error": "run does not belong to the current project"}), 404
     _runner().delete(run_id)
     if request.form:
         return redirect(url_for("console.page"))

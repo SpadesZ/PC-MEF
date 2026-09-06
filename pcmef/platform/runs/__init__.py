@@ -21,6 +21,16 @@
 
 from __future__ import annotations
 
+from pcmef.platform.runs.attribution import (
+    ATTRIBUTION_FILENAME,
+    AttributionExistsError,
+    RunAttribution,
+    digest_of,
+    owned_by,
+    read_attribution,
+    snapshot_stage_ids,
+    write_attribution,
+)
 from pcmef.platform.runs.events import (
     EVENT_FILENAME,
     EVENT_TYPES,
@@ -42,6 +52,14 @@ from pcmef.platform.runs.progress import (
 )
 
 __all__ = [
+    "ATTRIBUTION_FILENAME",
+    "AttributionExistsError",
+    "RunAttribution",
+    "digest_of",
+    "owned_by",
+    "read_attribution",
+    "snapshot_stage_ids",
+    "write_attribution",
     "BLOCKED",
     "COMPLETE",
     "EVENT_FILENAME",
