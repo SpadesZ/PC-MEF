@@ -202,7 +202,7 @@ def test_status_progress_uses_the_same_judgement_as_preflight():
     ]
 
 
-def test_the_status_page_does_not_500_when_the_gate_cannot_be_read():
+def test_the_status_page_does_not_500_when_the_gate_cannot_be_read(tmp_path):
     """Status 是觀察頁。判定失敗時說明原因，不得整頁掛掉。
 
     取實際註冊的 view function，不取 `workspace_routes.page` —— status、
@@ -211,7 +211,9 @@ def test_the_status_page_does_not_500_when_the_gate_cannot_be_read():
     """
     from pcmef.admin.app import create_app
 
-    view = create_app(environ={}).view_functions["status.page"]
+    view = create_app(environ={},
+        workspace_root=tmp_path / "workspace",
+    ).view_functions["status.page"]
     source = inspect.getsource(view)
     assert "final_progress" in source
     assert "except Exception" in source
@@ -288,7 +290,9 @@ def test_the_figures_endpoint_refuses_a_run_without_a_report(tmp_path):
     )
 
     app = create_app(registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
-                     console_run_root=run_root, environ={})
+                     console_run_root=run_root, environ={},
+        workspace_root=tmp_path / "workspace",
+    )
     app.config["TESTING"] = True
     client = app.test_client()
     with client.session_transaction() as session:

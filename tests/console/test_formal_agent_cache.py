@@ -85,12 +85,14 @@ def test_the_cache_root_is_not_in_the_form_whitelist(tmp_path):
         )
 
 
-def test_the_app_reads_the_cache_root_from_the_environment():
+def test_the_app_reads_the_cache_root_from_the_environment(tmp_path):
     """伺服器端設定是唯一的來源，且 runner 與畫面看到的是同一個值。"""
     pytest.importorskip("flask")
     from pcmef.admin.app import create_app
 
-    app = create_app(environ={"PCMEF_FORMAL_AGENT_CACHE": "artifacts/agents"})
+    app = create_app(environ={"PCMEF_FORMAL_AGENT_CACHE": "artifacts/agents"},
+        workspace_root=tmp_path / "workspace",
+    )
     assert app.config["PCMEF_FORMAL_AGENT_CACHE"] == "artifacts/agents"
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
     # 比 Path 而不是比字串：Windows 的分隔符是 `\`，比字串會在這裡失敗，
@@ -98,11 +100,13 @@ def test_the_app_reads_the_cache_root_from_the_environment():
     assert runner.agent_cache_root == Path("artifacts/agents")
 
 
-def test_the_app_defaults_to_no_cache():
+def test_the_app_defaults_to_no_cache(tmp_path):
     pytest.importorskip("flask")
     from pcmef.admin.app import create_app
 
-    app = create_app(environ={})
+    app = create_app(environ={},
+        workspace_root=tmp_path / "workspace",
+    )
     assert app.config["PCMEF_FORMAL_AGENT_CACHE"] is None
     assert app.config["PCMEF_CONSOLE_RUNNER"].agent_cache_root is None
 
@@ -112,7 +116,9 @@ def test_the_runner_and_the_preflight_share_one_out(tmp_path):
     pytest.importorskip("flask")
     from pcmef.admin.app import create_app
 
-    app = create_app(environ={"PCMEF_FORMAL_OUT": str(tmp_path / "canonical")})
+    app = create_app(environ={"PCMEF_FORMAL_OUT": str(tmp_path / "canonical")},
+        workspace_root=tmp_path / "workspace",
+    )
     assert app.config["PCMEF_FORMAL_OUT"] == str(tmp_path / "canonical")
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
     assert runner.formal_out == tmp_path / "canonical"

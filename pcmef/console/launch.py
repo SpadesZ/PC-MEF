@@ -4,7 +4,7 @@
 #         再交給 console.runner 啟動子行程。**唯一允許 runner.start() 的地方。**
 # 檔案路徑: pcmef/console/launch.py
 # 產生時間: 2026-09-06 23:40 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 啟動一次 run 的完整交易 —— 解析身分、驗能力、寫歸屬、
 #           起行程，任何一步失敗都回到「什麼都沒發生」。
 # 模組定位: Execution/Action Layer Closure round 2 的 P0-1 / P0-2。
@@ -12,7 +12,7 @@
 #           寫歸屬，另外兩個沒寫，於是 formal run 與 freeze run 都沒有
 #           主人。判準散在三處時，寬鬆的那一份會先被執行到。
 # 主要責任:
-#   1. launch_run() 以交易方式啟動，失敗即回滾
+#   1. launch_run() 以交易方式啟動，失敗即回滾；身分只解析一次
 #   2. action_context() 解析動作身分，回退情境一律拒絕
 #   3. LaunchRefused 承載「拒絕的理由與該回的狀態碼」
 #   4. _discard() 收回半途失敗的 run 目錄
@@ -25,6 +25,10 @@
 #   - 不得在 context 回退時照樣執行。回退代表使用者選的專案不能用，
 #     而**替他挑一個能用的來跑**是這一層最嚴重的錯：結果會被記在
 #     一個他沒有選擇的專案底下。
+#   - **不得替 launch_run() 加回 identity 參數。** 可注入的身分等於
+#     可繞過整段解析，而呼叫端無從證明它傳的那一份是誰的。
+#   - v0.2.0 變更：身分只解析一次，授權與歸屬共用同一份快照；
+#     移除 identity 注入點。對應 round 3 的第 3 項。
 #   - v0.1.0 新增：首版，對應 Execution Layer Closure round 2。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_execution_closure.py -v
@@ -33,7 +37,6 @@
 from __future__ import annotations
 
 import shutil
-from typing import Any
 
 __all__ = ["LaunchRefused", "action_context", "launch_run"]
 
@@ -84,20 +87,24 @@ def _discard(runner, run_id: str) -> None:
         pass
 
 
-def launch_run(runner, spec, *, capability: str, identity: Any = None):
+def launch_run(runner, spec, *, capability: str):
     """啟動一次 run。**身分先於行程，行程起不來就什麼都不留。**
 
     順序是這裡唯一重要的事：
 
-      1. 解析身分（回退即拒絕）
-      2. 驗能力（沒有就拒絕，行程尚未存在）
-      3. 配 run id 與目錄
-      4. 寫歸屬（寫不進去就收回目錄）
-      5. 啟動子行程（起不來就連歸屬一起收回）
+      1. 解析身分**一次**（回退即拒絕）
+      2. 用那一份身分驗能力（沒有就拒絕，行程尚未存在）
+      3. 用**同一份**身分展開歸屬快照
+      4. 配 run id 與目錄
+      5. 寫歸屬（寫不進去就收回目錄）
+      6. 啟動子行程（起不來就連歸屬一起收回，並收掉已啟動的行程）
 
-    第 5 步的回滾是新的。先前 Popen 在背景執行緒裡，啟動失敗只在 log
-    留一行，HTTP 早就回了 201 —— 於是「有歸屬、有紀錄、從未執行」
-    是一個可達狀態，而它在清單上與真的跑過的長得一樣。
+    「一次」是第 1 步的重點。解析兩次就有兩份身分，而兩次之間
+    session 可以變 —— 授權看的是第一份、歸屬寫的是第二份時，一個
+    被拒絕的專案仍然可以留下一筆記在別人名下的執行。
+
+    這個函式**不接受外部傳進來的身分**。可注入的身分等於可繞過這整段
+    解析，而呼叫端無從證明它傳的那一份是誰的。
     """
     from pcmef.console.routes import _resolve_run_identity, _write_attribution
     from pcmef.platform.capabilities import CapabilityError, require_capability
@@ -108,18 +115,17 @@ def launch_run(runner, spec, *, capability: str, identity: Any = None):
     except CapabilityError as error:
         raise LaunchRefused(str(error), 403) from None
 
-    if identity is None:
-        try:
-            identity = _resolve_run_identity()
-        except LaunchRefused:
-            # 已經是一個有理由與狀態碼的拒絕。**不得再包一層** ——
-            # 包起來之後畫面上顯示的是「無法確定歸屬：<真正的理由>」，
-            # 而真正的理由才是使用者需要看到的那一句。
-            raise
-        except CapabilityError as error:
-            raise LaunchRefused(str(error), 403) from None
-        except Exception as error:  # noqa: BLE001
-            raise LaunchRefused(f"無法確定這次執行的歸屬：{error}", 409) from None
+    try:
+        identity = _resolve_run_identity(context, profile)
+    except LaunchRefused:
+        # 已經是一個有理由與狀態碼的拒絕。**不得再包一層** ——
+        # 包起來之後畫面上顯示的是「無法確定歸屬：<真正的理由>」，
+        # 而真正的理由才是使用者需要看到的那一句。
+        raise
+    except CapabilityError as error:
+        raise LaunchRefused(str(error), 403) from None
+    except Exception as error:  # noqa: BLE001
+        raise LaunchRefused(f"無法確定這次執行的歸屬：{error}", 409) from None
 
     run_id = runner.allocate_run_id()
     try:

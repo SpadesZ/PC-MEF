@@ -51,6 +51,7 @@ def client(tmp_path):
         registry_path=tmp_path / "registry.db",
         vault_path=tmp_path / "vault",
         console_run_root=tmp_path / "runs",
+        workspace_root=tmp_path / "workspace",
     )
     app.config["TESTING"] = True
     return app.test_client()

@@ -129,7 +129,9 @@ def client(tmp_path):
     _dry_run_trace(run_root / "r1")
 
     app = create_app(registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
-                     console_run_root=run_root, environ={})
+                     console_run_root=run_root, environ={},
+        workspace_root=tmp_path / "workspace",
+    )
     app.config["TESTING"] = True
     return app.test_client()
 
@@ -176,7 +178,9 @@ def test_an_executed_case_still_shows_its_result(client, tmp_path):
     _dry_run_trace(run_root / "r2", escalated=False)
 
     app = create_app(registry_path=tmp_path / "r2.db", vault_path=tmp_path / "v2",
-                     console_run_root=run_root, environ={})
+                     console_run_root=run_root, environ={},
+        workspace_root=tmp_path / "workspace",
+    )
     app.config["TESTING"] = True
     body = app.test_client().get(
         "/console/runs/r2/trace/case_0000"
@@ -274,7 +278,9 @@ def test_the_case_page_renders_the_channels(client, tmp_path):
      ).write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
     app = create_app(registry_path=tmp_path / "r3.db", vault_path=tmp_path / "v3",
-                     console_run_root=run_root, environ={})
+                     console_run_root=run_root, environ={},
+        workspace_root=tmp_path / "workspace",
+    )
     app.config["TESTING"] = True
     body = app.test_client().get(
         "/console/runs/r3/trace/case_0000"

@@ -212,13 +212,18 @@ def admin_service(seeded, vault, adapter_factory, decided_config, prompts_dir, t
 
 
 @pytest.fixture
-def make_client(admin_service):
-    """建立 Flask test client。bind_enabled 由各測試自行決定。"""
+def make_client(admin_service, tmp_path):
+    """建立 Flask test client。bind_enabled 由各測試自行決定。
+
+    `workspace_root` 一定要給：不給的話 ProjectRegistry 落在 repo
+    根目錄，跑測試就會讀寫開發者真實的 projects/pcmef-thesis/。
+    """
     from pcmef.admin.app import create_app
 
     def factory(bind_enabled: bool = True, environ: dict | None = None):
         app = create_app(
-            service=admin_service, bind_enabled=bind_enabled, environ=environ or {}
+            service=admin_service, bind_enabled=bind_enabled, environ=environ or {},
+            workspace_root=tmp_path / "workspace",
         )
         app.testing = True
         return app.test_client()

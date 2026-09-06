@@ -356,6 +356,85 @@ def cmd_audit_real_split_policy(args: argparse.Namespace) -> int:
     return _emit_audit(report, args.out, "real_split_policy_audit.json")
 
 
+#: `sim smoke` 實作的是流程定義裡的哪一個 stage。
+#:
+#: 由 **executor 這一側**宣告，不由 console 指定。console 若能指定
+#: stage id，它就能把任何一支指令的輸出說成任何一步的進度 ——
+#: 而畫面上看不出差別。若這次 run 的流程快照裡沒有這個 stage，
+#: Run 頁會照實說「事件檔提到流程定義裡沒有的 stage」。
+_SIM_SMOKE_STAGE = "simulation"
+
+
+class _NoStageEvents:
+    """沒有 `--run-events` 時的空實作。
+
+    CLI 在終端機直接跑時沒有 run 目錄可寫，而**不寫**是正確行為：
+    事件檔屬於某一次 console run，不是每次執行都該產生的東西。
+    """
+
+    def run_started(self, detail: str = "") -> None:
+        pass
+
+    def stage_started(self, total: int | None = None, detail: str = "") -> None:
+        pass
+
+    def stage_progress(self, current: int, total: int | None = None,
+                       detail: str = "") -> None:
+        pass
+
+    def stage_completed(self, detail: str = "", artifacts=()) -> None:
+        pass
+
+    def stage_failed(self, detail: str = "") -> None:
+        pass
+
+
+class _StageEvents:
+    """把某一個 stage 的事件寫進 run 目錄。**綁定單一 stage id。**
+
+    綁定而不是每次傳入：呼叫點寫錯 stage id 的話，事件會落在另一步
+    的名下，而那一步看起來就跑過了。
+    """
+
+    def __init__(self, run_dir: str, stage_id: str) -> None:
+        from pcmef.platform.runs import RunEventWriter
+
+        self._writer = RunEventWriter(run_dir)
+        self._stage = stage_id
+
+    def run_started(self, detail: str = "") -> None:
+        self._writer.run_started(detail=detail)
+
+    def stage_started(self, total: int | None = None, detail: str = "") -> None:
+        self._writer.stage_started(self._stage, total=total, detail=detail)
+
+    def stage_progress(self, current: int, total: int | None = None,
+                       detail: str = "") -> None:
+        self._writer.stage_progress(self._stage, current, total=total, detail=detail)
+
+    def stage_completed(self, detail: str = "", artifacts=()) -> None:
+        self._writer.stage_completed(self._stage, detail=detail, artifacts=artifacts)
+
+    def stage_failed(self, detail: str = "") -> None:
+        self._writer.stage_failed(self._stage, detail=detail)
+        self._writer.run_failed(detail=detail)
+
+
+def _stage_events(run_events: str | None, stage_id: str):
+    """取得事件寫入器。寫不出去時退回空實作，**但不影響科學結果**。
+
+    事件是觀測記錄，不是實驗的一部分。磁碟滿了不該讓一次算了半小時
+    的模擬因此失敗 —— 那會把「看不到進度」升級成「沒有結果」。
+    """
+    if not run_events:
+        return _NoStageEvents()
+    try:
+        return _StageEvents(run_events, stage_id)
+    except Exception as error:  # noqa: BLE001
+        print(f"note: stage events disabled ({error})", file=sys.stderr)
+        return _NoStageEvents()
+
+
 def cmd_sim_smoke(args: argparse.Namespace) -> int:
     """M1：跑最小模擬場景並產出 E1-G03 的 smoke manifest。
 
@@ -368,44 +447,70 @@ def cmd_sim_smoke(args: argparse.Namespace) -> int:
         return _run_sim_worker(args)
     import yaml
 
-    from pcmef.simulation.controller import ScenarioStatus, SimulationController
-    from pcmef.simulation.scenario import (
-        Geometry,
-        Lighting,
-        ScenarioConfig,
-        ScenarioConfigError,
-    )
+    # stage 事件由**這一支**寫 —— 它才是真的在算圖的那個行程。
+    # console 只讀這個檔重播；它自己不寫，也不估。
+    #
+    # `run_started` 在**載入 renderer 之前**就寫。mitsuba 裝不起來或
+    # variant 不存在時，SimulationController 的建構就會拋 —— 若事件
+    # 等到那之後才開始寫，這次執行在畫面上會是一片空白，看起來像
+    # 「從未開始」，而它其實開始了而且失敗了。
+    events = _stage_events(getattr(args, "run_events", None), _SIM_SMOKE_STAGE)
+    events.run_started(detail=f"config={args.config}")
 
-    raw = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    block = raw.get("simulation", raw)
-    shared = {
-        "geometry": Geometry(**(block.get("geometry") or {})),
-        "lighting": Lighting(**(block.get("lighting") or {})),
-        "spp": int(block.get("spp", 16)),
-        "resolution": tuple(block.get("resolution", (64, 64))),
-    }
-    variant = args.variant or block.get("variant", "llvm_ad_rgb")
-    temporal_bins = int(args.temporal_bins or block.get("temporal_bins", 256))
-
-    controller = SimulationController(variant)
-    runs = []
-    for index, entry in enumerate(block.get("scenarios", []), start=1):
-        try:
-            config = ScenarioConfig(
-                class_label=str(entry["class_label"]),
-                seed=int(entry["seed"]),
-                medium_parameters=dict(entry.get("medium") or {}),
-                formal=args.formal,
-                **shared,
-            )
-        except ScenarioConfigError as error:
-            print(f"error: scenario {index}: {error}", file=sys.stderr)
-            return 2
-        scenario_id = f"smoke_{config.medium_preset.value}_{config.seed:04d}"
-        print(f"rendering {scenario_id} ...", flush=True)
-        runs.append(
-            controller.run_scenario(scenario_id, config, args.out, temporal_bins)
+    try:
+        from pcmef.simulation.controller import ScenarioStatus, SimulationController
+        from pcmef.simulation.scenario import (
+            Geometry,
+            Lighting,
+            ScenarioConfig,
+            ScenarioConfigError,
         )
+
+        raw = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+        block = raw.get("simulation", raw)
+        shared = {
+            "geometry": Geometry(**(block.get("geometry") or {})),
+            "lighting": Lighting(**(block.get("lighting") or {})),
+            "spp": int(block.get("spp", 16)),
+            "resolution": tuple(block.get("resolution", (64, 64))),
+        }
+        variant = args.variant or block.get("variant", "llvm_ad_rgb")
+        temporal_bins = int(args.temporal_bins or block.get("temporal_bins", 256))
+        controller = SimulationController(variant)
+    except BaseException as error:  # noqa: BLE001 - 載入失敗也要留下痕跡
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
+
+    scenarios = list(block.get("scenarios", []))
+    events.stage_started(total=len(scenarios), detail=f"variant={variant}")
+
+    runs = []
+    try:
+        for index, entry in enumerate(scenarios, start=1):
+            try:
+                config = ScenarioConfig(
+                    class_label=str(entry["class_label"]),
+                    seed=int(entry["seed"]),
+                    medium_parameters=dict(entry.get("medium") or {}),
+                    formal=args.formal,
+                    **shared,
+                )
+            except ScenarioConfigError as error:
+                print(f"error: scenario {index}: {error}", file=sys.stderr)
+                events.stage_failed(f"scenario {index}: {error}")
+                return 2
+            scenario_id = f"smoke_{config.medium_preset.value}_{config.seed:04d}"
+            print(f"rendering {scenario_id} ...", flush=True)
+            runs.append(
+                controller.run_scenario(scenario_id, config, args.out, temporal_bins)
+            )
+            # 進度在**每一個場景真的算完之後**才前進一格。
+            events.stage_progress(index, len(scenarios), detail=scenario_id)
+    except BaseException as error:  # noqa: BLE001 - 崩潰也要留下痕跡
+        # 連 KeyboardInterrupt 都要記：中斷之後畫面若說「沒有事件」，
+        # 那次執行看起來就像從未開始過，而它其實算了大半。
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
 
     manifest_path = controller.write_manifest(runs, args.out)
 
@@ -427,7 +532,12 @@ def cmd_sim_smoke(args: argparse.Namespace) -> int:
     print(f"\nmanifest: {manifest_path.resolve()}")
     if failed:
         print(f"{failed} scenario(s) FAILED; see stderr.txt in each folder", file=sys.stderr)
+        events.stage_failed(f"{failed} scenario(s) FAILED")
         return 1
+    events.stage_completed(
+        detail=f"{len(runs)} scenario(s)",
+        artifacts=(manifest_path.as_posix(),),
+    )
     return 0
 
 
@@ -2378,6 +2488,10 @@ def _run_sim_worker(args: argparse.Namespace) -> int:
         command += ["--variant", args.variant]
     if args.temporal_bins:
         command += ["--temporal-bins", str(args.temporal_bins)]
+    # 事件由 worker 寫，因為 worker 才是真的在算圖的那一個。父行程
+    # 只轉交路徑；它自己不寫，否則同一步會有兩個來源說法。
+    if getattr(args, "run_events", None):
+        command += ["--run-events", str(args.run_events)]
     if args.formal:
         command.insert(3, "--formal")
 
@@ -3915,6 +4029,11 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument(
         "--in-worker", action="store_true",
         help=argparse.SUPPRESS,  # 內部旗標：標示此行程即為算圖 worker
+    )
+    smoke.add_argument(
+        "--run-events",
+        help="把 stage 事件寫進這個 run 目錄（append-only JSONL）。"
+             "由 console 傳入；**只有真正在跑的這一支會寫**。",
     )
     smoke.set_defaults(func=cmd_sim_smoke)
 

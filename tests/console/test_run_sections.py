@@ -215,6 +215,7 @@ def client(tmp_path, full_run):
     app = create_app(
         registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
         console_run_root=full_run.parent,
+        workspace_root=tmp_path / "workspace",
     )
     app.config["TESTING"] = True
     record = RunRecord(

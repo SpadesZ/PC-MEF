@@ -216,7 +216,9 @@ def client(tmp_path, run, cache_root):
     # 沒有限制，配上只驗格式的 cache_key 就是一條讀取任意目錄的路徑。
     app = create_app(registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
                      console_run_root=run.parent,
-                     environ={"PCMEF_FORMAL_AGENT_CACHE": str(cache_root)})
+                     environ={"PCMEF_FORMAL_AGENT_CACHE": str(cache_root)},
+        workspace_root=tmp_path / "workspace",
+    )
     app.config["TESTING"] = True
     return app.test_client()
 

@@ -66,6 +66,13 @@ __all__ = [
 
 DEFAULT_RUN_ROOT = Path("outputs/console/runs")
 
+#: 收一個沒人讀的子行程時，每一次 wait 願意等多久。
+#:
+#: 短是刻意的：這條路徑跑在 HTTP 請求裡，而要收的行程剛啟動、
+#: 還沒開始算，terminate 幾乎立刻生效。等太久會把「啟動失敗」變成
+#: 「網頁卡住」。
+_REAP_TIMEOUT_SECONDS = 5.0
+
 #: 懶人包。三個 preset 涵蓋「看一眼」「正常跑」「出圖用」三種需求，
 #: 進階參數在 UI 上預設摺疊 —— 模擬軟體常見的做法。
 PRESETS: dict[str, dict[str, Any]] = {
@@ -451,6 +458,10 @@ class ConsoleRunner:
                 "--temporal-bins",
                 str(spec.params.get("temporal_bins")
                     or PRESETS[spec.params.get("preset", "standard")]["temporal_bins"]),
+                # 告訴 executor 事件要寫到哪裡。**Web 只給位置，不給內容**
+                # —— stage id 與進度由真正在跑的那一支決定，否則畫面就能
+                # 顯示從未發生過的進度。
+                "--run-events", str(self.run_dir(run_id)),
             ]
         if spec.kind == "surrogate_smoke":
             source = spec.params.get("simulation_out")
@@ -604,9 +615,54 @@ class ConsoleRunner:
             target=self._pump, args=(record, process),
             name=f"console-run-{run_id}", daemon=True,
         )
+        try:
+            thread.start()
+        except Exception as error:
+            # **行程已經在跑，而我們即將放掉唯一的把手。**
+            #
+            # 這一段的順序是重點：先把子行程收乾淨，再往外拋。呼叫端
+            # 會回滾 run 目錄，於是這個行程之後不會出現在任何清單上 ——
+            # 它仍在算圖、仍在寫檔，而沒有任何紀錄指向它。
+            # 只 raise 不 reap 等於製造一個查不到的算圖行程。
+            self._reap(process)
+            raise RunLaunchError(
+                f"run {run_id!r} started a process but could not attach its "
+                f"reader: {type(error).__name__}: {error}"
+            ) from error
+        # 註冊放在 start() 之後：沒起來的執行緒留在表裡，wait() 會對著
+        # 一個永遠不會結束的東西 join。
         self._threads[run_id] = thread
-        thread.start()
         return record
+
+    @staticmethod
+    def _reap(process: "subprocess.Popen[str]") -> None:
+        """收掉一個已經啟動、但不會有人讀它的子行程。
+
+        terminate 之後**一定要 wait**：只送訊號不回收會留下 zombie，
+        而 zombie 在 `ps` 上看起來與正在跑的沒有兩樣。真的殺不掉時
+        再 kill 一次；兩次都失敗就只能放手，但那時 log 裡至少有痕跡。
+        """
+        try:
+            if process.stdout is not None:
+                process.stdout.close()
+        except Exception:  # noqa: BLE001 - 關不掉不影響收行程
+            pass
+        for signal_name in ("terminate", "kill"):
+            if process.poll() is not None:
+                break
+            try:
+                getattr(process, signal_name)()
+            except Exception:  # noqa: BLE001 - 已經結束時會拋，不是錯誤
+                break
+            try:
+                process.wait(timeout=_REAP_TIMEOUT_SECONDS)
+                break
+            except Exception:  # noqa: BLE001 - 逾時就升級成 kill
+                continue
+        try:
+            process.wait(timeout=_REAP_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _pump(self, record: RunRecord, process: "subprocess.Popen[str]") -> None:
         """在背景把已啟動的子行程輸出逐行寫進 log 檔。
@@ -616,14 +672,30 @@ class ConsoleRunner:
 
         **行程由 `start()` 啟動後才傳進來。** 這裡只負責抽取輸出與收尾；
         把 Popen 留在這裡會讓啟動失敗變成一個沒有人接得到的背景事件。
+
+        **這個函式不得往外拋。** 它跑在背景執行緒裡，沒有人接得到 ——
+        拋出去的結果是行程繼續跑、紀錄永遠停在「執行中」，而畫面上
+        看起來只是這一次特別久。抽輸出失敗（磁碟滿、log 開不起來）
+        時一律收掉行程並把紀錄標成失敗。
         """
         log_path = self.log_path(record.run_id)
-        with log_path.open("a", encoding="utf-8") as handle:
-            assert process.stdout is not None
-            for line in process.stdout:
-                handle.write(line)
-                handle.flush()
-        exit_code = process.wait()
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    handle.write(line)
+                    handle.flush()
+            exit_code = process.wait()
+        except BaseException as error:  # noqa: BLE001 - 背景執行緒的最後一道
+            self._reap(process)
+            record.exit_code = -1
+            record.status = "failed"
+            record.finished_at = _now()
+            record.note = (
+                f"輸出無法寫入，執行已中止：{type(error).__name__}: {error}"
+            )
+            self._save(record)
+            return
 
         record.exit_code = exit_code
         record.status = "succeeded" if exit_code == 0 else "failed"

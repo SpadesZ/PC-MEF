@@ -231,11 +231,23 @@ def test_a_corrupt_lock_does_not_raise(sandboxed_freeze):
 
 @pytest.fixture()
 def client(tmp_path):
+    """隔離的 workspace，但**帶著一份 freeze/ 的可寫副本**。
+
+    這一頁顯示的是由 lock 還原出來的實際值，所以 workspace 底下必須
+    真的有 lock 可讀。複製而不是指向 repo：測試不得讀寫真正的
+    freeze/，而複製一份證明的事情完全一樣。
+    """
     flask = pytest.importorskip("flask")  # noqa: F841
     from pcmef.admin.app import create_app
 
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(FREEZE, workspace / "freeze")
+
     app = create_app(registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
-                     console_run_root=tmp_path / "runs")
+                     console_run_root=tmp_path / "runs",
+        workspace_root=workspace,
+    )
     app.config["TESTING"] = True
     return app.test_client()
 

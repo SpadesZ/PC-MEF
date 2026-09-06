@@ -63,24 +63,21 @@ def _deny_action(message: str, status: int):
     return jsonify({"error": message}), status
 
 
-def _resolve_run_identity():
-    """在任何行程啟動**之前**解析出這次執行的完整身分。
+def _resolve_run_identity(context, profile):
+    """把**已經解析好的**身分展開成這次執行的歸屬快照。
 
-    解析失敗就不啟動。回傳的是一份快照，之後整段執行都用它 ——
-    中途再解析一次 session，會讓切換 Profile 改掉已啟動 run 的歸屬。
+    `context` 與 `profile` 由 `launch.launch_run()` 解析一次後傳進來。
+    這裡刻意**不自己再解析一次 session**：兩次解析之間 session 可以
+    改變，於是授權看的是第一份、歸屬寫的是第二份 —— 被拒絕的專案
+    因此能留下一筆記在別人名下的執行。
 
-    身分取自 `launch.action_context()`：context 回退時這裡就要失敗，
-    而不是讓歸屬寫成「回退後那個專案」的（P0-4）。
+    這裡也**不再驗一次能力**。授權是 `launch_run()` 的工作，而且它
+    知道這次要的是哪一個能力；在這裡補一個寫死的 RUN_SIMULATION，
+    等於讓 formal 與 freeze 兩條路徑被一個與它們無關的判準檢查，
+    而那份判準比較寬鬆。
     """
-    from pcmef.console.launch import action_context
-    from pcmef.platform.capabilities import require_capability
     from pcmef.platform.pipeline import build_definition
     from pcmef.platform.runs import digest_of
-
-    context, profile = action_context()
-
-    # 封存的專案不得啟動任何執行。這一條在行程起跑前就要擋（P0-2）。
-    require_capability(context.project, RUN_SIMULATION, profile)
 
     definition = build_definition(
         getattr(profile, "extra", {}).get("pipeline_template")
@@ -334,6 +331,22 @@ def page():
     # 執行紀錄與搜尋已移到 Results（P2-2）：Run 首頁只回答「我要跑什麼」。
     # active 仍留在這裡 —— 「有東西正在跑」是決定要不要再按一次的必要資訊。
     active = next((r for r in _runner().list_runs() if not r.finished), None)
+
+    # 畫面上的按鈕是**能力的投影**，不是能力本身。守衛仍在端點那一側；
+    # 這裡只是讓看得到的與按得動的一致 —— 一顆按下去永遠 403 的按鈕，
+    # 讀起來像系統壞了，而其實是這個 Project 本來就不該有這個動作。
+    from pcmef.platform.capabilities import capabilities_for
+
+    try:
+        from pcmef.console.project_routes import request_context
+
+        context = request_context()
+        granted = capabilities_for(
+            context.project, getattr(context.selected, "profile", None)
+        )
+    except Exception:  # noqa: BLE001 - Run 首頁不得因能力解析失敗而 500
+        granted = frozenset()
+
     return render_template(
         "console.html",
         **nav_context("run"),
@@ -342,6 +355,8 @@ def page():
         presets=PRESETS,
         classes=current_app.config.get("PCMEF_CONSOLE_CLASSES", []),
         active=active,
+        may_read_llm_snapshot=LLM_SNAPSHOT_READ in granted,
+        may_freeze_llm_runtime=LLM_RUNTIME_FREEZE in granted,
     )
 
 

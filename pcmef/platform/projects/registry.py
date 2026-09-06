@@ -42,6 +42,7 @@ from pcmef.platform.capabilities import (
     CAPABILITY_FIELD,
     FORMAL_E2,
     LLM_RUNTIME_FREEZE,
+    LLM_SNAPSHOT_READ,
     SCIENTIFIC_STATE_READ,
 )
 from pcmef.platform.projects.models import Project
@@ -73,6 +74,7 @@ PROJECT_FILENAME = "project.json"
 LEGACY_THESIS_CAPABILITIES: tuple[str, ...] = (
     FORMAL_E2,
     LLM_RUNTIME_FREEZE,
+    LLM_SNAPSHOT_READ,
     SCIENTIFIC_STATE_READ,
 )
 
@@ -346,6 +348,8 @@ class ProjectRegistry:
         只在缺的時候寫檔：每次讀取都覆寫會讓 mtime 一直跳動，而且把
         「補一次遷移」變成「每次開頁都改資料」。其他欄位一律原樣留著 ——
         使用者改過的顯示名稱不該被遷移改回去。
+
+        寫檔失敗即 **fail-closed**：回傳未修改的專案。細節見下方註解。
         """
         declared = tuple((project.extra or {}).get(CAPABILITY_FIELD) or ())
         missing = [c for c in LEGACY_THESIS_CAPABILITIES if c not in declared]
@@ -358,8 +362,15 @@ class ProjectRegistry:
         try:
             self._write_existing(updated)
         except OSError:
-            # 寫不進去時仍回傳補好的物件：這一次請求該有的能力是對的，
-            # 下一次會再試一次。**不得因此靜默降級成沒有能力** ——
-            # 那會讓碩論專案在磁碟唯讀時看起來像個空專案。
-            pass
+            # **寫不進去就不算授權。**
+            #
+            # 先前這裡吞掉錯誤並回傳補好的物件，理由是「這一次請求該有
+            # 的能力是對的」。那個理由站不住：能力是**宣告出來的資料**，
+            # 而磁碟上並沒有這份宣告。結果是同一個專案這一次有
+            # formal_e2、下一次沒有，取決於哪一個行程剛好試寫成功 ——
+            # 而 formal_e2 開的是一次性正式實驗。
+            #
+            # 回傳未修改的那一份：畫面會說這個專案沒有 Formal 能力，
+            # 那正是磁碟上的事實。修好權限之後下一次自然會補上。
+            return project
         return updated

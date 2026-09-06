@@ -179,19 +179,40 @@
         <span class="mono">--freeze</span>。<strong>能不能凍結不是這個頁面決定的</strong> ——
         前提沒齊時是 CLI 自己印出缺什麼並拒絕寫入，畫面上會逐行看到它拒絕的理由。
       </p>
+      {# 按鈕是能力的投影。沒有能力就不畫 —— 一顆按下去永遠 403 的
+         按鈕讀起來像系統壞了，而其實是這個 Project 本來就不該有這個
+         動作。守衛仍在端點那一側，這裡只負責讓兩者一致。 #}
+      {% if not may_read_llm_snapshot %}
+      <p class="note" style="margin:16px 0 0">
+        <span class="badge warn">不屬於這個 Project</span>
+        這個 Project 沒有 LLM runtime 的綁定可讀。
+        <span class="mono">llm_runtime.lock.json</span> 屬於宣告了該能力的
+        研究專案，畫面不會借用其他 Project 的。
+      </p>
+      {% else %}
       <p style="margin:16px 0 0">
         <form class="inline" method="post" action="{{ url_for('console.llm_snapshot') }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="btn" type="submit">先檢查，不寫入</button>
         </form>
+        {% if may_freeze_llm_runtime %}
         <form class="inline" method="post" action="{{ url_for('console.llm_snapshot') }}"
               onsubmit="return confirm('凍結 llm_runtime.lock？\n\n之後正式實驗只讀這份檔案。前提未齊時 CLI 會自己拒絕。');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="freeze" value="1">
           <button class="btn primary" type="submit">凍結</button>
         </form>
+        {% endif %}
         <span class="note">兩者都會留下一筆執行紀錄，含完整指令與輸出</span>
       </p>
+      {% if not may_freeze_llm_runtime %}
+      <p class="note">
+        目前的 Research Profile 尚未到達可以凍結 llm_runtime 的階段，
+        因此只提供「檢查」。凍結寫的是不可變的 lock，事後要說得出它是
+        哪一版設定產生的。
+      </p>
+      {% endif %}
+      {% endif %}
     </div>
   </section>
 

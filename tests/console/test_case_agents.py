@@ -334,7 +334,9 @@ def client(tmp_path):
     (run / "run.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
     (run / "log.txt").write_text("done\n", encoding="utf-8")
     app = create_app(registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
-                     console_run_root=root)
+                     console_run_root=root,
+        workspace_root=tmp_path / "workspace",
+    )
     app.config["TESTING"] = True
     return app.test_client(), run
 

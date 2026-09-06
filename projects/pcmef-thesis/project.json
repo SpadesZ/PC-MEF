@@ -13,6 +13,7 @@
     "capabilities": [
       "formal_e2",
       "llm_runtime_freeze",
+      "llm_snapshot_read",
       "scientific_state_read"
     ]
   }
