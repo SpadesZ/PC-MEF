@@ -1,0 +1,40 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 console.formal_routes.page 在能力不足時渲染；extends _layout.html。
+ #         **完全唯讀，不含任何表單。**
+ # 檔案路徑: pcmef/admin/templates/formal_unavailable.html
+ # 產生時間: 2026-09-08 15:30 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 目前 Project/Profile 沒有 Formal E2 能力時的說明頁。
+ # 模組定位: Execution Layer Closure P0-4。先前任何專案都看得到碩論的
+ #           Final gate；現在明說「這個 Project 沒有這個能力」，
+ #           而不是給一個空的或別人的 Formal Workspace。
+ # 主要責任:
+ #   1. 說明為什麼看不到 Formal Workspace
+ #   2. 指出 Formal 屬於哪一個研究，而不是平台功能
+ # 維護提醒:
+ #   - 不得在此顯示任何其他 Project 的 gate、lineage 或路徑。
+ #     拒絕的訊息不該洩漏被拒絕的內容。
+ #   - 不得把這一頁做成「切過去就能跑」的捷徑；切換 Project 一律回 Workspace。
+ #   - v0.1.0 新增：首版，對應 Execution Layer Closure P0-4。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_execution_guards.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}Formal Research Workspace{% endblock %}
+
+{% block content %}
+<h1>Formal Research Workspace</h1>
+<p class="lede">
+  <span class="badge warn">此 Project 沒有 Formal E2 能力</span>
+</p>
+<p class="note">{{ reason }}</p>
+<p class="note">
+  Formal E2 是 PC-MEF 碩論這個研究自己的一次性正式實驗，
+  不是平台的通用功能。它的 pre-flight、dry-run 與正式觸發都綁定
+  該專案的 frozen lineage 與 Final gate，因此只有該專案本身能執行。
+</p>
+<p class="note">
+  要檢視或執行它，請到 <a href="{{ url_for('projects.page') }}">Workspace</a>
+  切換到對應的 Project。
+</p>
+{% endblock %}

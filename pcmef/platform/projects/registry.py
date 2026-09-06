@@ -306,6 +306,10 @@ class ProjectRegistry:
                 "既有 PC-MEF 碩論研究。科學資料仍位於 repo 根目錄，"
                 "平台化未搬動任何已凍結的 artifact。"
             ),
+            # 能力在遷移時**明確宣告**。之後 capabilities_for() 只讀這份
+            # 宣告，不再從 project id 推導 —— 用 id 推導與用名字判斷資格
+            # 只差一層。
+            extra={"capabilities": ["formal_e2", "llm_runtime_freeze"]},
         )
         try:
             self._write_new(project)

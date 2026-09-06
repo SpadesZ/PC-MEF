@@ -537,11 +537,27 @@ class ConsoleRunner:
 
     # -- 執行 -------------------------------------------------------------
 
-    def start(self, spec: RunSpec) -> RunRecord:
-        """啟動一次執行並立刻回傳。輸出由背景執行緒逐行落盤。"""
-        self._assert_not_formal(spec.params, spec.kind)
+    def allocate_run_id(self) -> str:
+        """先取得 run id 與目錄，**尚未啟動任何行程**。
+
+        呼叫端據此在行程起跑前把歸屬寫進去；沒有這個分離點，
+        「行程已在跑、但這筆 run 沒有主人」就是一個可達狀態。
+        """
         run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
         self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+        return run_id
+
+    def start(self, spec: RunSpec, *, run_id: str | None = None) -> RunRecord:
+        """啟動一次執行並立刻回傳。輸出由背景執行緒逐行落盤。
+
+        `run_id` 已給時代表呼叫端已經備妥目錄與歸屬；此時**不再另配
+        一個 id**，否則歸屬會落在一個沒有行程的目錄上。
+        """
+        self._assert_not_formal(spec.params, spec.kind)
+        if run_id is None:
+            run_id = self.allocate_run_id()
+        else:
+            self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
 
         command = self._command(run_id, spec)
         record = RunRecord(

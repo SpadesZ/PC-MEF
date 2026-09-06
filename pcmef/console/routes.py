@@ -37,7 +37,13 @@ from flask import Blueprint, Response, current_app, jsonify, redirect, request, 
 
 from pcmef.admin.auth import AdminSecurityError, check_csrf
 from pcmef.admin.routes_llm import ADMIN_TOKEN_HEADER, CSRF_FORM_FIELD, CSRF_SESSION_KEY
+from pcmef.console.guards import requires_capability, requires_run_ownership
 from pcmef.console.navigation import breadcrumb, nav_context
+from pcmef.platform.capabilities import (
+    CapabilityError,
+    LLM_RUNTIME_FREEZE,
+    LLM_SNAPSHOT_READ,
+)
 from pcmef.console.results import bar_chart_svg, line_chart_svg, load_results
 from pcmef.console.runner import PRESETS, FormalRunRefused, RunnerError, RunSpec
 
@@ -48,51 +54,88 @@ from pcmef.agents.cache import DEFAULT_CACHE_ROOT
 __all__ = ["blueprint"]
 
 
-def _stamp_attribution(run_dir, run_id: str) -> None:
-    """把目前的 Project / Profile / pipeline 形狀寫成這次 run 的身分。
+def _execution_context():
+    from pcmef.console.guards import execution_context
 
-    寫一次就不再改。失敗不阻斷執行 —— run 已經起跑，擋下來只會多留
-    一個沒有紀錄的孤兒；缺歸屬的情況畫面會明說。
+    return execution_context()
+
+
+def _deny_action(message: str, status: int):
+    """拒絕一個動作。**不得用 302 或空結果代替。**"""
+    from flask import request as _request
+
+    if _request.form and not _request.path.startswith("/api/"):
+        return _not_found(message), status
+    return jsonify({"error": message}), status
+
+
+def _resolve_run_identity():
+    """在任何行程啟動**之前**解析出這次執行的完整身分。
+
+    解析失敗就不啟動。回傳的是一份快照，之後整段執行都用它 ——
+    中途再解析一次 session，會讓切換 Profile 改掉已啟動 run 的歸屬。
     """
-    try:
-        from pcmef.console.project_routes import request_context
-        from pcmef.platform.pipeline import build_definition
-        from pcmef.platform.runs import (
-            AttributionExistsError, RunAttribution, digest_of, write_attribution,
-        )
+    from pcmef.console.project_routes import request_context
+    from pcmef.platform.capabilities import RUN_SIMULATION, require_capability
+    from pcmef.platform.pipeline import build_definition
+    from pcmef.platform.runs import digest_of
 
-        context = request_context()
-        profile = getattr(context.selected, "profile", None)
-        definition = build_definition(
-            getattr(profile, "extra", {}).get("pipeline_template")
-            or context.project.template,
-            _RunPipelineContext(context.paths.freeze, profile),
-        )
-        design_digest = ""
-        if profile is not None:
-            design = _profile_registry_for_runs().read_design(
-                context.project_id, profile.profile_id
-            )
-            design_digest = digest_of(design.to_json() if design else None)
+    context = request_context()
+    profile = getattr(context.selected, "profile", None)
 
-        write_attribution(run_dir, RunAttribution(
-            run_id=run_id,
-            project_id=context.project_id,
-            project_name=context.display_name,
-            profile_id=getattr(profile, "profile_id", ""),
-            profile_name=getattr(profile, "display_name", ""),
-            profile_version=getattr(profile, "version", ""),
-            profile_state=getattr(profile, "state", ""),
-            design_digest=design_digest,
-            pipeline_id=definition.pipeline_id,
-            pipeline_digest=digest_of(definition.to_json()),
-            stage_ids=definition.stage_ids,
-            artifact_roots=context.paths.as_dict(),
-        ))
-    except AttributionExistsError:
-        pass
-    except Exception:  # noqa: BLE001 - 已起跑的 run 不因記錄失敗而中止
-        pass
+    # 封存的專案不得啟動任何執行。這一條在行程起跑前就要擋（P0-2）。
+    require_capability(context.project, RUN_SIMULATION, profile)
+
+    definition = build_definition(
+        getattr(profile, "extra", {}).get("pipeline_template")
+        or context.project.template,
+        _RunPipelineContext(context.paths.freeze, profile),
+    )
+    design_digest = ""
+    if profile is not None:
+        design = _profile_registry_for_runs().read_design(
+            context.project_id, profile.profile_id
+        )
+        design_digest = digest_of(design.to_json() if design else None)
+
+    return {
+        "project_id": context.project_id,
+        "project_name": context.display_name,
+        "profile_id": getattr(profile, "profile_id", ""),
+        "profile_name": getattr(profile, "display_name", ""),
+        "profile_version": getattr(profile, "version", ""),
+        "profile_state": getattr(profile, "state", ""),
+        "design_digest": design_digest,
+        "definition": definition,
+        "artifact_roots": context.paths.as_dict(),
+    }
+
+
+def _write_attribution(run_dir, run_id: str, identity) -> None:
+    """把身分落盤。**失敗必須往外拋** —— 呼叫端要據此拒絕啟動。
+
+    連同完整的 pipeline semantics 快照一起寫：只存 stage id 的話，
+    日後 provider 改了文案與 I/O 說明，歷史 run 會被新的定義重新解釋
+    （P1-1）。
+    """
+    from pcmef.platform.runs import RunAttribution, digest_of, write_attribution
+
+    definition = identity["definition"]
+    write_attribution(run_dir, RunAttribution(
+        run_id=run_id,
+        project_id=identity["project_id"],
+        project_name=identity["project_name"],
+        profile_id=identity["profile_id"],
+        profile_name=identity["profile_name"],
+        profile_version=identity["profile_version"],
+        profile_state=identity["profile_state"],
+        design_digest=identity["design_digest"],
+        pipeline_id=definition.pipeline_id,
+        pipeline_digest=digest_of(definition.to_json()),
+        stage_ids=definition.stage_ids,
+        artifact_roots=identity["artifact_roots"],
+        pipeline_snapshot=definition.to_json(),
+    ))
 
 
 def _profile_registry_for_runs():
@@ -111,11 +154,23 @@ def _require_run_ownership(run_id: str):
     from pcmef.platform.projects.resolver import LEGACY_THESIS_PROJECT_ID
     from pcmef.platform.runs import owned_by, read_attribution
 
-    attribution = read_attribution(_runner().run_dir(run_id))
+    runner = _runner()
+    attribution = read_attribution(runner.run_dir(run_id))
     context = request_context()
+    # started_at 決定這筆 run 落在歸屬邊界的哪一邊。邊界之後沒有歸屬
+    # 的 run 是孤兒，不得因為「沒有 attribution」就歸給碩論（P1-4）。
+    started_at = ""
+    try:
+        started_at = runner.get(run_id).started_at
+    except Exception:  # noqa: BLE001
+        pass
+    from pcmef.platform.runs import attribution_boundary
+
     return attribution, owned_by(
         attribution, context.project_id,
         legacy_project_id=LEGACY_THESIS_PROJECT_ID,
+        started_at=started_at,
+        boundary=attribution_boundary(runner.run_root),
     )
 
 
@@ -527,6 +582,7 @@ def cache_entry_page(cache_key: str):
 
 
 @blueprint.get("/console/runs/<run_id>/trace/previews/<filename>")
+@requires_run_ownership
 def trace_preview(run_id: str, filename: str):
     """提供某次 run 的 RGB preview PNG。
 
@@ -582,17 +638,39 @@ def start_run():
         params["simulation_out"] = str(form.get("simulation_out", "")).strip()
 
     runner = _runner()
-    record = runner.start(RunSpec(kind=kind, params=params))
-    # 歸屬在**啟動當下**固定下來。之後切換 Profile 或改設計都不再
-    # 影響這一筆的解讀；沒有這一步，同一筆 run 在不同專案下會顯示
-    # 不同的 stage 數量（post-platform audit P0-1）。
-    _stamp_attribution(runner.run_dir(record.run_id), record.run_id)
+
+    # 身分先於行程。**順序是這裡唯一重要的事。**
+    #
+    # 先前是 start() 之後才補 attribution，而且失敗被吞掉 —— 於是
+    # 「行程已經在跑、但這筆 run 沒有主人」是一個可達狀態，
+    # 而它會在下一次讀取時被誤判成 legacy Thesis 的 run。
+    # 現在解析身分、寫入歸屬、都成功了，才允許 subprocess 起跑。
+    try:
+        identity = _resolve_run_identity()
+    except CapabilityError as error:
+        return _deny_action(str(error), 403)
+    except Exception as error:  # noqa: BLE001
+        return _deny_action(f"無法確定這次執行的歸屬：{error}", 409)
+
+    run_id = runner.allocate_run_id()
+    try:
+        _write_attribution(runner.run_dir(run_id), run_id, identity)
+    except Exception as error:  # noqa: BLE001
+        # 連配到的目錄一起收回。留著一個沒有歸屬的空目錄，日後任何
+        # 「沒有 attribution 就當成 legacy」的判斷都會把它算成碩論的。
+        import shutil
+
+        shutil.rmtree(runner.run_dir(run_id), ignore_errors=True)
+        return _deny_action(f"歸屬寫入失敗，未啟動任何行程：{error}", 409)
+
+    record = runner.start(RunSpec(kind=kind, params=params), run_id=run_id)
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201
 
 
 @blueprint.post("/api/console/runs/<run_id>/figures")
+@requires_run_ownership
 def export_figures(run_id: str):  # noqa: D401
 
     """由這次 run 的報告產出論文用圖。**唯讀重繪，不重算任何指標。**
@@ -673,6 +751,18 @@ def llm_snapshot():
     _guard()
     form = request.form if request.form else (request.get_json(silent=True) or {})
     freeze = str(form.get("freeze", "")) in ("1", "true", "True", "on")
+
+    # 這個端點會啟動一支真的會寫 freeze/llm_runtime.lock.json 的 CLI。
+    # 能不能寫由**後端能力**決定，不是由畫面上有沒有那顆按鈕決定：
+    # 一個 Blank Project 先前可以直接 POST 進來動到碩論的 lock（P0-5）。
+    from pcmef.platform.capabilities import CapabilityError, require_capability
+
+    needed = LLM_RUNTIME_FREEZE if freeze else LLM_SNAPSHOT_READ
+    context, profile, _caps = _execution_context()
+    try:
+        require_capability(context.project, needed, profile)
+    except CapabilityError as error:
+        return _deny_action(str(error), 403)
     record = _runner().start(
         RunSpec(
             kind="llm_snapshot",
@@ -686,11 +776,13 @@ def llm_snapshot():
 
 
 @blueprint.get("/api/console/runs/<run_id>/status")
+@requires_run_ownership
 def run_status(run_id: str):
     return jsonify(_runner().get(run_id).to_json())
 
 
 @blueprint.get("/api/console/runs/<run_id>/stream")
+@requires_run_ownership
 def stream(run_id: str):
     """以 SSE 逐行推送新輸出。
 

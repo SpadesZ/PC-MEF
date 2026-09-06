@@ -41,8 +41,11 @@ from typing import Any, Mapping, Sequence
 __all__ = [
     "ATTRIBUTION_FILENAME",
     "ATTRIBUTION_SCHEMA_VERSION",
+    "BOUNDARY_FILENAME",
+    "attribution_boundary",
     "AttributionExistsError",
     "RunAttribution",
+    "is_legacy_run",
     "digest_of",
     "owned_by",
     "read_attribution",
@@ -58,6 +61,15 @@ ATTRIBUTION_SCHEMA_VERSION = "run_attribution_v1"
 #: run 事實上都屬於它。這**不是猜測**，是那段歷史的真實情況；
 #: 但畫面仍必須標明「歸屬由 legacy 佈局推得」，而不是假裝有快照。
 LEGACY_ATTRIBUTION_NOTE = "此執行早於歸屬機制，Project 由 legacy 佈局推得。"
+
+#: 記錄「歸屬機制從哪一刻起生效」的標記檔。
+#:
+#: 用**安裝一次的標記**而不是寫死的日期：寫死的日期無論選哪一天都
+#: 會錯一邊 —— 選太早會讓既有的舊 run 全變孤兒，選太晚會讓今天新建
+#: 的 run 落在 legacy 側，於是刪掉歸屬檔就能把它變成碩論的（P1-4）。
+#: 標記在首次使用時安裝，因此當下已存在的 run 都是 legacy，
+#: 之後建立的一律必須自帶歸屬。
+BOUNDARY_FILENAME = ".attribution_boundary.json"
 
 
 class AttributionExistsError(RuntimeError):
@@ -90,6 +102,12 @@ class RunAttribution:
     stage_ids: tuple[str, ...] = ()
     #: 這次 run 讀寫的科學資料根目錄，供結果歸屬追溯。
     artifact_roots: Mapping[str, str] = field(default_factory=dict)
+    #: 啟動當下 PipelineDefinition 的**完整** JSON。
+    #:
+    #: 只存 stage id 不夠：日後 provider 改了節點文案、Input/Process/
+    #: Output 說明或 artifact 角色，歷史 run 會被新的定義重新解釋，
+    #: 而畫面不會說它被改寫過（P1-1）。
+    pipeline_snapshot: Mapping[str, Any] = field(default_factory=dict)
     created_at: str = ""
     note: str = ""
 
@@ -108,6 +126,7 @@ class RunAttribution:
             "pipeline_digest": self.pipeline_digest,
             "stage_ids": list(self.stage_ids),
             "artifact_roots": dict(self.artifact_roots),
+            "pipeline_snapshot": dict(self.pipeline_snapshot),
             "created_at": self.created_at
             or datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "note": self.note,
@@ -134,6 +153,7 @@ class RunAttribution:
             pipeline_digest=str(data.get("pipeline_digest", "")),
             stage_ids=tuple(str(s) for s in data.get("stage_ids", ())),
             artifact_roots=dict(data.get("artifact_roots", {})),
+            pipeline_snapshot=dict(data.get("pipeline_snapshot", {})),
             created_at=str(data.get("created_at", "")),
             note=str(data.get("note", "")),
         )
@@ -170,16 +190,95 @@ def read_attribution(run_dir: str | Path) -> RunAttribution | None:
         return None
 
 
+def attribution_boundary(run_root: str | Path) -> str:
+    """歸屬機制在這個 run root 上生效的時刻。**安裝一次，之後只讀。**
+
+    第一次呼叫時以當下時間寫入：那一刻已經存在的 run 都是 legacy，
+    之後建立的一律必須自帶歸屬。
+    """
+    path = Path(run_root) / BOUNDARY_FILENAME
+    if path.is_file():
+        try:
+            return str(json.loads(path.read_text(encoding="utf-8"))["installed_at"])
+        except (ValueError, KeyError, json.JSONDecodeError):
+            pass
+    stamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            return str(json.loads(path.read_text(encoding="utf-8"))["installed_at"])
+        except Exception:  # noqa: BLE001
+            return stamp
+    except OSError:
+        return stamp
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "installed_at": stamp,
+            "note": (
+                "Runs started before this moment predate run attribution and "
+                "belong to the legacy layout. Runs started after it must carry "
+                "their own run_identity.json; a missing one makes them orphaned, "
+                "not legacy."
+            ),
+        }, indent=2) + "\n")
+    return stamp
+
+
+def _as_instant(value: str) -> datetime | None:
+    """把 ISO 字串解析成帶時區的時間點。解析不了就回 None。"""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def is_legacy_run(started_at: str, boundary: str) -> bool:
+    """這筆 run 是否落在歸屬機制生效之前。
+
+    邊界之後開始、卻沒有歸屬檔的 run **不是 legacy**，是孤兒 ——
+    兩者必須分開，否則刪掉歸屬檔就能把任何 run 變成碩論的。
+
+    **必須比對時間點，不是字串。** run record 的時間是 UTC（+00:00），
+    邊界寫的是本地時區（+08:00）；直接比字串會讓同一刻的 "13:04" 排在
+    "21:04" 之前，於是剛建立的 run 被判成 legacy —— 正好是這條規則
+    要防的方向。
+    """
+    if not started_at:
+        # 連開始時間都沒有的紀錄無法定位在邊界的哪一邊。
+        # 保守地當成孤兒，不當成 legacy。
+        return False
+    started = _as_instant(started_at)
+    edge = _as_instant(boundary)
+    if started is None or edge is None:
+        return False
+    return started < edge
+
+
 def owned_by(
-    attribution: RunAttribution | None, project_id: str, *, legacy_project_id: str
+    attribution: RunAttribution | None,
+    project_id: str,
+    *,
+    legacy_project_id: str,
+    started_at: str = "",
+    boundary: str = "",
 ) -> bool:
     """這個 project 是否擁有這次 run。
 
-    沒有歸屬的舊 run 屬於 legacy 專案：全域 runs 根目錄在平台化之前
-    就是它在用的。這不是猜測，是那段歷史的事實。
+    沒有歸屬檔時只有**邊界之前**的 run 才歸 legacy 專案：全域 runs
+    根目錄在平台化之前確實是它在用的。邊界之後沒有歸屬的 run 誰都
+    不擁有 —— 它是孤兒，不是碩論的。
     """
     if attribution is None:
-        return project_id == legacy_project_id
+        return (
+            bool(boundary)
+            and is_legacy_run(started_at, boundary)
+            and project_id == legacy_project_id
+        )
     return attribution.project_id == project_id
 
 

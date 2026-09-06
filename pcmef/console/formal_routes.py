@@ -64,6 +64,26 @@ def _project_name() -> str:
 
 blueprint = Blueprint("formal", __name__)
 
+
+def _formal_capability_guard():
+    """這個 Project/Profile 有沒有 PC-MEF Formal E2 能力。
+
+    先前這三個端點是 global singleton：任何專案都看得到碩論的
+    Final gate，也都能 POST /formal/start（P0-4）。Formal 是這個
+    研究自己的科研動作，不是平台功能。
+    """
+    from pcmef.console.guards import execution_context
+    from pcmef.platform.capabilities import (
+        FORMAL_E2, CapabilityError, require_capability,
+    )
+
+    context, profile, _caps = execution_context()
+    try:
+        require_capability(context.project, FORMAL_E2, profile)
+    except CapabilityError as error:
+        return context, str(error)
+    return context, None
+
 #: 畫面預設看的位置。與 CLI 的預設一致，否則兩邊會盯著不同的目錄。
 DEFAULT_OUT = "outputs/perception/e2_final"
 DEFAULT_BASE = "outputs/perception/formal_e2"
@@ -121,6 +141,20 @@ def _runner_error(error: RunnerError):
 
 @blueprint.get("/formal")
 def page():
+    # 能力先行：沒有 Formal E2 能力的專案連 Final gate 都不該讀到。
+    context, denied = _formal_capability_guard()
+    if denied:
+        return render_template(
+            "formal_unavailable.html",
+            **nav_context("run"),
+            breadcrumb=breadcrumb(
+                ("實驗 Run", url_for("console.page")),
+                ("Formal Research Workspace", None),
+                project_name=context.display_name,
+            ),
+            reason=denied,
+        ), 403
+
     # dry-run 與 formal 的判準不同，兩者都要看得到：使用者要知道的是
     # 「現在能不能跑正式的」，而不只是「預演能不能跑」。
     formal = _collect("formal")
@@ -172,6 +206,11 @@ def start():
     ——它只能決定「按了」（AMD-008）。
     """
     _guard()
+    # **這是啟動一次性正式實驗的端點。** 能力在任何事情發生前先驗。
+    _context, denied = _formal_capability_guard()
+    if denied:
+        return jsonify({"error": denied}), 403
+
     form = request.form if request.form else (request.get_json(silent=True) or {})
     params = {"mode": str(form.get("mode", "dry-run"))}
     confirm = str(form.get("confirm", "")).strip()
@@ -189,6 +228,10 @@ def start():
 
 @blueprint.get("/formal/preflight.json")
 def preflight_json():
+    _context, denied = _formal_capability_guard()
+    if denied:
+        return jsonify({"error": denied}), 403
+
     mode = request.args.get("mode", "formal")
     if mode not in ("formal", "dry-run"):
         return jsonify({"error": f"unknown mode {mode!r}"}), 400

@@ -67,14 +67,17 @@ def _owned_runs(runner, context, query):
     A 專案的執行紀錄（audit P0-2）。
     """
     from pcmef.platform.projects.resolver import LEGACY_THESIS_PROJECT_ID
-    from pcmef.platform.runs import owned_by, read_attribution
+    from pcmef.platform.runs import attribution_boundary, owned_by, read_attribution
 
+    boundary = attribution_boundary(runner.run_root)
     kept = []
     for record in runner.list_runs(query=query):
         attribution = read_attribution(runner.run_dir(record.run_id))
         if owned_by(
             attribution, context.project_id,
             legacy_project_id=LEGACY_THESIS_PROJECT_ID,
+            started_at=record.started_at,
+            boundary=boundary,
         ):
             kept.append(record)
     return kept

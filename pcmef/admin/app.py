@@ -151,6 +151,18 @@ def _register_console(app, run_root, audit_paths, env: Mapping[str, str]) -> Non
         formal_out=formal["out"],
         agent_cache_root=formal["agent_cache"],
     )
+    # 歸屬邊界在**啟動時**安裝，不是第一次讀取時。
+    #
+    # 延後到讀取時安裝會讓邊界晚於它要判定的 run：一筆剛跑完的 run
+    # 在第一次被開啟時，邊界才被寫成「現在」，於是它落在邊界之前、
+    # 被當成 legacy —— 刪掉歸屬檔就能把它變成碩論的（P1-4）。
+    from pcmef.platform.runs import attribution_boundary
+
+    try:
+        attribution_boundary(run_root)
+    except Exception:  # noqa: BLE001 - 邊界安裝失敗不阻斷啟動
+        pass
+
     app.config["PCMEF_CONSOLE_CLASSES"] = list(CLASS_ORDER)
     resolved_paths = audit_paths or AuditPaths()
 
