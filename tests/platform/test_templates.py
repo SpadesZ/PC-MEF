@@ -181,3 +181,55 @@ def test_archive_is_reversible(registries):
     projects.create("demo", "Demo")
     projects.archive("demo")
     assert projects.unarchive("demo").archived is False
+
+
+# ---------------------------------------------------------------------------
+# Transaction 語意 —— audit P1-3
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_default_declaration_discards_the_starter_profile(registries):
+    """半完成比乾淨的失敗更難查。
+
+    Profile 建了、預設沒宣告成功，畫面會顯示「有 Profile 但尚未選擇」，
+    而使用者從沒做過那個選擇。
+    """
+    from unittest.mock import patch
+
+    projects, profiles = registries
+    projects.create("rollback-demo", "Rollback Demo", template=BLANK)
+
+    with patch.object(
+        ProjectRegistry, "set_default_profile", side_effect=OSError("io")
+    ):
+        with pytest.raises(OSError):
+            apply_template(BLANK, "rollback-demo", projects=projects, profiles=profiles)
+
+    assert profiles.list_profiles("rollback-demo") == [], (
+        "the starter profile must be discarded when the transaction did not finish"
+    )
+
+
+def test_reapplying_after_a_partial_failure_succeeds(registries):
+    """rollback 之後重試必須乾淨 —— 否則使用者永遠卡在半完成。"""
+    from unittest.mock import patch
+
+    projects, profiles = registries
+    projects.create("retry-demo", "Retry Demo", template=BLANK)
+
+    with patch.object(ProjectRegistry, "set_default_profile", side_effect=OSError("io")):
+        with pytest.raises(OSError):
+            apply_template(BLANK, "retry-demo", projects=projects, profiles=profiles)
+
+    apply_template(BLANK, "retry-demo", projects=projects, profiles=profiles)
+    assert projects.get("retry-demo").default_profile_id == "draft-v1"
+
+
+def test_an_existing_starter_profile_still_gets_the_default_declared(registries):
+    """重複套用時不重建，但要確保預設有指到它。"""
+    projects, profiles = registries
+    projects.create("dup-demo", "Dup Demo", template=BLANK)
+    profiles.create("dup-demo", "draft-v1", "Pre-existing")
+
+    apply_template(BLANK, "dup-demo", projects=projects, profiles=profiles)
+    assert projects.get("dup-demo").default_profile_id == "draft-v1"

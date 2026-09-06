@@ -29,6 +29,7 @@ from typing import Any, Callable
 from pcmef.platform.pipeline.models import PipelineDefinition, PipelineStage
 
 __all__ = [
+    "GENERIC_TEMPLATES",
     "MINIMAL_TEMPLATE",
     "build_definition",
     "minimal_pipeline",
@@ -37,6 +38,9 @@ __all__ = [
 ]
 
 MINIMAL_TEMPLATE = "minimal"
+
+#: 這些 template 本來就用 minimal pipeline，不算「找不到 provider」。
+GENERIC_TEMPLATES: frozenset[str] = frozenset({"", "blank", "blank-multimodal", MINIMAL_TEMPLATE})
 
 _PROVIDERS: dict[str, Callable[[Any], PipelineDefinition]] = {}
 
@@ -92,9 +96,23 @@ def minimal_pipeline(context: Any = None) -> PipelineDefinition:
 
 def build_definition(template: str | None, context: Any = None) -> PipelineDefinition:
     """依 template 挑 provider；找不到或壞掉都退回 minimal。"""
-    provider = _PROVIDERS.get(template or "")
+    key = template or ""
+    provider = _PROVIDERS.get(key)
     if provider is None:
-        return minimal_pipeline(context)
+        base = minimal_pipeline(context)
+        if key in GENERIC_TEMPLATES:
+            return base
+        # 該有 provider 卻找不到。**不得靜默給三節點** —— 一個七節點
+        # 的研究會看起來只有三步，而畫面不會說它換了。
+        return PipelineDefinition(
+            pipeline_id=f"{key}-unresolved",
+            display_name=base.display_name,
+            stages=base.stages,
+            note=(
+                f"找不到 template {key!r} 的 pipeline provider。"
+                "以下是通用最小流程，**不是這個 Profile 宣告的流程**。"
+            ),
+        )
     try:
         return provider(context)
     except Exception as error:  # noqa: BLE001 - 觀察頁不得因此 500

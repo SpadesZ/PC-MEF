@@ -139,10 +139,16 @@ def test_the_minimal_pipeline_mentions_nothing_project_specific():
 # ---------------------------------------------------------------------------
 
 
-def test_an_unknown_template_falls_back_to_minimal():
-    assert build_definition("no-such-template").stage_ids == (
-        "input", "classifier", "decision",
-    )
+@pytest.mark.parametrize("template", ["", "blank", "minimal"])
+def test_templates_that_legitimately_use_minimal_are_not_flagged(template):
+    assert build_definition(template).pipeline_id in ("minimal",)
+
+
+def test_an_unknown_template_is_flagged_unresolved(monkeypatch):
+    """七節點的研究若因綁定錯誤變成三節點，畫面必須說出來。"""
+    definition = build_definition("pcmef-thesiss")
+    assert definition.pipeline_id.endswith("-unresolved")
+    assert "不是這個 Profile 宣告的流程" in definition.note
 
 
 def test_a_failing_provider_falls_back_instead_of_raising():

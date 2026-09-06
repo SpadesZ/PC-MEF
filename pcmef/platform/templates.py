@@ -140,7 +140,31 @@ def apply_template(
             description=template.description,
         )
     except ProfileExistsError:
+        # 已存在就只確保預設有指到它，不重建。
+        projects.set_default_profile(project_id, template.starter_profile_id)
         return
 
     # 明確宣告預設，而不是靠排序取第一筆。
-    projects.set_default_profile(project_id, template.starter_profile_id)
+    #
+    # 宣告失敗時把剛建立的 Profile 收回：留下一份沒有被任何人指向的
+    # Profile，畫面會顯示「有 Profile 但尚未選擇」，而使用者從沒做過
+    # 那個選擇 —— 半完成的狀態比乾淨的失敗更難查。
+    try:
+        projects.set_default_profile(project_id, template.starter_profile_id)
+    except Exception:
+        _discard_profile(profiles, project_id, template.starter_profile_id)
+        raise
+
+
+def _discard_profile(profiles: Any, project_id: str, profile_id: str) -> None:
+    """收回剛建立、但整體操作沒有完成的 Profile。
+
+    只在 rollback 路徑上使用。刪除本身失敗也不再拋 —— 那會蓋掉原本
+    真正的失敗原因，而原因才是要看到的東西。
+    """
+    import shutil
+
+    try:
+        shutil.rmtree(profiles.profiles_dir(project_id) / profile_id)
+    except Exception:  # noqa: BLE001
+        pass

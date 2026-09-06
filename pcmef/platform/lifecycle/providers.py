@@ -13,12 +13,16 @@
 #   1. GENERIC_STAGES 定義八個通用研究階段
 #   2. generic_lifecycle() 產生無 gate 的 lifecycle（全部 NOT_STARTED）
 #   3. register() / build_lifecycle() 依 template 挑 provider
+#   4. GENERIC_TEMPLATES 區分「本該用 generic」與「該有 provider 卻找不到」
 # 維護提醒:
 #   - **不得在 generic provider 加入任何 PC-MEF 專屬 gate 或字樣。**
 #     Blank Project 會渲染它；洩漏出去的 PC-MEF 判準會讓一個空專案
 #     看起來有研究進度。
 #   - 不得讓 build_lifecycle() 在找不到 provider 時丟例外。Status 是
 #     觀察頁；找不到就退回 generic，並在 note 說明。
+#   - **但也不得靜默退回。** 該有 provider 卻找不到時要標成 unresolved；
+#     一個 template 打錯字的專案若顯示成「還沒定義判準」，
+#     那個畫面完全正常而且完全錯誤。
 #   - v0.1.0 新增：首版，對應平台化 Phase 4。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_lifecycle.py -v
@@ -32,6 +36,7 @@ from pcmef.platform.lifecycle.models import LifecycleView, Stage
 
 __all__ = [
     "GENERIC_STAGES",
+    "GENERIC_TEMPLATES",
     "build_lifecycle",
     "generic_lifecycle",
     "register",
@@ -58,6 +63,13 @@ GENERIC_STAGES: tuple[tuple[str, str, str], ...] = (
     ("analysis-publication", "分析與發表 Analysis / Publication",
      "整理結果、統計與圖表，形成可發表的結論。"),
 )
+
+#: 這些 template **本來就**該用 generic lifecycle，不算「找不到 provider」。
+#:
+#: 有了這一組，才分得出「這個專案還沒定義判準」與「這個專案該有判準
+#: 但綁錯了」。少了它，一個 template 打錯字的專案看起來會像一個
+#: 全新的空專案 —— 完全正常，而且完全錯誤。
+GENERIC_TEMPLATES: frozenset[str] = frozenset({"", "blank", "blank-multimodal"})
 
 #: template → provider。provider 收 context，回傳 LifecycleView。
 _PROVIDERS: dict[str, Callable[[Any], LifecycleView]] = {}
@@ -97,9 +109,23 @@ def build_lifecycle(template: str | None, context: Any = None) -> LifecycleView:
     Status 是觀察頁，不得因為沒有 provider 而 500 —— 使用者連
     「為什麼看不到」都不會知道。
     """
-    provider = _PROVIDERS.get(template or "")
+    key = template or ""
+    provider = _PROVIDERS.get(key)
     if provider is None:
-        return generic_lifecycle(context)
+        view = generic_lifecycle(context)
+        if key in GENERIC_TEMPLATES:
+            return view
+        # 該有 provider 卻找不到：template 打錯、模組沒載入、綁定壞掉。
+        # **不得靜默退回 generic** —— 那會讓畫面看起來完全正常。
+        return LifecycleView(
+            stages=view.stages,
+            provider=f"{key} (unresolved)",
+            note=(
+                f"找不到 template {key!r} 的 lifecycle provider。"
+                "以下顯示的是通用階段，**不是這個研究自己的判準** —— "
+                "可能是 template 名稱錯誤或 provider 未註冊。"
+            ),
+        )
     try:
         return provider(context)
     except Exception as error:  # noqa: BLE001 - 觀察頁不得因此 500

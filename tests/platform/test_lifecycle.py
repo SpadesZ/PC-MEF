@@ -164,9 +164,22 @@ def test_the_generic_lifecycle_mentions_nothing_project_specific():
         assert leaked not in blob, f"{leaked!r} leaked into the generic lifecycle"
 
 
-def test_an_unknown_template_falls_back_to_generic():
-    view = build_lifecycle("no-such-template")
-    assert view.provider == "generic"
+@pytest.mark.parametrize("template", ["", "blank", "blank-multimodal"])
+def test_templates_that_legitimately_use_generic_are_not_flagged(template):
+    """這些 template 本來就沒有自己的判準，generic 是正確答案。"""
+    assert build_lifecycle(template).provider == "generic"
+
+
+def test_an_unknown_template_is_flagged_unresolved_not_silently_generic():
+    """該有 provider 卻找不到時必須看得見（audit P1-5）。
+
+    靜默退回 generic 會讓一個 template 打錯字的專案顯示成
+    「這個研究還沒定義判準」—— 畫面完全正常，而結論完全錯誤。
+    """
+    view = build_lifecycle("pcmef-thesiss")
+    assert "unresolved" in view.provider
+    assert "pcmef-thesiss" in view.note
+    assert "不是這個研究自己的判準" in view.note
 
 
 def test_a_failing_provider_falls_back_instead_of_raising():

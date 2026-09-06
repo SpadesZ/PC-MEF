@@ -70,6 +70,21 @@ def _registry() -> ProjectRegistry:
     return ProjectRegistry(root=current_app.config.get("PCMEF_WORKSPACE_ROOT"))
 
 
+def _discard_project(registry, project_id: str) -> None:
+    """收回建立到一半的專案。**只在 rollback 路徑上使用。**
+
+    刪除本身失敗不再拋出：那會蓋掉原本真正的失敗原因。
+    """
+    import shutil
+
+    from pcmef.platform.projects.resolver import resolve_paths
+
+    try:
+        shutil.rmtree(resolve_paths(project_id, root=registry.root).metadata_root)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _profile_registry():
     from flask import current_app
 
@@ -203,13 +218,22 @@ def create():
     template = request.form.get("template", "blank").strip() or "blank"
     try:
         registry.create(project_id, display_name or project_id, template=template)
-        # template 只給起點：一份 DRAFT 起始 Profile 並宣告為預設。
-        # 不複製任何結果或 frozen evidence。
+    except (ProjectIdError, ProjectExistsError, ValueError):
+        return redirect(url_for("projects.page", error="create"))
+
+    # template 只給起點：一份 DRAFT 起始 Profile 並宣告為預設。
+    # 不複製任何結果或 frozen evidence。
+    #
+    # 套用失敗就把專案收回。留著一個沒有 Profile、沒有預設的專案，
+    # 使用者會看到它出現在清單上、點進去卻什麼都不能做 ——
+    # 「看似存在但不能用」比一個乾淨的失敗更難查（audit P1-3）。
+    try:
         apply_template(
             template, project_id, projects=registry, profiles=_profile_registry()
         )
-    except (ProjectIdError, ProjectExistsError, ValueError):
-        return redirect(url_for("projects.page", error="create"))
+    except Exception:  # noqa: BLE001
+        _discard_project(registry, project_id)
+        return redirect(url_for("projects.page", error="create-incomplete"))
     return redirect(url_for("projects.page"))
 
 
