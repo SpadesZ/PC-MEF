@@ -238,9 +238,36 @@ def clone(project_id: str):
     display_name = request.form.get("new_display_name", "").strip()
     try:
         registry.clone(project_id, new_id, display_name or new_id)
+        # Project clone 之後把來源的預設 Profile 也複製過去，成為新專案
+        # 的 Development Profile。少了這一步，Clone 出來的專案沒有任何
+        # 可看的研究設定，畫面只會說「尚未選擇」—— 那是個死胡同，
+        # 而使用者剛按下的按鈕叫「建立副本」。
+        _clone_default_profile(project_id, new_id, registry)
     except (ProjectNotFoundError, ProjectExistsError, ProjectIdError, ValueError):
         return redirect(url_for("projects.page", error="clone"))
     return redirect(url_for("projects.page"))
+
+
+def _clone_default_profile(source_id: str, target_id: str, registry) -> None:
+    """把來源專案的預設 Profile 複製成新專案的 Development Profile。
+
+    複製的是**設計**。新 Profile 一律 DRAFT（由 profiles.clone 保證）：
+    它還沒有自己的 lock，繼承 FROZEN 會讓一份空設定宣稱自己
+    已建立科學身分。
+    """
+    profiles = _profile_registry()
+    source_profile = profiles.default_profile(source_id)
+    if source_profile is None:
+        return
+    new_profile_id = "dev-v1"
+    profiles.clone(
+        source_id,
+        source_profile.profile_id,
+        new_profile_id,
+        f"{source_profile.display_name}（Development）",
+        target_project_id=target_id,
+    )
+    registry.set_default_profile(target_id, new_profile_id)
 
 
 def install_project_context(app: Any) -> None:

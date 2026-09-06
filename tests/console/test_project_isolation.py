@@ -12,7 +12,7 @@
 # 主要責任:
 #   1. 驗證三個專案同時存在且各自獨立
 #   2. 驗證 Status / Pipeline / Research Design 綁定各自的 Profile
-#   3. 驗證 C 完全不出現 PC-MEF 字樣，B 不出現 A 自己的 lineage
+#   3. 驗證 C 完全不出現 PC-MEF 字樣，B 不出現 A 已解析的 lineage
 #   4. 驗證 pipeline 節點數隨專案改變
 #   5. 驗證 archive 不影響其他專案
 # 維護提醒:
@@ -50,18 +50,19 @@ FORBIDDEN_IN_BLANK = (
     "PC-MEF_實驗計畫_v1.2.1",
 )
 
-#: A 這個專案**自己的狀態**。任何專案顯示它就是跨專案串接。
+#: A 已解析出來的 lineage。**任何其他專案顯示它就是跨專案串接。**
 #:
-#: 與上面那組刻意分開：Thesis 的 development clone 明確繼承了
-#: pcmef-thesis template，因此它出現 VL53L0X（流程用語）或
-#: AMD-007（它自己那份尚未凍結的 amendment）是正確的 ——
-#: 使用者第「除非它自己的 design/template 明確定義」那一條。
-#: 但它**不得**顯示 A 已解析出來的 lineage：那是 A 的身分，
-#: 而身分是不能共用的。
-FORBIDDEN_EVERYWHERE_BUT_THE_THESIS = (
-    "PFC-001",
-    "PC-MEF_實驗計畫_v1.2.1",
-)
+#: 這一組刻意只有一項，而且刻意不含計畫書名稱。分辨的標準是
+#: 「這是 A 的狀態，還是 A 傳下去的設計」：
+#:
+#: - PFC-001 是 A 解析到的那一組 lock，是 A 的**身分**。身分不能共用。
+#: - 計畫書名稱出現在 clone 的設計上，是那份設計的**出處**。
+#:   一個從 v1.2.1 衍生的 development profile 本來就該說明它從哪來；
+#:   把出處也當成洩漏，等於要求 clone 隱瞞自己的來歷。
+#: - VL53L0X 與 AMD-007 出現在 clone 上，是它明確繼承的 template
+#:   語彙與它自己那份尚未凍結的 amendment（使用者：「除非它自己的
+#:   design/template 明確定義」）。
+FORBIDDEN_EVERYWHERE_BUT_THE_THESIS = ("PFC-001",)
 
 OBSERVATION_PAGES = ("/status", "/pipeline", "/projects/design", "/results")
 
@@ -207,11 +208,29 @@ def test_the_dummy_project_shows_generic_lifecycle_stages(three_projects):
     assert "E1-G" not in body
 
 
-def test_the_clone_starts_without_the_thesis_frozen_profile(three_projects):
-    """Clone 複製設計，不繼承已凍結的科學身分。"""
+def test_the_clone_gets_a_usable_development_profile(three_projects):
+    """Clone 出來的專案必須可以直接看 —— 不是一個死胡同。"""
     _open(three_projects, "thesis-dev")
     body = three_projects.get("/projects/design").get_data(as_text=True)
-    assert "thesis-frozen" not in body
+
+    assert "尚未選擇 Research Profile" not in body
+    assert "Development" in body
+
+
+def test_the_clone_does_not_inherit_the_frozen_scientific_identity(three_projects):
+    """複製的是設計，不是科學身分。
+
+    Clone 的 Profile 一律 DRAFT：它還沒有自己的 lock，繼承 FROZEN
+    會讓一份空設定宣稱自己已建立科學身分。
+    來源 profile id 以「Clone 自」出現是**出處**，不是繼承。
+    """
+    _open(three_projects, "thesis-dev")
+    body = three_projects.get("/projects/design").get_data(as_text=True)
+
+    assert "DRAFT" in body
+    assert ">FROZEN<" not in body, (
+        "a cloned profile must not present itself as frozen"
+    )
 
 
 # ---------------------------------------------------------------------------
