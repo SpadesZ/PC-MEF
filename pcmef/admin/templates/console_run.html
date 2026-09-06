@@ -43,6 +43,81 @@
   </header>
 
   {# 第二層分頁。沒有內容的仍然列出但不可點 —— 見檔頭。 #}
+{# Stage 進度。放在分頁之上：進本頁最先要問的是「現在跑到哪」，
+ # 而那個答案不屬於任何一個分頁。內容全部由 executor 寫下的事件重播，
+ # **前端不估算任何進度**。 #}
+{% if stage_progress and stage_progress.definition %}
+<section class="card runstages">
+  <h2>執行進度 Stage Progress
+    <span class="hint">
+      {% if stage_progress.available %}
+        {{ stage_progress.progress.completed_count }} / {{ stage_progress.progress.total_stages }} 個 stage 完成
+      {% else %}此次執行沒有 stage 級記錄{% endif %}
+    </span>
+  </h2>
+  <div class="body">
+    {% if not stage_progress.available %}
+    <p class="note">
+      這一次執行沒有留下 stage 事件，因此無法顯示逐步進度。
+      流程定義（{{ stage_progress.definition.display_name }}，
+      共 {{ stage_progress.definition.stages | length }} 個 stage）仍列於下方，
+      但每一個都標為未知 —— <strong>不會用經過時間推估進度</strong>。
+    </p>
+    {% endif %}
+
+    <ol class="runstage-list">
+      {% for stage in (stage_progress.progress.stages if stage_progress.available else stage_progress.definition.stages) %}
+      {% set st = stage.status if stage_progress.available else 'UNKNOWN' %}
+      <li class="runstage {{ st|lower }}">
+        <span class="runstage-mark" aria-hidden="true">
+          {%- if st == 'COMPLETE' %}✓
+          {%- elif st == 'RUNNING' %}▶
+          {%- elif st == 'FAILED' %}✕
+          {%- elif st == 'BLOCKED' %}⊘
+          {%- elif st == 'SKIPPED' %}–
+          {%- else %}○{% endif -%}
+        </span>
+        <span class="runstage-name">{{ stage.display_name }}</span>
+        {% if stage_progress.available %}
+        <span class="badge {{ 'ok' if st == 'COMPLETE' else ('warn' if st in ('RUNNING','FAILED','BLOCKED') else 'pending') }}">{{ st }}</span>
+        {% if stage.has_counts %}
+        <span class="runstage-count mono">{{ stage.current }} / {{ stage.total }}</span>
+        <span class="runstage-bar"><i style="width: {{ stage.percent }}%"></i></span>
+        {% endif %}
+        {% else %}
+        <span class="badge pending">未知</span>
+        {% endif %}
+        {% if stage.optional %}<span class="tag">選擇性</span>{% endif %}
+
+        <div class="runstage-detail note">
+          {% if stage.detail %}<div>{{ stage.detail }}</div>{% endif %}
+          <div>Input：{{ stage.input_desc or '—' }}</div>
+          <div>Process：{{ stage.process_desc or '—' }}</div>
+          <div>Output：{{ stage.output_desc or '—' }}</div>
+          {% if stage_progress.available and stage.next_stage %}
+          <div>Next：{{ stage.next_stage }}</div>
+          {% endif %}
+          {% if stage_progress.available and stage.artifacts %}
+          <div>Artifacts：
+            {% for a in stage.artifacts %}<span class="mono">{{ a }}</span>{% if not loop.last %}、{% endif %}{% endfor %}
+          </div>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+
+    {% if stage_progress.available and stage_progress.progress.unknown_stages %}
+    <p class="note">
+      事件檔提到流程定義裡沒有的 stage：
+      {% for s in stage_progress.progress.unknown_stages %}<span class="mono">{{ s }}</span>{% if not loop.last %}、{% endif %}{% endfor %}
+      —— 代表定義與實際執行不一致。
+    </p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
   <nav class="subnav">
     {% for tab in subnav %}
       {% if tab.available %}

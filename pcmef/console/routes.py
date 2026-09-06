@@ -48,6 +48,40 @@ from pcmef.agents.cache import DEFAULT_CACHE_ROOT
 __all__ = ["blueprint"]
 
 
+def _stage_progress(run_dir):
+    """這一次 run 的 stage 進度。讀事件，不寫事件。"""
+    try:
+        from pcmef.console.project_routes import request_context
+        from pcmef.platform.pipeline import build_definition
+        from pcmef.platform.runs import build_progress, read_events
+
+        context = request_context()
+        profile = getattr(context.selected, "profile", None)
+        definition = build_definition(
+            getattr(profile, "extra", {}).get("pipeline_template")
+            or context.project.template,
+            _RunPipelineContext(context.paths.freeze, profile),
+        )
+        events, skipped = read_events(run_dir)
+        if not events:
+            return {"definition": definition, "progress": None, "available": False}
+        return {
+            "definition": definition,
+            "progress": build_progress(definition, events, skipped_lines=skipped),
+            "available": True,
+        }
+    except Exception:  # noqa: BLE001 - Run 頁不得因進度讀取失敗而 500
+        return {"definition": None, "progress": None, "available": False}
+
+
+class _RunPipelineContext:
+    __slots__ = ("freeze_dir", "profile")
+
+    def __init__(self, freeze_dir, profile) -> None:
+        self.freeze_dir = freeze_dir
+        self.profile = profile
+
+
 def _project_name() -> str:
     """目前專案名稱，供 breadcrumb 使用。
 
@@ -228,6 +262,11 @@ def run_page(run_id: str, section: str = "overview"):
         context["cost"] = run_view.cost_view(run_dir, record.kind, record)
     else:
         context["artifacts"] = run_view.artifacts_view(run_dir)
+
+    # Stage 進度：由 executor 寫下的事件重播而來。**前端不估算任何進度。**
+    # 沒有事件檔就是沒有 stage 級記錄（舊的 run 都是這樣），
+    # 畫面會說明這件事而不是顯示一條假的進度條。
+    context["stage_progress"] = _stage_progress(run_dir)
 
     label = next(s.label for s in RUN_SECTIONS if s.key == section)
     return render_template(

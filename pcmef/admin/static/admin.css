@@ -675,3 +675,22 @@ td .note.mono { margin-left: 6px; }
 .gates th { text-align: left; font-weight: 600; vertical-align: top; width: 34%; }
 .gates td { vertical-align: top; }
 .gates tr.blocked th { color: #8f3229; }
+
+/* ---------- Run stage progress ---------- */
+.runstage-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.runstage { padding: 7px 0 8px 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.runstage:last-child { border-bottom: 0; }
+.runstage-mark { width: 1.1em; text-align: center; font-weight: 700; color: var(--muted); }
+.runstage.complete .runstage-mark { color: var(--ok); }
+.runstage.running .runstage-mark { color: var(--accent); }
+.runstage.failed .runstage-mark { color: #b4443a; }
+.runstage.blocked .runstage-mark { color: #8a94a0; }
+.runstage-name { font-weight: 600; }
+.runstage.blocked .runstage-name, .runstage.not_started .runstage-name { color: var(--muted); }
+.runstage-count { font-size: 12px; color: var(--muted); }
+/* 進度條只在 executor 給了 current/total 時出現。沒有計數就沒有條 ——
+   一條「大概在這裡」的條比沒有條更容易誤導。 */
+.runstage-bar { flex: 1 1 120px; max-width: 260px; height: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.runstage-bar > i { display: block; height: 100%; background: var(--accent); }
+.runstage-detail { flex-basis: 100%; margin-left: calc(1.1em + 8px); }
+.runstage.not_started .runstage-detail, .runstage.blocked .runstage-detail { opacity: .7; }
