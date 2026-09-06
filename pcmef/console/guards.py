@@ -3,7 +3,7 @@
 #         run-scoped 或會寫入科研狀態的端點。**唯一的判準來源。**
 # 檔案路徑: pcmef/console/guards.py
 # 產生時間: 2026-09-08 14:40 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: run ownership 與 action capability 的集中式 decorator。
 # 模組定位: Execution/Action Layer Closure P0-3 / P0-4 / P0-5。
 #           每個端點各寫一份判準，遲早會有一個漏掉 —— 而漏掉的那個
@@ -18,6 +18,11 @@
 #     散開的判準會漂移，而寬鬆的那一份會先被執行到。
 #   - 不得以 302 或空結果代替拒絕。看起來成功的拒絕最難查。
 #   - 不得在拒絕時洩漏其他專案的內容摘要；只說「不屬於目前 Project」。
+#   - **不得讓 requires_capability 改用 execution_context()。** 那一份
+#     不擋 context 回退，於是封存專案回退到 Thesis 之後照樣放行 ——
+#     動作身分只能來自 launch.action_context()。
+#   - v0.2.0 變更：requires_capability 改用 action_context()，
+#     對應 Execution Layer Closure round 2 的 P0-4。
 #   - v0.1.0 新增：首版，對應 Execution Layer Closure。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_execution_guards.py -v
@@ -95,14 +100,23 @@ def requires_capability(capability: str) -> Callable:
 
     觀察頁顯示能力不等於動作端點就有權限 —— 這個 decorator 才是
     那條線；畫面上的按鈕只是它的投影。
+
+    身分一律取自 `console.launch.action_context()`，**不另外解析一次**。
+    先前這裡用的是 `execution_context()`，而它不擋 context 回退 —— 於是
+    同一個判準有兩份，寬鬆的那一份（封存後回退到 Thesis 照樣放行）
+    正好是會先被執行到的那一份。
     """
 
     def decorate(view: Callable) -> Callable:
         @wraps(view)
         def wrapper(*args: Any, **kwargs: Any):
+            from pcmef.console.launch import LaunchRefused, action_context
             from pcmef.platform.capabilities import CapabilityError, require_capability
 
-            context, profile, _caps = execution_context()
+            try:
+                context, profile = action_context()
+            except LaunchRefused as error:
+                return _deny(str(error), error.status)
             try:
                 require_capability(context.project, capability, profile)
             except CapabilityError as error:

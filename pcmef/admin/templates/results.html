@@ -81,10 +81,16 @@
 
 <section class="card">
   <h2>最近一次 E2 報告
-    <span class="hint">{{ formal_out }}</span>
+    <span class="hint">{{ formal_out or '這個 Project 沒有這份紀錄' }}</span>
   </h2>
   <div class="body">
-    {% if not formal_report %}
+    {# canonical formal report 住在 repo 根目錄，不在任何 Project 的
+       ProjectPaths 底下。沒有 scientific_state 能力的專案不得顯示它 ——
+       畫面上那會變成「這個專案跑出的結果」，而它是別人的（P1-5）。 #}
+    {% if not scientific_state %}
+      <p><span class="badge warn">不屬於這個 Project</span>
+         這個 Project 沒有自己的 E2 正式報告。畫面不會借用其他 Project 的。</p>
+    {% elif not formal_report %}
       <p><span class="badge warn">尚未執行</span>
          這個位置還沒有任何 E2 報告。</p>
     {% else %}

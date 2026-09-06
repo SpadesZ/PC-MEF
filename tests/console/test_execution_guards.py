@@ -219,7 +219,33 @@ def test_a_project_without_freeze_capability_cannot_write_the_llm_lock(env):
 
 
 def test_the_thesis_project_retains_its_capabilities(env):
-    """對照組：能力模型不能只是把所有人都擋掉。"""
+    """對照組：能力模型不能只是把所有人都擋掉。
+
+    能力要連同 Thesis 的 Frozen Profile 一起問。宣告在 Project 上的
+    能力**需要一份選定的 Research Profile 才生效** —— 沒有科學身分
+    可掛的凍結，事後說不出它是哪一版設定產生的。
+    """
+    from pcmef.platform.capabilities import (
+        FORMAL_E2, LLM_RUNTIME_FREEZE, capabilities_for,
+    )
+    from pcmef.platform.profiles.registry import ProfileRegistry
+    from pcmef.platform.projects.registry import ProjectRegistry
+
+    client, _runs = env
+    _select(client, "pcmef-thesis")
+    assert client.get("/formal").status_code == 200
+
+    workspace = client.application.config["PCMEF_WORKSPACE_ROOT"]
+    registry = ProjectRegistry(root=workspace)
+    profile = ProfileRegistry(root=workspace).get(
+        "pcmef-thesis", registry.get("pcmef-thesis").default_profile_id
+    )
+    caps = capabilities_for(registry.get("pcmef-thesis"), profile)
+    assert FORMAL_E2 in caps and LLM_RUNTIME_FREEZE in caps
+
+
+def test_a_declared_capability_does_not_survive_losing_its_profile(env):
+    """對照組的另一半：宣告在 Project 上，但沒有 Profile 就不生效。"""
     from pcmef.platform.capabilities import (
         FORMAL_E2, LLM_RUNTIME_FREEZE, capabilities_for,
     )
@@ -227,11 +253,10 @@ def test_the_thesis_project_retains_its_capabilities(env):
 
     client, _runs = env
     _select(client, "pcmef-thesis")
-    assert client.get("/formal").status_code == 200
-
     registry = ProjectRegistry(root=client.application.config["PCMEF_WORKSPACE_ROOT"])
-    caps = capabilities_for(registry.get("pcmef-thesis"))
-    assert FORMAL_E2 in caps and LLM_RUNTIME_FREEZE in caps
+
+    caps = capabilities_for(registry.get("pcmef-thesis"), None)
+    assert FORMAL_E2 not in caps and LLM_RUNTIME_FREEZE not in caps
 
 
 def test_archiving_removes_every_execution_capability():

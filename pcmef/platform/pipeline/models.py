@@ -86,6 +86,27 @@ class PipelineStage:
             "optional": self.optional,
         }
 
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> PipelineStage:
+        """由 to_json() 的輸出還原。**`detail` 不還原。**
+
+        `detail` 是 provider 由當下的 lock 填進去的顯示值，不在 to_json()
+        裡，也不該由快照重建 —— 那會讓歷史 run 顯示今天的門檻。
+        """
+        return cls(
+            stage_id=str(data.get("stage_id", "")),
+            display_name=str(data.get("display_name", "")),
+            english=str(data.get("english", "")),
+            summary=str(data.get("summary", "")),
+            carries=str(data.get("carries", "")),
+            input_desc=str(data.get("input", "")),
+            process_desc=str(data.get("process", "")),
+            output_desc=str(data.get("output", "")),
+            artifact_roles=tuple(str(r) for r in data.get("artifact_roles", ())),
+            depends_on=tuple(str(d) for d in data.get("depends_on", ())),
+            optional=bool(data.get("optional", False)),
+        )
+
 
 @dataclass(frozen=True)
 class PipelineDefinition:
@@ -148,3 +169,29 @@ class PipelineDefinition:
             "stage_count": len(self.stages),
             "stages": [s.to_json() for s in self.stages],
         }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> PipelineDefinition:
+        """由快照還原一份流程定義。**不呼叫任何 provider。**
+
+        歷史 run 的形狀與文案必須完全從它自己的快照重建：向 provider
+        要一次「同一個 id 現在長什麼樣」，等於讓今天的定義去解釋昨天的
+        執行 —— 而畫面不會說它被改寫過（P1-1 / P1-6）。
+
+        schema 不認得就拒絕。用讀不懂的資料硬拼出一份定義，等於在
+        「還原」的名義下重新發明歷史。
+        """
+        schema = str(data.get("schema_version", ""))
+        if schema != PIPELINE_SCHEMA_VERSION:
+            raise PipelineDefinitionError(
+                f"pipeline snapshot declares schema_version={schema!r}; this "
+                f"build understands {PIPELINE_SCHEMA_VERSION!r} only"
+            )
+        return cls(
+            pipeline_id=str(data.get("pipeline_id", "")),
+            display_name=str(data.get("display_name", "")),
+            note=str(data.get("note", "")),
+            stages=tuple(
+                PipelineStage.from_json(s) for s in data.get("stages", ())
+            ),
+        )

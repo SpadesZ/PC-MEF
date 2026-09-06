@@ -38,6 +38,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pcmef.platform.capabilities import (
+    CAPABILITY_FIELD,
+    FORMAL_E2,
+    LLM_RUNTIME_FREEZE,
+    SCIENTIFIC_STATE_READ,
+)
 from pcmef.platform.projects.models import Project
 from pcmef.platform.projects.resolver import (
     LEGACY_THESIS_PROJECT_ID,
@@ -51,6 +57,7 @@ __all__ = [
     "PROJECT_FILENAME",
     "CLONE_COPYABLE",
     "CLONE_NEVER_COPY",
+    "LEGACY_THESIS_CAPABILITIES",
     "PROJECT_DATA_DIRS",
     "ProjectExistsError",
     "ProjectNotFoundError",
@@ -58,6 +65,16 @@ __all__ = [
 ]
 
 PROJECT_FILENAME = "project.json"
+
+#: legacy Thesis 專案在遷移時取得的能力。
+#:
+#: 從 capabilities 模組取常數而不是寫字面字串：字面字串打錯不會報錯，
+#: 只會安靜地少一項能力，而少的那一項要等到有人按下按鈕才會發現。
+LEGACY_THESIS_CAPABILITIES: tuple[str, ...] = (
+    FORMAL_E2,
+    LLM_RUNTIME_FREEZE,
+    SCIENTIFIC_STATE_READ,
+)
 
 #: Clone 會複製的 metadata。**設計，不是結果。**
 CLONE_COPYABLE: tuple[str, ...] = (
@@ -288,9 +305,14 @@ class ProjectRegistry:
         既有 freeze/、outputs/、configs/ 完全不動 —— 這個方法建立的
         只有 projects/pcmef-thesis/project.json。科學資料的位置由
         resolver 指回 repo 根目錄。
+
+        紀錄已存在時仍會**補寫缺少的能力宣告**：能力欄位是後來才加的，
+        在那之前寫下的 project.json 沒有它，於是碩論專案自己失去
+        formal_e2 與 llm_runtime_freeze —— 畫面會說「這個專案沒有
+        Formal E2 能力」，而它正是那篇論文。
         """
         if self.exists(LEGACY_THESIS_PROJECT_ID):
-            return self.get(LEGACY_THESIS_PROJECT_ID)
+            return self._backfill_capabilities(self.get(LEGACY_THESIS_PROJECT_ID))
 
         project = Project(
             project_id=LEGACY_THESIS_PROJECT_ID,
@@ -309,11 +331,35 @@ class ProjectRegistry:
             # 能力在遷移時**明確宣告**。之後 capabilities_for() 只讀這份
             # 宣告，不再從 project id 推導 —— 用 id 推導與用名字判斷資格
             # 只差一層。
-            extra={"capabilities": ["formal_e2", "llm_runtime_freeze"]},
+            extra={CAPABILITY_FIELD: list(LEGACY_THESIS_CAPABILITIES)},
         )
         try:
             self._write_new(project)
         except ProjectExistsError:
             # 競態：另一個行程剛建立。讀它的即可，兩份內容相同。
-            return self.get(LEGACY_THESIS_PROJECT_ID)
+            return self._backfill_capabilities(self.get(LEGACY_THESIS_PROJECT_ID))
         return project
+
+    def _backfill_capabilities(self, project: Project) -> Project:
+        """把缺少的能力宣告補進既有紀錄。**冪等，且只補這一欄。**
+
+        只在缺的時候寫檔：每次讀取都覆寫會讓 mtime 一直跳動，而且把
+        「補一次遷移」變成「每次開頁都改資料」。其他欄位一律原樣留著 ——
+        使用者改過的顯示名稱不該被遷移改回去。
+        """
+        declared = tuple((project.extra or {}).get(CAPABILITY_FIELD) or ())
+        missing = [c for c in LEGACY_THESIS_CAPABILITIES if c not in declared]
+        if not missing:
+            return project
+
+        extra = dict(project.extra or {})
+        extra[CAPABILITY_FIELD] = [*declared, *missing]
+        updated = replace(project, extra=extra)
+        try:
+            self._write_existing(updated)
+        except OSError:
+            # 寫不進去時仍回傳補好的物件：這一次請求該有的能力是對的，
+            # 下一次會再試一次。**不得因此靜默降級成沒有能力** ——
+            # 那會讓碩論專案在磁碟唯讀時看起來像個空專案。
+            pass
+        return updated

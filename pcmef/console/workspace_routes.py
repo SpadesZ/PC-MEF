@@ -67,9 +67,16 @@ def _owned_runs(runner, context, query):
     A 專案的執行紀錄（audit P0-2）。
     """
     from pcmef.platform.projects.resolver import LEGACY_THESIS_PROJECT_ID
-    from pcmef.platform.runs import attribution_boundary, owned_by, read_attribution
+    from pcmef.platform.runs import (
+        AttributionBoundaryError, attribution_boundary, owned_by, read_attribution,
+    )
 
-    boundary = attribution_boundary(runner.run_root)
+    # 邊界不可信時傳空字串。清單於是只留下**自帶歸屬**的 run；
+    # 沒有歸屬的那些無法判斷是 legacy 還是孤兒，一律不列。
+    try:
+        boundary = attribution_boundary(runner.run_root)
+    except AttributionBoundaryError:
+        boundary = ""
     kept = []
     for record in runner.list_runs(query=query):
         attribution = read_attribution(runner.run_dir(record.run_id))
@@ -96,6 +103,26 @@ class _PipelineContext:
 status_blueprint = Blueprint("status", __name__)
 results_blueprint = Blueprint("results", __name__)
 pipeline_blueprint = Blueprint("pipeline", __name__)
+
+
+def _may_read_scientific_state(context) -> bool:
+    """這個 Project 有沒有資格讀 repo 既有的科研狀態。
+
+    E1 的十二道 gate 與 canonical formal report 住在 repo 根目錄，
+    不在任何專案的 ProjectPaths 底下 —— 所以每個專案都讀得到它們，
+    而一個剛建立的空專案於是在自己的 Status 上顯示「E1 通過 N/12」、
+    在 Results 上顯示碩論的 E2 報告。畫面上那是**它的**研究進度，
+    實際上是別人的（P1-5）。
+
+    能力是宣告出來的，不從 project id 推導。
+    """
+    from pcmef.platform.capabilities import SCIENTIFIC_STATE_READ, has_capability
+
+    return has_capability(
+        context.project,
+        SCIENTIFIC_STATE_READ,
+        getattr(context.selected, "profile", None),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +158,14 @@ def page():
 
     context = request_context()
     freeze_dir = context.paths.freeze
-    gate_summary = current_app.config["PCMEF_CONSOLE_GATE_SUMMARY"]()
+    # E1 gate 是**這個 repo 既有研究**的科研狀態，不是平台功能。
+    # 沒有宣告能力的專案看到的是「這個專案沒有這份紀錄」，
+    # 而不是碩論的十二道 gate 掛在它自己的標題底下。
+    scientific_state = _may_read_scientific_state(context)
+    gate_summary = (
+        current_app.config["PCMEF_CONSOLE_GATE_SUMMARY"]()
+        if scientific_state else None
+    )
 
     # 「現在在哪一步、下一步做什麼、還缺什麼」由 final_gate 的八項判定
     # **推導**，不在畫面上手寫。手寫的進度敘述會過期，而且過期時看起來
@@ -168,6 +202,7 @@ def page():
             ("研究狀態 Status", None), project_name=context.display_name
         ),
         gate_summary=gate_summary,
+        scientific_state=scientific_state,
         lineage=_lock_summary(freeze_dir),
         progress=progress,
         lifecycle=lifecycle,
@@ -201,9 +236,13 @@ def page():
     context = request_context()
     runner = current_app.config["PCMEF_CONSOLE_RUNNER"]
     query = request.args.get("q", "").strip()
+    # canonical formal report 是碩論的產物，位置在 repo 根目錄底下。
+    # 沒有能力的專案不得在自己的 Results 上顯示它 —— 那會讓一個
+    # 從未跑過任何東西的專案看起來已經有 E2 結果（P1-5）。
+    scientific_state = _may_read_scientific_state(context)
     out_dir = current_app.config.get(
         "PCMEF_FORMAL_OUT", "outputs/perception/e2_final"
-    )
+    ) if scientific_state else None
     return render_template(
         "results.html",
         **nav_context("results"),
@@ -214,7 +253,8 @@ def page():
         query=query,
         recent_count=RECENT_RUN_COUNT,
         csrf_token=token,
-        formal_report=latest_report(out_dir),
+        scientific_state=scientific_state,
+        formal_report=latest_report(out_dir) if scientific_state else None,
         formal_out=out_dir,
     )
 

@@ -146,16 +146,23 @@ def test_a_failing_command_is_recorded_as_failed(echo):
     assert final.exit_code == 3
 
 
-def test_a_command_that_cannot_start_is_recorded(tmp_path):
+def test_a_command_that_cannot_start_raises_instead_of_recording(tmp_path):
+    """**沒跑起來的 run 不該存在。**
+
+    先前 Popen 在背景執行緒裡，啟動失敗只在 log 留一行、狀態記成
+    failed，而呼叫端早就拿到 record 了 —— 於是「有紀錄、有歸屬、
+    從未執行」是一個可達狀態，而它在清單上與真的跑過的長得一樣。
+    現在啟動失敗往外拋，由 console.launch 把整筆 run 收回。
+    """
+    from pcmef.console.runner import RunLaunchError
+
     class _Broken(ConsoleRunner):
         def _command(self, run_id, spec):
             return ["definitely-not-an-executable-xyz"]
 
     runner = _Broken(tmp_path / "runs")
-    record = runner.start(RunSpec(kind="sim_smoke", params={}))
-    final = runner.wait(record.run_id, timeout=30)
-    assert final.status == "failed"
-    assert "failed to start" in runner.tail(record.run_id)[0]
+    with pytest.raises(RunLaunchError):
+        runner.start(RunSpec(kind="sim_smoke", params={}))
 
 
 # ---------------------------------------------------------------------------

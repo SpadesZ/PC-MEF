@@ -56,6 +56,7 @@ from pcmef.core.constants import CLASS_ORDER
 __all__ = [
     "RunnerError",
     "FormalRunRefused",
+    "RunLaunchError",
     "PRESETS",
     "RunSpec",
     "RunRecord",
@@ -112,6 +113,15 @@ class FormalRunRefused(RunnerError):
 
     與一般錯誤分開：這不是輸入失誤，是踩到 §208 與 §52 結語劃下的界線 ——
     formal identity 只能由 CLI 產生。
+    """
+
+
+class RunLaunchError(RunnerError):
+    """子行程沒有成功啟動。
+
+    與「跑完之後失敗」分開：**沒跑起來的 run 不該存在**。呼叫端接到
+    這個例外時必須把整筆 run 收回，否則會留下一個有歸屬、有紀錄、
+    但從未執行過的目錄，而它在清單上與真的跑過的長得一模一樣。
     """
 
 
@@ -552,6 +562,12 @@ class ConsoleRunner:
 
         `run_id` 已給時代表呼叫端已經備妥目錄與歸屬；此時**不再另配
         一個 id**，否則歸屬會落在一個沒有行程的目錄上。
+
+        **子行程在這裡同步啟動，不在背景執行緒裡。** 先前 Popen 發生在
+        `_pump()` 內，於是「啟動失敗」對呼叫端而言是成功的：HTTP 已經
+        回 201、run 目錄與歸屬都留著，只有 log 裡多一行 failed to start。
+        呼叫端因此沒有機會回滾。現在 launch 失敗會往外拋 `RunLaunchError`，
+        由 `console.launch` 把整筆 run 收回。
         """
         self._assert_not_formal(spec.params, spec.kind)
         if run_id is None:
@@ -572,34 +588,36 @@ class ConsoleRunner:
         if spec.kind == "formal_e2":
             self._write_formal_pointer(run_id, str(spec.params.get("mode", "dry-run")))
 
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, encoding="utf-8", errors="replace",
+            )
+        except Exception as error:
+            raise RunLaunchError(
+                f"run {run_id!r} could not be launched: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+
         thread = threading.Thread(
-            target=self._pump, args=(record,), name=f"console-run-{run_id}", daemon=True
+            target=self._pump, args=(record, process),
+            name=f"console-run-{run_id}", daemon=True,
         )
         self._threads[run_id] = thread
         thread.start()
         return record
 
-    def _pump(self, record: RunRecord) -> None:
-        """在背景把子行程輸出逐行寫進 log 檔。
+    def _pump(self, record: RunRecord, process: "subprocess.Popen[str]") -> None:
+        """在背景把已啟動的子行程輸出逐行寫進 log 檔。
 
         逐行 flush 而非等結束才寫：使用者要看到的是「正在跑什麼」，
         而一個算圖跑五分鐘卻沒有任何輸出的畫面，與當掉沒有分別。
+
+        **行程由 `start()` 啟動後才傳進來。** 這裡只負責抽取輸出與收尾；
+        把 Popen 留在這裡會讓啟動失敗變成一個沒有人接得到的背景事件。
         """
         log_path = self.log_path(record.run_id)
-        try:
-            process = subprocess.Popen(
-                record.command,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, encoding="utf-8", errors="replace",
-            )
-        except Exception as error:
-            with log_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"failed to start: {type(error).__name__}: {error}\n")
-            record.status, record.exit_code = "failed", -1
-            record.finished_at = _now()
-            self._save(record)
-            return
-
         with log_path.open("a", encoding="utf-8") as handle:
             assert process.stdout is not None
             for line in process.stdout:

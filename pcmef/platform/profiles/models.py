@@ -40,6 +40,7 @@ __all__ = [
     "PROFILE_SCHEMA_VERSION",
     "PROFILE_STATES",
     "FROZEN_STATES",
+    "RUN_INHIBITED",
     "Profile",
 ]
 
@@ -66,6 +67,12 @@ PROFILE_STATES: tuple[str, ...] = (
 FROZEN_STATES: frozenset[str] = frozenset(
     {"FROZEN", "FORMAL_READY", "FORMAL_RUNNING", "FORMAL_COMPLETE"}
 )
+
+#: 明確禁止啟動的狀態。
+#:
+#: 具名常數而不是各處寫一次字面值：能力判定要引用它，而字面值一旦
+#: 有第二份，改名時漏掉的那一份會安靜地放行。
+RUN_INHIBITED = "RUN_INHIBITED"
 
 
 @dataclass(frozen=True)

@@ -60,6 +60,9 @@ def app(tmp_path):
     )
     application = create_app(
         service=service, console_run_root=tmp_path / "runs",
+        # workspace 一定要隔離：不給的話 registry 落在 repo 根目錄，
+        # 測試會寫進開發者真實的 projects/。
+        workspace_root=tmp_path / "workspace",
         audit_paths=AuditPaths(
             inventory=tmp_path / "none", splits=tmp_path / "none",
             simulation=tmp_path / "none", surrogate=tmp_path / "none",
@@ -198,19 +201,21 @@ def test_an_unknown_kind_is_rejected(client, csrf):
 # ---------------------------------------------------------------------------
 
 
-def _finish(app, count: int, **params):
+def _finish(start_attributed, app, count: int, **params):
     """跑完 count 次短執行，回傳紀錄。"""
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
     records = []
     for _ in range(count):
-        record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 1, **params}))
+        record = start_attributed(
+            app, RunSpec(kind="sim_smoke", params={"lines": 1, **params})
+        )
         records.append(runner.wait(record.run_id, timeout=30))
     return records
 
 
-def test_the_history_is_searchable(app, client):
-    _finish(app, 1, preset="preview")
-    _finish(app, 1, preset="quality")
+def test_the_history_is_searchable(app, client, start_attributed):
+    _finish(start_attributed, app, 1, preset="preview")
+    _finish(start_attributed, app, 1, preset="quality")
 
     html = client.get("/results?q=quality").get_data(as_text=True)
     assert "preset=quality" not in html  # 參數本身不印在畫面上
@@ -218,13 +223,13 @@ def test_the_history_is_searchable(app, client):
     assert "快速預覽" not in html.split('id="run-history"')[1]
 
 
-def test_search_reaches_runs_beyond_the_display_limit(app, client):
+def test_search_reaches_runs_beyond_the_display_limit(app, client, start_attributed):
     """先截斷再篩選的話，limit 之外的舊紀錄永遠搜不到 ——
     而「東西太多所以要搜尋」時，要找的通常正好就是那些舊的。"""
     from pcmef.console.routes import RECENT_RUN_COUNT
 
-    oldest = _finish(app, 1, preset="quality")[0]
-    _finish(app, RECENT_RUN_COUNT + 3, preset="preview")
+    oldest = _finish(start_attributed, app, 1, preset="quality")[0]
+    _finish(start_attributed, app, RECENT_RUN_COUNT + 3, preset="preview")
 
     plain = client.get("/results").get_data(as_text=True)
     searched = client.get("/results?q=quality").get_data(as_text=True)
@@ -238,10 +243,10 @@ def test_search_reaches_runs_beyond_the_display_limit(app, client):
     assert "還有" not in searched
 
 
-def test_older_runs_are_collapsed_so_the_table_stays_short(app, client):
+def test_older_runs_are_collapsed_so_the_table_stays_short(app, client, start_attributed):
     from pcmef.console.routes import RECENT_RUN_COUNT
 
-    _finish(app, RECENT_RUN_COUNT + 2)
+    _finish(start_attributed, app, RECENT_RUN_COUNT + 2)
     # 摺疊隨執行紀錄一起搬到 Results（P2-2）。顧慮沒有消失 ——
     # 跑久了仍會累積上百筆 —— 只是換了頁面。
     html = client.get("/results").get_data(as_text=True)
@@ -249,8 +254,8 @@ def test_older_runs_are_collapsed_so_the_table_stays_short(app, client):
     assert "還有 2 筆較早的紀錄" in html
 
 
-def test_a_finished_run_can_be_deleted(app, client, csrf):
-    record = _finish(app, 1)[0]
+def test_a_finished_run_can_be_deleted(app, client, csrf, start_attributed):
+    record = _finish(start_attributed, app, 1)[0]
 
     response = client.post(
         f"/api/console/runs/{record.run_id}/delete",
@@ -261,10 +266,10 @@ def test_a_finished_run_can_be_deleted(app, client, csrf):
     assert not (app.config["PCMEF_CONSOLE_RUNNER"].run_dir(record.run_id)).exists()
 
 
-def test_a_running_run_cannot_be_deleted(app, client, csrf):
+def test_a_running_run_cannot_be_deleted(app, client, csrf, start_attributed):
     """子行程還握著 log 的檔案句柄，而且刪掉之後 SSE 會對著不存在的紀錄重試。"""
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
-    record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 400}))
+    record = start_attributed(app, RunSpec(kind="sim_smoke", params={"lines": 400}))
 
     response = client.post(
         f"/api/console/runs/{record.run_id}/delete",
@@ -276,8 +281,8 @@ def test_a_running_run_cannot_be_deleted(app, client, csrf):
     runner.wait(record.run_id, timeout=30)
 
 
-def test_csrf_is_required_to_delete_a_run(app, client):
-    record = _finish(app, 1)[0]
+def test_csrf_is_required_to_delete_a_run(app, client, start_attributed):
+    record = _finish(start_attributed, app, 1)[0]
     response = client.post(
         f"/api/console/runs/{record.run_id}/delete",
         json={}, headers={"X-CSRF-Token": "wrong"},
@@ -326,8 +331,9 @@ def test_the_admin_page_itself_still_refuses_to_write_a_lock(client, csrf):
 # ---------------------------------------------------------------------------
 
 
-def test_stream_sends_lines_then_done(app, client, csrf):
-    record = app.config["PCMEF_CONSOLE_RUNNER"].start(
+def test_stream_sends_lines_then_done(app, client, csrf, start_attributed):
+    record = start_attributed(
+        app,
         RunSpec(kind="sim_smoke", params={"lines": 4})
     )
     response = client.get(f"/api/console/runs/{record.run_id}/stream")
@@ -347,11 +353,18 @@ def test_stream_sends_lines_then_done(app, client, csrf):
 
 
 def test_stream_for_an_unknown_run_fails(client):
-    assert client.get("/api/console/runs/nope/stream").status_code == 400
+    """不存在的 run 與**別的專案的** run 必須長得一樣：都是 404。
+
+    先前這裡是 400（runner 說「找不到」）。分開回應會讓這個端點變成
+    一台探測器：400 代表「這個 id 不存在」，404 代表「存在但不是你的」
+    —— 於是不必有權限也能列舉出別的專案跑過哪些 run。
+    """
+    assert client.get("/api/console/runs/nope/stream").status_code == 404
 
 
-def test_status_endpoint_reports_the_record(app, client):
-    record = app.config["PCMEF_CONSOLE_RUNNER"].start(
+def test_status_endpoint_reports_the_record(app, client, start_attributed):
+    record = start_attributed(
+        app,
         RunSpec(kind="sim_smoke", params={"lines": 1})
     )
     app.config["PCMEF_CONSOLE_RUNNER"].wait(record.run_id, timeout=30)
@@ -365,9 +378,9 @@ def test_status_endpoint_reports_the_record(app, client):
 # ---------------------------------------------------------------------------
 
 
-def test_run_page_shows_the_log_and_the_exact_command(app, client):
+def test_run_page_shows_the_log_and_the_exact_command(app, client, start_attributed):
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
-    record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 2}))
+    record = start_attributed(app, RunSpec(kind="sim_smoke", params={"lines": 2}))
     runner.wait(record.run_id, timeout=30)
 
     html = client.get(f"/console/runs/{record.run_id}").get_data(as_text=True)
@@ -389,10 +402,10 @@ def _strip_comments(source: str) -> str:
     return re.sub(r"(?m)^\s*//.*$", "", source)
 
 
-def test_run_page_uses_exactly_one_inline_script(app, client):
+def test_run_page_uses_exactly_one_inline_script(app, client, start_attributed):
     """§42 允許 minimal JS；這裡量化「minimal」= 一段內嵌腳本、零外部依賴。"""
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
-    record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 1}))
+    record = start_attributed(app, RunSpec(kind="sim_smoke", params={"lines": 1}))
     runner.wait(record.run_id, timeout=30)
 
     html = client.get(f"/console/runs/{record.run_id}").get_data(as_text=True)
@@ -410,10 +423,10 @@ def test_the_comment_stripper_catches_a_real_dependency():
     assert "vue" in _strip_comments('<script src="vue.js">').lower()
 
 
-def test_the_live_log_is_appended_as_text_not_html(app, client):
+def test_the_live_log_is_appended_as_text_not_html(app, client, start_attributed):
     """伺服器輸出含檔名與錯誤字串；用 innerHTML 附加就是 XSS。"""
     runner = app.config["PCMEF_CONSOLE_RUNNER"]
-    record = runner.start(RunSpec(kind="sim_smoke", params={"lines": 1}))
+    record = start_attributed(app, RunSpec(kind="sim_smoke", params={"lines": 1}))
     runner.wait(record.run_id, timeout=30)
 
     code = _strip_comments(

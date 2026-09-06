@@ -202,18 +202,26 @@ def test_the_owning_project_can_still_see_and_delete_its_run(thesis_run):
 
 
 def test_a_legacy_run_without_attribution_belongs_to_the_thesis(app_and_runs):
-    """平台化之前的 run 沒有歸屬檔。全域 runs 根目錄當時就是碩論在用的。"""
+    """平台化之前的 run 沒有歸屬檔。全域 runs 根目錄當時就是碩論在用的。
+
+    `started_at` 必須是**真的時間戳**。歸屬邊界比對的是時間點，因此
+    一筆時間讀不出來的紀錄無法定位在邊界的哪一邊 —— 那種紀錄一律
+    當孤兒，不當 legacy（P1-4）。這裡要測的是「邊界之前的 run 歸碩論」，
+    所以夾具得給一個確實落在邊界之前的時間，而不是佔位字元。
+    """
     client, runs = app_and_runs
     client.get("/projects")
     _post(client, "/projects/create", project_id="tiny-dummy",
           display_name="Tiny Dummy", template="blank")
 
+    before_boundary = "2026-01-01T00:00:00+08:00"
     legacy = runs / "legacy-run"
     legacy.mkdir(parents=True)
     (legacy / "run.json").write_text(json.dumps({
         "run_id": "legacy-run", "kind": "sim", "label": "legacy", "params": {},
-        "command": ["x"], "status": "succeeded", "started_at": "t",
-        "finished_at": "t", "exit_code": 0, "note": "",
+        "command": ["x"], "status": "succeeded",
+        "started_at": before_boundary, "finished_at": before_boundary,
+        "exit_code": 0, "note": "",
     }), encoding="utf-8")
     (legacy / "log.txt").write_text("x", encoding="utf-8")
 
@@ -222,3 +230,21 @@ def test_a_legacy_run_without_attribution_belongs_to_the_thesis(app_and_runs):
 
     _post(client, "/projects/select", project_id="tiny-dummy")
     assert client.get("/console/runs/legacy-run").status_code == 404
+
+
+def test_a_run_whose_start_time_is_unreadable_is_an_orphan(app_and_runs):
+    """時間讀不出來就定位不了 —— 一律當孤兒，不得因此歸給碩論。"""
+    client, runs = app_and_runs
+    client.get("/projects")
+
+    broken = runs / "no-time"
+    broken.mkdir(parents=True)
+    (broken / "run.json").write_text(json.dumps({
+        "run_id": "no-time", "kind": "sim", "label": "broken", "params": {},
+        "command": ["x"], "status": "succeeded", "started_at": "t",
+        "finished_at": "t", "exit_code": 0, "note": "",
+    }), encoding="utf-8")
+    (broken / "log.txt").write_text("x", encoding="utf-8")
+
+    _post(client, "/projects/select", project_id="pcmef-thesis")
+    assert client.get("/console/runs/no-time").status_code == 404

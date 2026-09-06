@@ -198,11 +198,20 @@
 <section class="card">
   <h2>E1 關卡
     <span class="hint">
+      {% if scientific_state %}
       {% set counts = gate_summary.counts %}
       通過 {{ counts.get('PASS', 0) }} / 共 {{ gate_summary.gates | length }}
+      {% else %}這個 Project 沒有這份紀錄{% endif %}
     </span>
   </h2>
   <div class="body">
+    {# E1 的十二道 gate 是這個 repo 既有研究的科研狀態。
+       沒有能力的專案顯示它，等於把別人的研究進度掛在
+       自己的標題底下（P1-5）。 #}
+    {% if not scientific_state %}
+    <p><span class="badge warn">不屬於這個 Project</span>
+       這個 Project 沒有自己的 E1 物理校準稽核。畫面不會借用其他 Project 的。</p>
+    {% else %}
     <table>
       <thead><tr><th>Gate</th><th>狀態</th><th>要求</th></tr></thead>
       <tbody>
@@ -215,6 +224,7 @@
       {% endfor %}
       </tbody>
     </table>
+    {% endif %}
   </div>
 </section>
 

@@ -156,21 +156,35 @@ def client(tmp_path, monkeypatch):
 
     started: list[RunSpec] = []
 
-    def fake_start(self, spec):
+    def fake_start(self, spec, *, run_id=None):
         # 攔下來：真的啟動會跑 384 列的實驗。
+        #
+        # 簽章必須含 run_id：啟動一律經 console.launch 的交易，而它會
+        # **先配好 id、先寫歸屬**，再把同一個 id 交給 start()。少了這個
+        # 參數，攔截器會 TypeError，而 launch 把它讀成「啟動失敗」——
+        # 測試於是拿到 409，看起來像端點壞了，其實是替身簽章過期。
         self._assert_not_formal(spec.params, spec.kind)
         started.append(spec)
         from pcmef.console.runner import RunRecord
 
+        run_id = run_id or "test-run"
         return RunRecord(
-            run_id="test-run", kind=spec.kind, label=spec.label,
-            params=dict(spec.params), command=self._command("test-run", spec),
+            run_id=run_id, kind=spec.kind, label=spec.label,
+            params=dict(spec.params), command=self._command(run_id, spec),
         )
 
     monkeypatch.setattr(ConsoleRunner, "start", fake_start)
     app = create_app(
         registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
         console_run_root=tmp_path / "runs",
+        workspace_root=tmp_path / "workspace",
+        environ={
+            # formal 的輸出位置預設是 canonical Final E2 目錄。測試一律
+            # 改掉：pre-flight 會去讀它，而 pointer 會去寫它旁邊。
+            "PCMEF_FORMAL_OUT": str(tmp_path / "formal_out"),
+            "PCMEF_FORMAL_BASE": str(tmp_path / "formal_base"),
+            "PCMEF_FORMAL_DRY_RUN_BASE": str(tmp_path / "dry_run_base"),
+        },
     )
     app.config["TESTING"] = True
     test_client = app.test_client()

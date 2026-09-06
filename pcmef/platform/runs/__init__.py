@@ -24,6 +24,7 @@ from __future__ import annotations
 from pcmef.platform.runs.attribution import (
     ATTRIBUTION_FILENAME,
     BOUNDARY_FILENAME,
+    AttributionBoundaryError,
     AttributionExistsError,
     attribution_boundary,
     is_legacy_run,
@@ -59,6 +60,7 @@ __all__ = [
     "BOUNDARY_FILENAME",
     "attribution_boundary",
     "is_legacy_run",
+    "AttributionBoundaryError",
     "AttributionExistsError",
     "RunAttribution",
     "digest_of",

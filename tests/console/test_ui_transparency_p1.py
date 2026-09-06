@@ -34,6 +34,8 @@ import json
 
 import pytest
 
+from pcmef.console.runner import RunSpec
+
 flask = pytest.importorskip("flask")
 
 CLASS_ORDER = ["Empty", "Water-filled", "Bubbly", "Misty"]
@@ -233,19 +235,39 @@ def test_the_figures_endpoint_reuses_the_shared_renderer():
     assert "prepare_cases" not in source
 
 
-def test_the_figures_endpoint_is_registered_and_guarded():
+def test_the_figures_endpoint_is_registered_and_guarded(tmp_path, start_attributed):
+    """兩層守衛各驗一次，不靠同一個狀態碼證明兩件事。
+
+    歸屬先於 CSRF：不屬於目前 Project 的 run 一律 404，而且**不存在的
+    run 與別人的 run 長得一樣** —— 否則不必有權限也能列舉出跑過什麼。
+    CSRF 則要在一筆確實屬於自己的 run 上驗，這樣它擋下來的才確定是
+    「沒有 token」，不是「沒有這筆 run」。
+    """
     from pcmef.admin.app import create_app
 
-    app = create_app(environ={})
+    app = create_app(
+        registry_path=tmp_path / "r.db", vault_path=tmp_path / "v",
+        console_run_root=tmp_path / "runs",
+        workspace_root=tmp_path / "workspace",
+        environ={},
+    )
     rules = {str(r): r for r in app.url_map.iter_rules()}
     rule = rules["/api/console/runs/<run_id>/figures"]
     assert "POST" in rule.methods
 
     app.config["TESTING"] = True
     client = app.test_client()
-    # 寫入端點必須受 CSRF 保護。
+
+    # 不屬於這個 Project 的 run：404，且與不存在的無從分辨。
     assert client.post(
         "/api/console/runs/whatever/figures", json={}
+    ).status_code == 404
+
+    # 自己的 run，但沒有 token：403。寫入端點必須受 CSRF 保護。
+    record = start_attributed(app, RunSpec(kind="sim_smoke", params={"lines": 1}))
+    app.config["PCMEF_CONSOLE_RUNNER"].wait(record.run_id, timeout=30)
+    assert client.post(
+        f"/api/console/runs/{record.run_id}/figures", json={}
     ).status_code == 403
 
 

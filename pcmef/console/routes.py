@@ -37,12 +37,12 @@ from flask import Blueprint, Response, current_app, jsonify, redirect, request, 
 
 from pcmef.admin.auth import AdminSecurityError, check_csrf
 from pcmef.admin.routes_llm import ADMIN_TOKEN_HEADER, CSRF_FORM_FIELD, CSRF_SESSION_KEY
-from pcmef.console.guards import requires_capability, requires_run_ownership
+from pcmef.console.guards import requires_run_ownership
 from pcmef.console.navigation import breadcrumb, nav_context
 from pcmef.platform.capabilities import (
-    CapabilityError,
     LLM_RUNTIME_FREEZE,
     LLM_SNAPSHOT_READ,
+    RUN_SIMULATION,
 )
 from pcmef.console.results import bar_chart_svg, line_chart_svg, load_results
 from pcmef.console.runner import PRESETS, FormalRunRefused, RunnerError, RunSpec
@@ -52,12 +52,6 @@ from pcmef.console.runner import PRESETS, FormalRunRefused, RunnerError, RunSpec
 from pcmef.agents.cache import DEFAULT_CACHE_ROOT
 
 __all__ = ["blueprint"]
-
-
-def _execution_context():
-    from pcmef.console.guards import execution_context
-
-    return execution_context()
 
 
 def _deny_action(message: str, status: int):
@@ -74,14 +68,16 @@ def _resolve_run_identity():
 
     解析失敗就不啟動。回傳的是一份快照，之後整段執行都用它 ——
     中途再解析一次 session，會讓切換 Profile 改掉已啟動 run 的歸屬。
+
+    身分取自 `launch.action_context()`：context 回退時這裡就要失敗，
+    而不是讓歸屬寫成「回退後那個專案」的（P0-4）。
     """
-    from pcmef.console.project_routes import request_context
-    from pcmef.platform.capabilities import RUN_SIMULATION, require_capability
+    from pcmef.console.launch import action_context
+    from pcmef.platform.capabilities import require_capability
     from pcmef.platform.pipeline import build_definition
     from pcmef.platform.runs import digest_of
 
-    context = request_context()
-    profile = getattr(context.selected, "profile", None)
+    context, profile = action_context()
 
     # 封存的專案不得啟動任何執行。這一條在行程起跑前就要擋（P0-2）。
     require_capability(context.project, RUN_SIMULATION, profile)
@@ -164,14 +160,61 @@ def _require_run_ownership(run_id: str):
         started_at = runner.get(run_id).started_at
     except Exception:  # noqa: BLE001
         pass
-    from pcmef.platform.runs import attribution_boundary
+    from pcmef.platform.runs import AttributionBoundaryError, attribution_boundary
+
+    # 邊界壞掉時傳空字串，而不是補一個時間。空邊界讓 owned_by() 對每一筆
+    # **沒有歸屬**的 run 都回 False —— 有歸屬的仍然照常判定，因為它們
+    # 根本不需要邊界。無法分辨 legacy 與孤兒的時候，一律當孤兒。
+    try:
+        boundary = attribution_boundary(runner.run_root)
+    except AttributionBoundaryError:
+        boundary = ""
 
     return attribution, owned_by(
         attribution, context.project_id,
         legacy_project_id=LEGACY_THESIS_PROJECT_ID,
         started_at=started_at,
-        boundary=attribution_boundary(runner.run_root),
+        boundary=boundary,
     )
+
+
+def _snapshot_definition(attribution):
+    """由歸屬還原這筆 run 啟動當下的流程定義。**完全不問 provider。**
+
+    先前這裡只用 `stage_ids` 還原順序，顯示名稱卻向 `build_definition()`
+    要 —— 那等於用今天的 provider 去解釋昨天的執行：改過的節點文案、
+    Input/Process/Output 說明與 artifact 角色會套到歷史 run 上，而畫面
+    不會說它被改寫過（P1-6）。完整快照已經存在 `pipeline_snapshot`，
+    這裡只要讀它。
+
+    快照讀不出來時回 None，由呼叫端退回「沒有可還原的流程」——
+    **不得改用 live 定義補**，那正是要避免的重新解釋。
+    """
+    from pcmef.platform.pipeline.models import (
+        PipelineDefinition, PipelineDefinitionError, PipelineStage,
+    )
+
+    if attribution is None:
+        return None
+    snapshot = dict(getattr(attribution, "pipeline_snapshot", None) or {})
+    if snapshot:
+        try:
+            return PipelineDefinition.from_json(snapshot)
+        except (PipelineDefinitionError, ValueError, TypeError, KeyError):
+            pass
+    if attribution.stage_ids:
+        # 平台化早期的 run 只留了 stage_ids。用 id 當名稱顯示，
+        # **不向 provider 借文案** —— 借來的文案是今天的。
+        return PipelineDefinition(
+            pipeline_id=attribution.pipeline_id or "snapshot",
+            display_name=attribution.pipeline_id or "啟動當下的流程",
+            note="這筆執行只留下 stage 順序，沒有完整的流程快照。",
+            stages=tuple(
+                PipelineStage(stage_id=sid, display_name=sid)
+                for sid in attribution.stage_ids
+            ),
+        )
+    return None
 
 
 def _stage_progress(run_dir, attribution=None):
@@ -182,27 +225,16 @@ def _stage_progress(run_dir, attribution=None):
     切到 B 之後變成三個 —— 歷史被現在改寫（audit P0-1）。
     """
     try:
-        from pcmef.platform.pipeline import build_definition
-        from pcmef.platform.pipeline.models import PipelineDefinition, PipelineStage
         from pcmef.platform.runs import build_progress, read_events
 
-        if attribution is not None and attribution.stage_ids:
-            # 由快照還原形狀。名稱盡量沿用目前定義（純顯示），
-            # 但 stage 的組成與順序一律以快照為準。
-            live = build_definition(attribution.pipeline_id, None)
-            by_id = {s.stage_id: s for s in live.stages}
-            definition = PipelineDefinition(
-                pipeline_id=attribution.pipeline_id or "snapshot",
-                display_name=live.display_name,
-                stages=tuple(
-                    by_id.get(sid, PipelineStage(stage_id=sid, display_name=sid))
-                    for sid in attribution.stage_ids
-                ),
-            )
-            snapshot = True
-        else:
+        definition = _snapshot_definition(attribution)
+        snapshot = definition is not None
+        if definition is None:
+            # 沒有歸屬的 legacy run。只有這一種情況才問 provider，
+            # 而且畫面會標明這不是啟動當下的定義（snapshot=False）。
+            from pcmef.platform.pipeline import build_definition
+
             definition = build_definition(None, None)
-            snapshot = False
 
         events, skipped = read_events(run_dir)
         if not events:
@@ -637,33 +669,18 @@ def start_run():
     if kind == "surrogate_smoke":
         params["simulation_out"] = str(form.get("simulation_out", "")).strip()
 
-    runner = _runner()
+    # 身分先於行程。**順序由 console.launch 統一決定**，這裡不再自己
+    # 排一次 —— 三個啟動端點各排一次的結果，是其中兩個忘了寫歸屬。
+    from pcmef.console.launch import LaunchRefused, launch_run
 
-    # 身分先於行程。**順序是這裡唯一重要的事。**
-    #
-    # 先前是 start() 之後才補 attribution，而且失敗被吞掉 —— 於是
-    # 「行程已經在跑、但這筆 run 沒有主人」是一個可達狀態，
-    # 而它會在下一次讀取時被誤判成 legacy Thesis 的 run。
-    # 現在解析身分、寫入歸屬、都成功了，才允許 subprocess 起跑。
     try:
-        identity = _resolve_run_identity()
-    except CapabilityError as error:
-        return _deny_action(str(error), 403)
-    except Exception as error:  # noqa: BLE001
-        return _deny_action(f"無法確定這次執行的歸屬：{error}", 409)
+        record = launch_run(
+            _runner(), RunSpec(kind=kind, params=params),
+            capability=RUN_SIMULATION,
+        )
+    except LaunchRefused as error:
+        return _deny_action(str(error), error.status)
 
-    run_id = runner.allocate_run_id()
-    try:
-        _write_attribution(runner.run_dir(run_id), run_id, identity)
-    except Exception as error:  # noqa: BLE001
-        # 連配到的目錄一起收回。留著一個沒有歸屬的空目錄，日後任何
-        # 「沒有 attribution 就當成 legacy」的判斷都會把它算成碩論的。
-        import shutil
-
-        shutil.rmtree(runner.run_dir(run_id), ignore_errors=True)
-        return _deny_action(f"歸屬寫入失敗，未啟動任何行程：{error}", 409)
-
-    record = runner.start(RunSpec(kind=kind, params=params), run_id=run_id)
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201
@@ -755,21 +772,26 @@ def llm_snapshot():
     # 這個端點會啟動一支真的會寫 freeze/llm_runtime.lock.json 的 CLI。
     # 能不能寫由**後端能力**決定，不是由畫面上有沒有那顆按鈕決定：
     # 一個 Blank Project 先前可以直接 POST 進來動到碩論的 lock（P0-5）。
-    from pcmef.platform.capabilities import CapabilityError, require_capability
+    #
+    # 走與其他啟動端點同一個交易：這一筆同樣要留下「是誰、在哪一份
+    # Profile 底下按的凍結」。先前它直接 runner.start()，寫出來的 lock
+    # 事後說不出是哪個 Project 觸發的（P0-1）。
+    from pcmef.console.launch import LaunchRefused, launch_run
 
     needed = LLM_RUNTIME_FREEZE if freeze else LLM_SNAPSHOT_READ
-    context, profile, _caps = _execution_context()
     try:
-        require_capability(context.project, needed, profile)
-    except CapabilityError as error:
-        return _deny_action(str(error), 403)
-    record = _runner().start(
-        RunSpec(
-            kind="llm_snapshot",
-            params={"freeze": freeze},
-            label="凍結 llm_runtime.lock" if freeze else "檢查（不寫入）",
+        record = launch_run(
+            _runner(),
+            RunSpec(
+                kind="llm_snapshot",
+                params={"freeze": freeze},
+                label="凍結 llm_runtime.lock" if freeze else "檢查（不寫入）",
+            ),
+            capability=needed,
         )
-    )
+    except LaunchRefused as error:
+        return _deny_action(str(error), error.status)
+
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201

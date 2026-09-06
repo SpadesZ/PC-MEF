@@ -206,10 +206,6 @@ def start():
     ——它只能決定「按了」（AMD-008）。
     """
     _guard()
-    # **這是啟動一次性正式實驗的端點。** 能力在任何事情發生前先驗。
-    _context, denied = _formal_capability_guard()
-    if denied:
-        return jsonify({"error": denied}), 403
 
     form = request.form if request.form else (request.get_json(silent=True) or {})
     params = {"mode": str(form.get("mode", "dry-run"))}
@@ -217,10 +213,23 @@ def start():
     if confirm:
         params["confirm"] = confirm
 
+    # **這是啟動一次性正式實驗的端點。** 能力、歸屬與回滾全部由
+    # console.launch 這一份交易處理 —— 先前這裡直接 runner.start()，
+    # 於是唯一一次 Formal E2 的執行紀錄沒有任何歸屬（P0-1）。
+    from pcmef.console.launch import LaunchRefused, launch_run
+    from pcmef.platform.capabilities import FORMAL_E2
+
     runner = current_app.config["PCMEF_CONSOLE_RUNNER"]
-    record = runner.start(
-        RunSpec(kind="formal_e2", params=params, label=f"Formal E2 · {params['mode']}")
-    )
+    try:
+        record = launch_run(
+            runner,
+            RunSpec(kind="formal_e2", params=params,
+                    label=f"Formal E2 · {params['mode']}"),
+            capability=FORMAL_E2,
+        )
+    except LaunchRefused as error:
+        return jsonify({"error": str(error)}), error.status
+
     if request.form:
         return redirect(url_for("console.run_page", run_id=record.run_id))
     return jsonify(record.to_json()), 201

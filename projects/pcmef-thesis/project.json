@@ -9,5 +9,11 @@
   "legacy_layout": true,
   "default_profile_id": "thesis-frozen",
   "description": "既有 PC-MEF 碩論研究。科學資料仍位於 repo 根目錄，平台化未搬動任何已凍結的 artifact。",
-  "extra": {}
+  "extra": {
+    "capabilities": [
+      "formal_e2",
+      "llm_runtime_freeze",
+      "scientific_state_read"
+    ]
+  }
 }
