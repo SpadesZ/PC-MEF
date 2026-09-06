@@ -16,6 +16,9 @@
  # 維護提醒:
  #   - **不得在本頁加入編輯表單。** 這一頁描述的是已定稿的研究設計；
  #     研究性變更一律 Clone 成 Development Profile（SAI §23/§24）。
+ #   - **不得在本頁放 Profile 切換器。** 曾經放過，read-only 測試立刻
+ #     失敗。切換 Profile 會讓 Status / Pipeline / Run / Results 全部
+ #     跟著換，那是有後果的動作，集中在 Workspace 頁才追蹤得到。
  #   - 不得隱藏 source 欄。沒有出處的設計敘述無法被稽核。
  #   - 不得把 authoritative 標示拿掉。它是「畫面說的」與
  #     「執行時讀的」之間唯一的對照線索。
@@ -29,9 +32,18 @@
 {% block content %}
 <h1>研究設計 Research Design</h1>
 
+{# 這一頁**完全唯讀**，連 Profile 切換器都不放。切換是有後果的動作
+ # （Status、Pipeline、Run、Results 會全部跟著換），集中在 Workspace 頁，
+ # 與「要啟動什麼一律回 Run」同一個道理。 #}
 {% if not profile %}
 <p class="lede">
+  {% if all_profiles %}
+  這個 Project 有 {{ all_profiles|length }} 份 Research Profile，
+  但<strong>尚未選擇</strong>要看哪一份。
+  請到 <a href="{{ url_for('projects.page') }}">Workspace</a> 選擇。
+  {% else %}
   這個 Project 還沒有任何 Research Profile，因此沒有研究設計可顯示。
+  {% endif %}
 </p>
 <p class="note">
   Profile 是 Project 底下<strong>版本化的研究設定</strong>。

@@ -13,6 +13,7 @@
 #   1. list_projects() / get() 列出與讀取專案
 #   2. create() 以 O_EXCL 建立專案，競態時只有一個成功
 #   3. archive() / unarchive() 切換封存狀態（**不是**科學狀態機）
+#   3b. set_default_profile() 明確宣告預設 Research Profile
 #   4. clone() 依 allowlist 複製設計，**拒絕複製科學結果**
 #   5. ensure_legacy_thesis_project() 冪等地把既有 PC-MEF 登記為第一個專案
 # 維護提醒:
@@ -221,6 +222,18 @@ class ProjectRegistry:
         for field in PROJECT_DATA_DIRS:
             getattr(paths, field).mkdir(parents=True, exist_ok=True)
         return project
+
+    def set_default_profile(
+        self, project_id: str, profile_id: str | None
+    ) -> Project:
+        """宣告這個 Project 預設顯示哪一份 Profile。
+
+        明確 metadata，不是排序副作用 —— 新增一份名稱較前的 Profile
+        不該悄悄改變畫面上顯示的研究設定。
+        """
+        updated = replace(self.get(project_id), default_profile_id=profile_id)
+        self._write_existing(updated)
+        return updated
 
     def archive(self, project_id: str) -> Project:
         updated = replace(self.get(project_id), archived=True)

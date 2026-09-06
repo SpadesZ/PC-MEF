@@ -105,3 +105,34 @@ def test_a_blank_project_says_it_has_no_profile_yet(client):
 
     body = client.get("/projects/design").get_data(as_text=True)
     assert "還沒有任何 Research Profile" in body
+
+
+def test_profile_switching_is_not_offered_on_the_design_page(client):
+    """切換 Profile 會讓 Status / Pipeline / Run / Results 全部跟著換。
+
+    那是有後果的動作，入口集中在 Workspace 頁；唯讀頁上不得出現，
+    否則使用者會在一個「觀察頁」上改掉全站綁定的對象。
+    """
+    body = client.get("/projects/design").get_data(as_text=True)
+    content = body.split('<div class="page">', 1)[-1]
+    assert "select-profile" not in content
+
+
+def test_the_workspace_page_offers_the_profile_switcher(client):
+    """切換入口必須存在且集中 —— 只是不在唯讀頁上。"""
+    body = client.get("/projects").get_data(as_text=True)
+    assert "select-profile" in body
+    assert "thesis-frozen" in body
+
+
+def test_the_design_page_binds_to_the_selected_profile(client):
+    """Research Design 顯示的必須是**選定的**那一份，不是猜的。"""
+    _form(client, "/projects/create", project_id="two-profile-demo",
+          display_name="Two Profile Demo")
+    _form(client, "/projects/select", project_id="two-profile-demo")
+
+    body = client.get("/projects/design").get_data(as_text=True)
+    assert "尚未" in body, (
+        "a project with no declared default profile must say so rather than "
+        "silently showing one"
+    )

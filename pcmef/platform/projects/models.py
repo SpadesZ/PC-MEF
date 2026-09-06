@@ -104,6 +104,11 @@ class Project:
     #: legacy 專案的科學資料不在 projects/<id>/ 底下。
     #: 這個旗標**只由 resolver 設定**，UI 用它顯示「路徑在哪」。
     legacy_layout: bool = False
+    #: 這個 Project 預設要顯示哪一份 Research Profile。
+    #:
+    #: **明確宣告，不是「取第一筆」。** 沒有宣告時畫面說「尚未選擇」，
+    #: 而不是隨便挑一份 —— 隨便挑的那份會被當成這個研究的正式設定。
+    default_profile_id: str | None = None
     description: str = ""
     extra: Mapping[str, Any] = field(default_factory=dict)
 
@@ -117,6 +122,7 @@ class Project:
             "parent_project_id": self.parent_project_id,
             "archived": self.archived,
             "legacy_layout": self.legacy_layout,
+            "default_profile_id": self.default_profile_id,
             "description": self.description,
             "extra": dict(self.extra),
         }
@@ -137,6 +143,7 @@ class Project:
             parent_project_id=data.get("parent_project_id"),
             archived=bool(data.get("archived", False)),
             legacy_layout=bool(data.get("legacy_layout", False)),
+            default_profile_id=data.get("default_profile_id"),
             description=str(data.get("description", "")),
             extra=dict(data.get("extra", {})),
         )

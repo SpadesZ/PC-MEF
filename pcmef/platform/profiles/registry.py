@@ -15,6 +15,7 @@
 #   3. clone() Frozen Profile → 新的 Development Profile
 #   4. read_design() / write_design() 讀寫 Research Design
 #   5. ensure_thesis_profile() 冪等地建立 Frozen Thesis Profile 與其設計
+#   6. default_profile() 回傳**明確宣告**的預設 Profile（不猜）
 # 維護提醒:
 #   - **不得允許原地覆寫 FROZEN Profile 的 Research Design。**
 #     研究性變更一律 Clone 成新的 Development Profile（SAI §23/§24）。
@@ -22,6 +23,8 @@
 #   - 不得用「先檢查再建立」取代 O_EXCL；兩個請求可以同時通過檢查。
 #   - 不得讓 Clone 帶走 run history、frozen evidence 或 one-shot claim。
 #     那些屬於執行，不屬於設計。
+#   - **不得讓 default_profile() 回退成 profiles[0]。** 沒有明確宣告
+#     就是沒有；猜一份出來會被使用者當成這個研究的正式設定。
 #   - v0.1.0 新增：首版，對應平台化 Phase 3。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_profile_registry.py -v
@@ -146,14 +149,26 @@ class ProfileRegistry:
             found, key=lambda p: (not p.is_frozen, p.display_name.lower())
         )
 
-    def active_profile(self, project_id: str) -> Profile | None:
-        """這個 Project 的代表性 Profile。
+    def default_profile(self, project_id: str) -> Profile | None:
+        """這個 Project **明確宣告**的預設 Profile。
 
-        優先 Frozen —— 它是科學身分所在。沒有 Frozen 時取第一個，
-        沒有任何 Profile 時回 None（而不是憑空造一個）。
+        刻意不回退到「排序後第一筆」：那會讓新增一份名稱較前的 Profile
+        悄悄改變畫面上顯示的研究設定，而畫面不會說它變了。
+        沒有宣告就是沒有 —— 由 selection.resolve_profile() 決定怎麼呈現。
         """
-        profiles = self.list_profiles(project_id)
-        return profiles[0] if profiles else None
+        from pcmef.platform.projects.registry import ProjectNotFoundError, ProjectRegistry
+
+        try:
+            project = ProjectRegistry(root=self._root).get(project_id)
+        except (ProjectNotFoundError, ValueError):
+            return None
+        declared = project.default_profile_id
+        if not declared:
+            return None
+        try:
+            return self.get(project_id, declared)
+        except (ProfileNotFoundError, ValueError):
+            return None
 
     # -- 寫 -----------------------------------------------------------------
 
@@ -291,6 +306,10 @@ class ProfileRegistry:
 
         project_id = LEGACY_THESIS_PROJECT_ID
         if self.exists(project_id, THESIS_PROFILE_ID):
+            # 已存在時仍補一次預設宣告：第一次呼叫可能在專案紀錄建立前
+            # 就跑過，那時宣告會失敗。少了這一步，「預設沒設起來」會是
+            # 一個永久且無訊號的狀態。
+            self._declare_default(project_id)
             return self.get(project_id, THESIS_PROFILE_ID)
 
         try:
@@ -316,4 +335,28 @@ class ProfileRegistry:
             json.dumps(THESIS_DESIGN.to_json(), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+        self._declare_default(project_id)
         return profile
+
+    def _declare_default(self, project_id: str) -> None:
+        """把 Thesis Profile 宣告成該 Project 的預設。
+
+        明確宣告，而不是靠「排序後第一筆」—— 日後這個 Project 多出
+        Development Profile 時，畫面顯示的仍是這一份。
+        """
+        from pcmef.platform.projects.registry import (
+            ProjectNotFoundError,
+            ProjectRegistry,
+        )
+
+        registry = ProjectRegistry(root=self._root)
+        try:
+            if registry.get(project_id).default_profile_id == THESIS_PROFILE_ID:
+                return
+            registry.set_default_profile(project_id, THESIS_PROFILE_ID)
+        except (ProjectNotFoundError, ValueError, OSError):
+            # 專案紀錄還沒建立時不阻斷遷移；下一次呼叫會補上。
+            # 刻意不吞掉所有例外 —— 吞掉的話「預設沒被設起來」會變成
+            # 一個沒有任何訊號的狀態。
+            pass

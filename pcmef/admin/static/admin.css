@@ -645,3 +645,12 @@ td .note.mono { margin-left: 6px; }
 /* 出處與可執行真相是標註，不該與內容搶視線。 */
 .design-facts th { width: 20%; }
 .design-facts .fact-source { width: 13%; }
+
+/* Profile 身分。與專案名同列，但字重較輕 —— 它是 Project 底下的一層，
+   不是與 Project 並列的東西。 */
+.workspacebar .current-profile {
+  font-weight: 600; color: var(--muted);
+  max-width: 30vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.profile-switch { display: flex; align-items: center; gap: 6px; margin: 10px 0 0; }
+.profile-switch select { font: inherit; padding: 3px 8px; border: 1px solid var(--line); border-radius: 5px; }

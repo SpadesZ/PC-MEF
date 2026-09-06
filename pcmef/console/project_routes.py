@@ -12,6 +12,7 @@
 #   1. GET  /projects            專案清單與切換器
 #   1b. GET /projects/design     目前專案的 Research Design（唯讀）
 #   2. POST /projects/select     切換目前專案
+#   2b. POST /projects/select-profile  切換目前 Research Profile
 #   3. POST /projects/create     建立新專案
 #   4. POST /projects/<id>/archive  封存專案
 #   5. POST /projects/<id>/clone    Clone 專案（不帶科學結果）
@@ -48,6 +49,7 @@ from pcmef.platform.projects.registry import (
     ProjectNotFoundError,
     ProjectRegistry,
 )
+from pcmef.platform.profiles.registry import ProfileNotFoundError
 from pcmef.platform.projects.resolver import ProjectIdError
 
 __all__ = ["blueprint", "install_project_context", "request_context"]
@@ -84,14 +86,30 @@ def request_context():
     遷移，分成兩個入口會出現「專案在、但研究設計不在」的中間狀態，
     而那個狀態在畫面上看起來像「這個研究還沒有設計」。
     """
+    from dataclasses import replace as _replace
+
     from flask import session
 
+    from pcmef.platform.profiles.selection import resolve_profile
+
     context = current_context(session, registry=_registry())
+    profiles = _profile_registry()
     try:
-        _profile_registry().ensure_thesis_profile()
+        profiles.ensure_thesis_profile()
     except Exception:  # noqa: BLE001 - 遷移失敗不得讓整站 500
         pass
-    return context
+    # 重讀專案紀錄：ensure_thesis_profile() 可能剛剛才宣告 default_profile_id，
+    # 而 context 裡那份是在此之前讀的。用舊的那份解析會得到「尚未選擇」，
+    # 且下一次請求才會自己好起來 —— 那種時好時壞最難查。
+    try:
+        project = _registry().get(context.project_id)
+    except Exception:  # noqa: BLE001
+        project = context.project
+    try:
+        selected = resolve_profile(project, session, registry=profiles)
+    except Exception:  # noqa: BLE001 - 解析失敗顯示「尚未選擇」，不是 500
+        selected = None
+    return _replace(context, project=project, selected=selected)
 
 
 @blueprint.get("/projects")
@@ -105,6 +123,8 @@ def page():
         breadcrumb=breadcrumb(("專案 Projects", None)),
         projects=registry.list_projects(include_archived=True),
         current_project_id=context.project_id,
+        current_profiles=_profile_registry().list_profiles(context.project_id),
+        current_profile_id=context.profile_id,
         paths=context.paths.as_dict(),
     )
 
@@ -118,7 +138,7 @@ def design():
     """
     context = request_context()
     profiles = _profile_registry()
-    active = profiles.active_profile(context.project_id)
+    active = getattr(context.selected, "profile", None)
     research_design = (
         profiles.read_design(context.project_id, active.profile_id)
         if active is not None
@@ -149,6 +169,26 @@ def select():
         # 切換失敗時不改 session。使用者仍留在原專案，
         # 而不是被靜默丟到某個「預設」專案。
         return redirect(url_for("projects.page", error="select"))
+    return redirect(url_for("projects.page"))
+
+
+@blueprint.post("/projects/select-profile")
+def select_profile_route():
+    """明確切換目前 Research Profile。
+
+    集中在這一個 POST 入口：切換 Profile 會讓 Status、Pipeline、Run 與
+    Results 全部跟著換，那是有後果的動作，不該散落在唯讀頁上。
+    """
+    from pcmef.platform.profiles.selection import select_profile
+
+    target = request.form.get("profile_id", "")
+    context = request_context()
+    try:
+        select_profile(
+            session, context.project_id, target, registry=_profile_registry()
+        )
+    except (ProfileNotFoundError, ProjectIdError, ValueError):
+        return redirect(url_for("projects.page", error="profile"))
     return redirect(url_for("projects.page"))
 
 

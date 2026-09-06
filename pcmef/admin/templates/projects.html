@@ -106,6 +106,29 @@
   </tbody>
 </table>
 
+{% if current_profiles %}
+<h2>目前專案的 Research Profile</h2>
+<p class="note">
+  Profile 是這個 Project 底下<strong>版本化的研究設定</strong>。
+  切換 Profile 會同時改變 Status、Pipeline、Run 與 Results 所綁定的對象，
+  因此切換入口集中在這裡，唯讀頁上不提供。
+</p>
+<form method="post" action="{{ url_for('projects.select_profile_route') }}" class="profile-switch">
+  <label for="profile-picker">Research Profile</label>
+  <select id="profile-picker" name="profile_id">
+    {% for item in current_profiles %}
+    <option value="{{ item.profile_id }}" {{ 'selected' if item.profile_id == current_profile_id else '' }}>
+      {{ item.display_name }} · {{ item.version }} · {{ item.state }}
+    </option>
+    {% endfor %}
+  </select>
+  <button type="submit">切換</button>
+  {% if not current_profile_id %}
+  <span class="tag warn">尚未選擇</span>
+  {% endif %}
+</form>
+{% endif %}
+
 <h2>建立新專案</h2>
 <form method="post" action="{{ url_for('projects.create') }}" class="create-project">
   <label>識別碼 <input name="project_id" placeholder="sand-extension" required></label>

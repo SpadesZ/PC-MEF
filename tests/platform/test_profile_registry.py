@@ -99,14 +99,29 @@ def test_frozen_profiles_sort_before_development_ones(workspace):
     assert [p.profile_id for p in workspace.list_profiles("demo-project")][0] == "frozen-one"
 
 
-def test_active_profile_prefers_the_frozen_one(workspace):
+def test_default_profile_is_none_until_it_is_declared(workspace):
+    """有 Profile 不代表有預設。**不得回退成 profiles[0]。**
+
+    猜一份出來會被使用者當成這個研究的正式設定，而新增一份名稱較前的
+    Profile 就會悄悄換掉它。
+    """
     workspace.create("demo-project", "dev-one", "Development v1")
     workspace.create("demo-project", "frozen-one", "Frozen One", state="FROZEN")
-    assert workspace.active_profile("demo-project").profile_id == "frozen-one"
+    assert workspace.default_profile("demo-project") is None
 
 
-def test_active_profile_is_none_when_there_are_no_profiles(workspace):
-    assert workspace.active_profile("demo-project") is None
+def test_default_profile_returns_what_the_project_declared(workspace, tmp_path):
+    from pcmef.platform.projects.registry import ProjectRegistry
+
+    workspace.create("demo-project", "dev-one", "Development v1")
+    workspace.create("demo-project", "frozen-one", "Frozen One", state="FROZEN")
+    ProjectRegistry(root=tmp_path).set_default_profile("demo-project", "dev-one")
+
+    assert workspace.default_profile("demo-project").profile_id == "dev-one"
+
+
+def test_default_profile_is_none_when_there_are_no_profiles(workspace):
+    assert workspace.default_profile("demo-project") is None
 
 
 # ---------------------------------------------------------------------------

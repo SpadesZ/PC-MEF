@@ -61,8 +61,14 @@
      # 任何表單 —— 一個放在骨架裡的 <form> 會同時出現在它們身上。
      # 與「要啟動什麼一律回 Run」同一個道理：要切換專案一律回 Workspace。 #}
     <span class="current-project" title="目前專案">{{ current_project.name }}</span>
-    {% if current_project.state %}
-    <span class="tag">{{ current_project.state }}</span>
+    <span class="sep">›</span>
+    {# Profile 是 Project 底下版本化的研究設定。沒有選定時明說，
+     # 不得顯示某一份看起來像正式設定的東西。 #}
+    {% if profile_selected %}
+    <span class="current-profile" title="目前 Research Profile">{{ current_project.profile }}</span>
+    <span class="tag {{ 'frozen' if current_project.state in ('FROZEN','FORMAL_READY','FORMAL_RUNNING','FORMAL_COMPLETE') else '' }}">{{ current_project.state }}</span>
+    {% else %}
+    <span class="tag warn" title="{{ profile_reason }}">尚未選擇 Research Profile</span>
     {% endif %}
     {% if current_project.legacy %}
     <span class="tag legacy" title="科學資料位於 repo 根目錄，平台化未搬動">legacy layout</span>

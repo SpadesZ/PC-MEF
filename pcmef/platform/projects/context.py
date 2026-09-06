@@ -64,10 +64,18 @@ class ProjectContext:
     paths: ProjectPaths
     fell_back: bool = False
     fallback_reason: str = ""
+    #: 目前選定的 Research Profile。由上層以 dataclasses.replace 填入 ——
+    #: 本模組不認識 ProfileRegistry，也不該認識：Project 的解析
+    #: 不依賴它底下有沒有 Profile。
+    selected: Any = None
 
     @property
     def project_id(self) -> str:
         return self.project.project_id
+
+    @property
+    def profile_id(self) -> str | None:
+        return getattr(self.selected, "profile_id", None)
 
     @property
     def display_name(self) -> str:
@@ -160,20 +168,12 @@ def project_switcher(
     if not any(p.project_id == context.project_id for p in projects):
         projects = [context.project, *projects]
 
-    # 畫面上的狀態是**這個 Project 的代表性 Profile** 的狀態，不是
-    # Project 的 —— Project 是工作空間，它沒有「已凍結」這種性質。
-    state = ""
-    profile_name = ""
-    try:
-        from pcmef.platform.profiles.registry import ProfileRegistry
-
-        active = ProfileRegistry(root=registry.root).active_profile(
-            context.project_id
-        )
-        if active is not None:
-            state, profile_name = active.state, active.display_name
-    except Exception:  # noqa: BLE001 - 版型不得因為讀不到 Profile 而 500
-        state, profile_name = "", ""
+    # 畫面上的狀態是**目前選定的 Profile** 的狀態，不是 Project 的
+    # —— Project 是工作空間，它沒有「已凍結」這種性質。
+    # 沒有選定時兩者皆空，版型會顯示「尚未選擇 Research Profile」。
+    profile = getattr(context.selected, "profile", None)
+    state = getattr(profile, "state", "") or ""
+    profile_name = getattr(profile, "display_name", "") or ""
 
     return {
         "current_project": {
@@ -193,4 +193,7 @@ def project_switcher(
         ],
         "project_fell_back": context.fell_back,
         "project_fallback_reason": context.fallback_reason,
+        "profile_selected": profile is not None,
+        "profile_reason": getattr(context.selected, "reason", ""),
+        "profile_id": getattr(context.selected, "profile_id", None),
     }
