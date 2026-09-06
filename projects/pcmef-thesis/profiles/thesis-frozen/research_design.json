@@ -1,0 +1,694 @@
+{
+  "schema_version": "research_design_v1",
+  "source_document": "PC-MEF_實驗計畫_v1.2.1",
+  "title": "結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識",
+  "sections": [
+    {
+      "key": "objective",
+      "title": "研究目的 Objective",
+      "summary": "建立合成資料與真實 ToF 量測之間的物理可信度，並評估 PC-MEF 在感測品質下降與跨模態分歧條件下的辨識穩健性。",
+      "fields": [
+        {
+          "label": "英文標題",
+          "value": "Intra-Pipe Liquid-State Identification Integrating Physics-Calibrated Simulation and Large Language Model-Assisted Multimodal Fusion",
+          "source": "封面",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "研究對象",
+          "value": "管內液態狀態辨識（四類）",
+          "source": "§1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "前研究",
+          "value": "蔡連興〈管內液態辨識系統之設計與實作〉，提供幾何條件、四類 ToF 分布與偏移量測作為真實資料錨點",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "research_questions",
+      "title": "研究問題 Research Questions",
+      "summary": "兩個可檢驗問題，各自對應一個實驗。",
+      "fields": [
+        {
+          "label": "RQ1",
+          "value": "物理校準後的模擬 ToF 是否更接近真實量測？（E1 物理校準驗證）",
+          "source": "§1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "RQ1 主要指標",
+          "value": "Normalized Wasserstein distance；距離偏移趨勢；95% CI",
+          "source": "§1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "RQ2",
+          "value": "Selective PC-MEF 是否提升困難感測條件下的辨識穩健性？（E2 多模態穩健性）",
+          "source": "§1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "RQ2 主要指標",
+          "value": "Worst-condition Macro-F1；overall / per-condition Macro-F1；paired 95% CI",
+          "source": "§1",
+          "authoritative": "statistics_config",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "modalities",
+      "title": "感測模態 Modalities / Sensors",
+      "summary": "同一合成場景同步產生 RGB 與 ToF 證據，形成可控制的 paired multimodal benchmark。",
+      "fields": [
+        {
+          "label": "ToF 感測器",
+          "value": "VL53L0X（time-of-flight ranging sensor）",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "ToF 通道",
+          "value": "Distance、Signal Rate、Ambient Rate、Sigma-like（四通道，順序固定）",
+          "source": "§3.2",
+          "authoritative": "formal_config",
+          "note": ""
+        },
+        {
+          "label": "ToF recording 形狀",
+          "value": "500 measurement points × 4 channels",
+          "source": "§1.1",
+          "authoritative": "formal_config",
+          "note": ""
+        },
+        {
+          "label": "ToF 取樣率",
+          "value": "約 12.195 Hz",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "影像模態",
+          "value": "一般相機 RGB 影像",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "感測幾何",
+          "value": "sensor-bottle 約 5 cm；瓶徑約 5.7 cm；壁厚約 0.2 cm",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "距離錨點",
+          "value": "Empty 約 100 mm；Water 約 114 mm；Bubbly 約 105–106 mm；Misty 約 55–85 mm",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "偏移錨點",
+          "value": "baseline 約 98.61 mm；±0.1 cm 測試約 91.05 / 88.76 mm",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "class_space",
+      "title": "標籤空間 Class Space",
+      "summary": "四類標籤固定，各比較方法共用相同 class order。",
+      "fields": [
+        {
+          "label": "四類",
+          "value": "Empty、Water-filled、Bubbly、Misty",
+          "source": "§1.1",
+          "authoritative": "formal_config",
+          "note": "class order 固定；各方法共用相同 class order、E2 scenario IDs 與 condition 定義"
+        },
+        {
+          "label": "類別數",
+          "value": 4,
+          "source": "§1.1",
+          "authoritative": "formal_config",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "conditions",
+      "title": "測試條件 Benchmark Conditions",
+      "summary": "四種 benchmark condition，劣化強度由路由驗證集事先選定並固定。",
+      "fields": [
+        {
+          "label": "Clean",
+          "value": "量測名目條件下的基準表現；nominal paired RGB-ToF",
+          "source": "§4.2",
+          "authoritative": "conflict_operational",
+          "note": ""
+        },
+        {
+          "label": "Vision-degraded",
+          "value": "觀察影像品質下降時的路由與融合行為；defocus / visual degradation",
+          "source": "§4.2",
+          "authoritative": "conflict_operational",
+          "note": ""
+        },
+        {
+          "label": "ToF-degraded",
+          "value": "觀察 ToF 品質下降時的路由與融合行為；signal attenuation / ambient interference",
+          "source": "§4.2",
+          "authoritative": "conflict_operational",
+          "note": ""
+        },
+        {
+          "label": "Conflict-Stress",
+          "value": "增加兩模態產生分歧的案例比例；modality-specific perturbation combination",
+          "source": "§4.2",
+          "authoritative": "conflict_operational",
+          "note": ""
+        },
+        {
+          "label": "劣化強度",
+          "value": "由路由驗證集事先選定並固定（frozen severity）",
+          "source": "§4.2",
+          "authoritative": "conflict_operational",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "data_roles",
+      "title": "資料角色 Data Roles",
+      "summary": "研究資料依物理場景群組分離；感知模型訓練、路由驗證、開發期測試與 Final E2 各自使用獨立的 scene-family 範圍。",
+      "fields": [
+        {
+          "label": "真實資料",
+          "value": "前研究 ToF：四類各 140 筆 recording；影像：四類各 300 張，共 1,200 張",
+          "source": "§2.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "模擬器",
+          "value": "Mitsuba 3 + mitransient；transient light transport 與 volumetric transient path tracing",
+          "source": "§3.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "模擬時間尺度",
+          "value": "optical time 描述單次 acquisition 內的光傳播；measurement time 描述連續 acquisition 形成的量測時間軸",
+          "source": "§3.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "合成資料角色",
+          "value": "同一物理場景同步生成 RGB 與 ToF 證據，形成 paired multimodal benchmark",
+          "source": "§2.2",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "資料分離原則",
+          "value": "感知模型訓練、路由驗證、開發期測試與 Final E2 各自使用獨立的 scene-family 範圍",
+          "source": "§5.1",
+          "authoritative": "validation_pool",
+          "note": "family-disjoint；Final E2 使用保留場景組形成一次性 benchmark"
+        }
+      ]
+    },
+    {
+      "key": "experiments",
+      "title": "實驗設計 Experiments",
+      "summary": "兩項核心實驗形成驗證鏈：E1 物理保真度，E2 穩健性。",
+      "fields": [
+        {
+          "label": "E1 角色",
+          "value": "物理校準驗證：比較初始物理模擬與校準後模擬到保留真實 ToF 的距離",
+          "source": "§4.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "E1 實驗單位",
+          "value": "one real 500×4 recording / one matched synthetic recording",
+          "source": "§4.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "E1 比較",
+          "value": "Wasserstein(initial, real) vs. Wasserstein(calibrated, real)",
+          "source": "§4.1",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "E2 角色",
+          "value": "多模態穩健性驗證：四種條件下比較單模態、固定融合、可靠度路由與 Full PC-MEF",
+          "source": "§4.2",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "E2 場景設計",
+          "value": "family-disjoint physical scene families；每類 24 base scenarios，共 96 base scenarios",
+          "source": "§4.2",
+          "authoritative": "e2_sample_size",
+          "note": ""
+        },
+        {
+          "label": "E2 案例數",
+          "value": "96 base scenarios × 4 conditions = 384 cases",
+          "source": "§4.2",
+          "authoritative": "e2_sample_size",
+          "note": ""
+        },
+        {
+          "label": "E2 realization",
+          "value": "每個 family 具有 3 個 realization",
+          "source": "§1.1",
+          "authoritative": "e2_sample_size",
+          "note": ""
+        },
+        {
+          "label": "比較組別",
+          "value": "G1 Vision-only、G2 ToF-only、G3 Fixed Fusion、G4 Reliability Routing、G5 Full PC-MEF",
+          "source": "§4.2",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "Operational Conflict 子群",
+          "value": "兩模態 top-1 類別差異或 D ≥ δ",
+          "source": "§4.2",
+          "authoritative": "conflict_operational",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "calibration",
+      "title": "物理校準 Calibration",
+      "summary": "以 calibration real data 定義 feature scale，再比較初始與校準後模擬到保留真實資料的距離。",
+      "fields": [
+        {
+          "label": "真實資料切分",
+          "value": "70% calibration / 30% 保留真實資料；class-stratified；seed 固定",
+          "source": "§3.2",
+          "authoritative": "real_split_policy",
+          "note": ""
+        },
+        {
+          "label": "樣本數",
+          "value": "四類各 140 筆均通過資料檢核時：calibration 392、保留真實資料 168",
+          "source": "§3.2",
+          "authoritative": "real_split_policy",
+          "note": ""
+        },
+        {
+          "label": "Distance 映射",
+          "value": "transient peak / energy-center 對應飛行時間，再加入 geometry offset",
+          "source": "§3.2",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "Signal Rate 映射",
+          "value": "主要回波時間窗積分能量的尺度映射",
+          "source": "§3.2",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "Ambient Rate 映射",
+          "value": "背景光與背景時間窗能量映射",
+          "source": "§3.2",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "Sigma-like 映射",
+          "value": "peak width、SNR、multipath spread 組合後尺度",
+          "source": "§3.2",
+          "authoritative": null,
+          "note": "前研究以 Sigma 作為 ToF 第四項量測特徵；合成資料以 Sigma-like 表示量測散離程度的代理量"
+        },
+        {
+          "label": "主要指標",
+          "value": "Normalized Wasserstein distance，依 feature × class 計算；以 calibration-only pooled IQR 正規化",
+          "source": "§3.2",
+          "authoritative": "metric_config",
+          "note": ""
+        },
+        {
+          "label": "E1 判定",
+          "value": "校準後相較 initial simulation 呈現整體接近度改善，並維持各 feature/class 與距離擾動趨勢的一致性",
+          "source": "§3.2",
+          "authoritative": "e1_scientific_rule",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "perception",
+      "title": "感知模型 Perception",
+      "summary": "兩個輕量感知模型，皆輸出四類完整分布。",
+      "fields": [
+        {
+          "label": "Vision 模型",
+          "value": "三層卷積 small CNN",
+          "source": "§3.3",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "ToF 模型",
+          "value": "沿 measurement-time 軸運算的 1D CNN",
+          "source": "§3.3",
+          "authoritative": null,
+          "note": ""
+        },
+        {
+          "label": "輸出",
+          "value": "Empty / Water-filled / Bubbly / Misty 四類完整分布",
+          "source": "§3.3",
+          "authoritative": "formal_config",
+          "note": ""
+        },
+        {
+          "label": "機率校準",
+          "value": "以乾淨路由驗證集進行 temperature scaling：p_m(y|x) = softmax(z_m / T_m)",
+          "source": "§3.3 式(1)",
+          "authoritative": "perception_condition_policy",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "reliability",
+      "title": "感測可靠度 Reliability",
+      "summary": "同時使用「感測品質」與「模型分布差異」兩類資訊。",
+      "fields": [
+        {
+          "label": "Q_V 影像品質",
+          "value": "影像 Laplacian 高頻能量，以平均亮度尺度正規化後取 log",
+          "source": "§3.3",
+          "authoritative": "reliability_final",
+          "note": ""
+        },
+        {
+          "label": "Q_T ToF 品質",
+          "value": "log(1 + max(median Signal, 0) / max(median Ambient, ε))",
+          "source": "§3.3",
+          "authoritative": "reliability_final",
+          "note": ""
+        },
+        {
+          "label": "D 跨模態分歧",
+          "value": "Vision 與 ToF 四類機率分布的 Total Variation distance：D(p_V,p_T) = ½ Σ|p_V(c) − p_T(c)|",
+          "source": "§3.3 式(2)",
+          "authoritative": "reliability_final",
+          "note": "D 範圍 0–1；越接近 0 表示兩模態分布越接近"
+        },
+        {
+          "label": "可靠度分數",
+          "value": "q_m = σ((Q_m − a_m) / b_m) · (1 − D/2)",
+          "source": "§3.4 式(3)",
+          "authoritative": "reliability_final",
+          "note": ""
+        },
+        {
+          "label": "a_m",
+          "value": "乾淨路由驗證集品質分布的第 5 百分位",
+          "source": "§3.4",
+          "authoritative": "reliability_final",
+          "note": ""
+        },
+        {
+          "label": "b_m",
+          "value": "同一分布的四分位距（IQR）",
+          "source": "§3.4",
+          "authoritative": "reliability_final",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "routing",
+      "title": "選擇性路由 Selective Routing",
+      "summary": "依可靠度與跨模態分歧選擇傳統決策路徑或進入證據仲裁。",
+      "fields": [
+        {
+          "label": "路由門檻",
+          "value": "固定為 0.5",
+          "source": "§3.4",
+          "authoritative": "gate",
+          "note": ""
+        },
+        {
+          "label": "Trust Vision",
+          "value": "q_v ≥ 0.5 且 q_t < 0.5 → p_v",
+          "source": "§3.4",
+          "authoritative": "gate",
+          "note": ""
+        },
+        {
+          "label": "Trust ToF",
+          "value": "q_t ≥ 0.5 且 q_v < 0.5 → p_t",
+          "source": "§3.4",
+          "authoritative": "gate",
+          "note": ""
+        },
+        {
+          "label": "Fixed Fusion",
+          "value": "q_v ≥ 0.5、q_t ≥ 0.5，且 D ≤ δ → p_fixed",
+          "source": "§3.4",
+          "authoritative": "gate",
+          "note": ""
+        },
+        {
+          "label": "Agent Arbitration",
+          "value": "雙側品質偏弱，或雙側可靠且 D > δ → s_A",
+          "source": "§3.4",
+          "authoritative": "gate",
+          "note": ""
+        },
+        {
+          "label": "固定融合式",
+          "value": "p_fixed = 0.5 p_V + 0.5 p_T",
+          "source": "§3.4 式(4)",
+          "authoritative": "gate",
+          "note": ""
+        },
+        {
+          "label": "最終決策",
+          "value": "F(x) = p_{r(x)}(x) 若 r(x) ∈ R_trad；F(x) = s_A(x) 若 r(x) = A；R_trad = {V, T, F}",
+          "source": "§3.5 式(6)",
+          "authoritative": "gate",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "agents",
+      "title": "Multi-Agent 證據整合 Agents",
+      "summary": "四個角色依序完成「觀察摘要 → 兩個模態專家 → 證據仲裁」，僅處理 reliability routing 選出的困難案例。",
+      "fields": [
+        {
+          "label": "觀察角色 Observation",
+          "value": "輸入 RGB、ToF per-channel summary、原始感測品質 Q；輸出中性觀察摘要 Observation Brief",
+          "source": "§3.5",
+          "authoritative": "agent_schema",
+          "note": ""
+        },
+        {
+          "label": "物理角色 Physics",
+          "value": "輸入 Observation Brief、ToF 分布 p_t、q_t、Q_t 與 ToF 時序摘要；輸出 ToF / physics proposal",
+          "source": "§3.5",
+          "authoritative": "agent_schema",
+          "note": ""
+        },
+        {
+          "label": "視覺語意角色 Visual-Semantic",
+          "value": "輸入 Observation Brief、RGB、Vision 分布 p_v、q_v、Q_v；輸出 RGB / visual-semantic proposal",
+          "source": "§3.5",
+          "authoritative": "agent_schema",
+          "note": ""
+        },
+        {
+          "label": "仲裁角色 Arbitration",
+          "value": "輸入 Observation Brief、兩份 proposal、p_v/p_t、q_v/q_t、D 與模型輸出猶豫度；輸出四類 raw class support a_A",
+          "source": "§3.5",
+          "authoritative": "agent_schema",
+          "note": ""
+        },
+        {
+          "label": "ToF 摘要內容",
+          "value": "四通道各自的 mean、std、median、p10、p90 與 temporal-difference std，加上 signal-to-ambient ratio 與 valid sample ratio；每通道保留原本的物理單位與語意",
+          "source": "§3.5",
+          "authoritative": "agent_schema",
+          "note": ""
+        },
+        {
+          "label": "支持度正規化",
+          "value": "s_A(c) = (a_A(c) + ε_s) / Σ_j (a_A(j) + ε_s)，僅當 Σ a_A(j) > 0 時進入正規化",
+          "source": "§3.5 式(5)",
+          "authoritative": "agent_schema",
+          "note": "總和為 0 代表仲裁輸出缺乏有效證據，系統重新取得仲裁結果"
+        },
+        {
+          "label": "證據隔離",
+          "value": "各角色只收到自己該收到的證據；inference 端不得看到 ground truth",
+          "source": "§3.5",
+          "authoritative": "inference_firewall",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "primary_endpoint",
+      "title": "主要判準 Primary Endpoint",
+      "summary": "以最弱條件下的 Macro-F1 作為主要穩健性指標。",
+      "fields": [
+        {
+          "label": "Primary endpoint",
+          "value": "Worst-condition Macro-F1（四條件中最低的 Macro-F1）",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "次要指標",
+          "value": "整體 Accuracy / Macro-F1；分條件 Macro-F1",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "Escalation Rate",
+          "value": "進入 Multi-Agent arbitration 的案例比例",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "配對效果",
+          "value": "Full PC-MEF 相對 G1–G4 的 paired performance difference：Paired Effect Δ + 95% CI",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "錯誤結構",
+          "value": "Confusion Matrix / 各類召回率",
+          "source": "§5",
+          "authoritative": null,
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "statistics",
+      "title": "統計 Statistics",
+      "summary": "以物理場景群組為叢集單位的配對 bootstrap。",
+      "fields": [
+        {
+          "label": "重抽樣單位",
+          "value": "physical scene family（叢集）",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "分層",
+          "value": "依類別分層",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "叢集內容",
+          "value": "每次抽到一個場景群組時，同時帶入該群組的 3 個 realization × 4 種測試條件",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "配對比較",
+          "value": "各方法在同一次重抽樣使用相同場景群組，形成配對比較",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "重抽樣次數",
+          "value": "固定 10,000 次",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "信賴區間",
+          "value": "95% CI",
+          "source": "§5",
+          "authoritative": "statistics_config",
+          "note": ""
+        },
+        {
+          "label": "E1 bootstrap",
+          "value": "10,000 replicates；95% CI；matched evaluation",
+          "source": "§3.2",
+          "authoritative": "statistics_config",
+          "note": ""
+        }
+      ]
+    },
+    {
+      "key": "claim_boundary",
+      "title": "結論範圍 Claim Boundary",
+      "summary": "本研究可主張與不可主張的範圍。",
+      "fields": [
+        {
+          "label": "E1 結論範圍",
+          "value": "VL53L0X-like ToF sensor-surrogate fidelity",
+          "source": "§4.1",
+          "authoritative": "claim_boundary",
+          "note": ""
+        },
+        {
+          "label": "RGB 的角色",
+          "value": "RGB 在 E2 中作為與 ToF 同場景同步生成的視覺證據；E1 的結論範圍不涵蓋 RGB",
+          "source": "§2.2",
+          "authoritative": "claim_boundary",
+          "note": ""
+        },
+        {
+          "label": "Final E2 性質",
+          "value": "使用保留場景組形成一次性 benchmark",
+          "source": "§5.1",
+          "authoritative": "e2_sample_size",
+          "note": "families 36–43 為保留分割，未生成前不得讀取或預覽"
+        }
+      ]
+    }
+  ],
+  "extra": {}
+}

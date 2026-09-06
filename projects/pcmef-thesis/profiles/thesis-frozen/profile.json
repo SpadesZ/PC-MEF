@@ -1,0 +1,13 @@
+{
+  "schema_version": "research_profile_v1",
+  "profile_id": "thesis-frozen",
+  "project_id": "pcmef-thesis",
+  "display_name": "Frozen Thesis Profile",
+  "version": "v1.2.1",
+  "state": "FROZEN",
+  "created_at": "2026-09-06T12:22:15+08:00",
+  "parent_profile_id": null,
+  "source_document": "PC-MEF_實驗計畫_v1.2.1",
+  "description": "結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識",
+  "extra": {}
+}

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from pcmef.platform.projects.models import PROJECT_STATES, Project
+from pcmef.platform.projects.models import Project
 from pcmef.platform.projects.resolver import (
     LEGACY_THESIS_PROJECT_ID,
     ProjectIdError,
@@ -218,9 +218,16 @@ def test_no_module_branches_on_the_legacy_project_id():
 # ---------------------------------------------------------------------------
 
 
-def test_project_rejects_an_unknown_state():
-    with pytest.raises(ValueError, match="unknown project state"):
-        Project(project_id="p1", display_name="P1", template="blank", state="NOPE")
+def test_project_carries_no_scientific_state_machine():
+    """狀態屬於 Profile，不屬於 Project。
+
+    曾經有過一版把 SAI §4.1 的十個狀態放在 Project 上，那會讓
+    「這個專案已凍結」與「這個專案還有 Development Profile」
+    同時為真而互相矛盾。
+    """
+    assert not hasattr(
+        Project(project_id="p1", display_name="P1", template="blank"), "state"
+    )
 
 
 def test_project_survives_a_json_round_trip():
@@ -228,7 +235,6 @@ def test_project_survives_a_json_round_trip():
         project_id="sand-extension",
         display_name="Sand Extension",
         template="blank-multimodal",
-        state="CONFIGURED",
         created_at="2026-09-06T14:00:00+08:00",
         parent_project_id="pcmef-thesis",
         description="granular medium",
@@ -241,8 +247,10 @@ def test_project_refuses_an_unknown_schema_version():
         Project.from_json({"schema_version": "project_v0", "project_id": "p1"})
 
 
-def test_project_states_follow_the_sai_state_machine():
-    """狀態機順序是 SAI v0.6.0 §4.1 的，不得任意重排。"""
-    assert PROJECT_STATES[0] == "DRAFT"
-    assert PROJECT_STATES.index("FROZEN") < PROJECT_STATES.index("FORMAL_READY")
-    assert "RUN_INHIBITED" in PROJECT_STATES
+def test_the_sai_state_machine_lives_on_the_profile():
+    """SAI v0.6.0 §4.1 的狀態機屬於 Profile，順序不得任意重排。"""
+    from pcmef.platform.profiles.models import PROFILE_STATES
+
+    assert PROFILE_STATES[0] == "DRAFT"
+    assert PROFILE_STATES.index("FROZEN") < PROFILE_STATES.index("FORMAL_READY")
+    assert "RUN_INHIBITED" in PROFILE_STATES

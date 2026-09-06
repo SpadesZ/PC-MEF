@@ -1,0 +1,125 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 console.project_routes.design 渲染；extends _layout.html。
+ #         **完全唯讀，不含任何表單。**
+ # 檔案路徑: pcmef/admin/templates/research_design.html
+ # 產生時間: 2026-09-06 21:40 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 目前 Project 之代表性 Research Profile 的研究設計，
+ #           逐節顯示並標出計畫書出處與可執行真相所在。
+ # 模組定位: 平台化 Phase 3。第一次使用者應在這一頁回答
+ #           「這個 Project 研究什麼、用哪些感測器、判準是什麼」。
+ # 主要責任:
+ #   1. 顯示 Profile 身分（版本、狀態、來源文件）
+ #   2. 逐節顯示 Research Design 的欄位、值與出處
+ #   3. 標出哪些欄位另有可執行真相（freeze/ 的 lock）
+ #   4. 列出同一 Project 底下的其他 Profile
+ # 維護提醒:
+ #   - **不得在本頁加入編輯表單。** 這一頁描述的是已定稿的研究設計；
+ #     研究性變更一律 Clone 成 Development Profile（SAI §23/§24）。
+ #   - 不得隱藏 source 欄。沒有出處的設計敘述無法被稽核。
+ #   - 不得把 authoritative 標示拿掉。它是「畫面說的」與
+ #     「執行時讀的」之間唯一的對照線索。
+ #   - v0.1.0 新增：首版，對應平台化 Phase 3。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_research_design_page.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% block title %}研究設計 Research Design{% endblock %}
+
+{% block content %}
+<h1>研究設計 Research Design</h1>
+
+{% if not profile %}
+<p class="lede">
+  這個 Project 還沒有任何 Research Profile，因此沒有研究設計可顯示。
+</p>
+<p class="note">
+  Profile 是 Project 底下<strong>版本化的研究設定</strong>。
+  一個 Project 可以同時有多個 Development Profile 與一份 Frozen Profile。
+</p>
+{% else %}
+
+<section class="profile-identity">
+  <h2>{{ profile.display_name }}</h2>
+  <dl class="identity-grid">
+    <dt>Profile</dt><dd class="mono">{{ profile.profile_id }}</dd>
+    <dt>版本 Version</dt><dd class="mono">{{ profile.version }}</dd>
+    <dt>狀態 State</dt>
+    <dd>
+      <span class="tag {{ 'frozen' if profile.is_frozen else '' }}">{{ profile.state }}</span>
+      {% if profile.is_frozen %}
+      <span class="muted small">已建立 immutable scientific identity，不得原地修改；
+        研究性變更需 Clone 成 Development Profile。</span>
+      {% endif %}
+    </dd>
+    <dt>來源文件 Source</dt><dd class="mono">{{ profile.source_document or '—' }}</dd>
+    {% if profile.parent_profile_id %}
+    <dt>Clone 自</dt><dd class="mono">{{ profile.parent_profile_id }}</dd>
+    {% endif %}
+  </dl>
+</section>
+
+{% if not design %}
+<p class="note">這個 Profile 尚未寫入 Research Design。</p>
+{% else %}
+
+<p class="lede">{{ design.title }}</p>
+<p class="note">
+  以下內容逐節對應 <strong>{{ design.source_document }}</strong>。
+  「出處」是計畫書章節；「可執行真相」是實際被執行時讀取的 lock ——
+  兩者刻意分開，因為畫面上的敘述不是執行來源，
+  <strong>門檻與 class order 的真相在 freeze/ 的 lock</strong>。
+</p>
+
+{% for section in sections %}
+<section class="design-section">
+  <h2>{{ section.title }}</h2>
+  {% if section.summary %}<p class="note">{{ section.summary }}</p>{% endif %}
+  <table class="facts design-facts">
+    <thead>
+      <tr><th>項目</th><th>內容</th><th>出處</th><th>可執行真相</th></tr>
+    </thead>
+    <tbody>
+      {% for field in section.fields %}
+      <tr>
+        <th>{{ field.label }}</th>
+        <td>
+          <span class="mono">{{ field.value }}</span>
+          {% if field.note %}<span class="note">{{ field.note }}</span>{% endif %}
+        </td>
+        <td class="fact-source">{{ field.source }}</td>
+        <td class="fact-source">
+          {% if field.authoritative %}
+          <span class="mono" title="執行時實際讀取的 lock">{{ field.authoritative }}.lock</span>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+{% endif %}
+
+{% if all_profiles|length > 1 %}
+<section class="design-section">
+  <h2>此 Project 底下的其他 Profile</h2>
+  <table class="facts">
+    <thead><tr><th>Profile</th><th>版本</th><th>狀態</th></tr></thead>
+    <tbody>
+      {% for item in all_profiles %}
+      <tr>
+        <th>{{ item.display_name }}<div class="muted mono small">{{ item.profile_id }}</div></th>
+        <td class="mono">{{ item.version }}</td>
+        <td><span class="tag {{ 'frozen' if item.is_frozen else '' }}">{{ item.state }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% endif %}
+{% endblock %}

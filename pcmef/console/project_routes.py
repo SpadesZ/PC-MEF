@@ -10,6 +10,7 @@
 #           因此它不進導航列，而是由版型頂端的切換器呈現。
 # 主要責任:
 #   1. GET  /projects            專案清單與切換器
+#   1b. GET /projects/design     目前專案的 Research Design（唯讀）
 #   2. POST /projects/select     切換目前專案
 #   3. POST /projects/create     建立新專案
 #   4. POST /projects/<id>/archive  封存專案
@@ -65,15 +66,32 @@ def _registry() -> ProjectRegistry:
     return ProjectRegistry(root=current_app.config.get("PCMEF_WORKSPACE_ROOT"))
 
 
+def _profile_registry():
+    from flask import current_app
+
+    from pcmef.platform.profiles.registry import ProfileRegistry
+
+    return ProfileRegistry(root=current_app.config.get("PCMEF_WORKSPACE_ROOT"))
+
+
 def request_context():
     """目前 request 的 project context。
 
     所有 route 一律經由這裡取得目前專案 —— 各自 new 一個 ProjectRegistry()
     會繞過 app 設定的 workspace root。
+
+    順手把 Thesis 的 Frozen Profile 補上：它與 legacy 專案的登記是同一件
+    遷移，分成兩個入口會出現「專案在、但研究設計不在」的中間狀態，
+    而那個狀態在畫面上看起來像「這個研究還沒有設計」。
     """
     from flask import session
 
-    return current_context(session, registry=_registry())
+    context = current_context(session, registry=_registry())
+    try:
+        _profile_registry().ensure_thesis_profile()
+    except Exception:  # noqa: BLE001 - 遷移失敗不得讓整站 500
+        pass
+    return context
 
 
 @blueprint.get("/projects")
@@ -88,6 +106,34 @@ def page():
         projects=registry.list_projects(include_archived=True),
         current_project_id=context.project_id,
         paths=context.paths.as_dict(),
+    )
+
+
+@blueprint.get("/projects/design")
+def design():
+    """目前專案的 Research Design（唯讀）。
+
+    內容出自該 Profile 的 research_design.json，其來源是實驗計畫書；
+    畫面上每一欄都標出處，並在有對應 lock 時標出「可執行真相在哪」。
+    """
+    context = request_context()
+    profiles = _profile_registry()
+    active = profiles.active_profile(context.project_id)
+    research_design = (
+        profiles.read_design(context.project_id, active.profile_id)
+        if active is not None
+        else None
+    )
+    return render_template(
+        "research_design.html",
+        **nav_context("status"),
+        breadcrumb=breadcrumb(
+            ("研究設計 Research Design", None), project_name=context.display_name
+        ),
+        profile=active,
+        all_profiles=profiles.list_profiles(context.project_id),
+        design=research_design,
+        sections=research_design.ordered_sections() if research_design else [],
     )
 
 

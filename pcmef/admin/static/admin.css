@@ -629,3 +629,19 @@ td .note.mono { margin-left: 6px; }
   margin-top: 10px;
 }
 .create-project label { display: flex; flex-direction: column; font-size: 13px; gap: 3px; }
+
+/* ---------- Research Design ---------- */
+/* Frozen 與 Development 必須一眼分得出來（SAI §40）。 */
+.tag.frozen { border-color: var(--accent); color: #fff; background: var(--accent); }
+.profile-identity { margin: 14px 0 20px; }
+.identity-grid {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: 6px 16px; margin: 8px 0 0; font-size: 13px;
+}
+.identity-grid dt { color: var(--muted); font-weight: 600; }
+.identity-grid dd { margin: 0; }
+.design-section { margin-top: 22px; }
+.design-section h2 { font-size: 15px; margin-bottom: 4px; }
+/* 出處與可執行真相是標註，不該與內容搶視線。 */
+.design-facts th { width: 20%; }
+.design-facts .fact-source { width: 13%; }

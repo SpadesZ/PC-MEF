@@ -30,6 +30,11 @@
   每一個專案有自己的設定、資料、執行紀錄與結果。
   切換專案會同時切換 Status、Pipeline、Results 所看到的內容。
 </p>
+<p class="note">
+  專案的<strong>狀態</strong>不在這一層：狀態屬於專案底下版本化的
+  Research Profile。目前專案的設計與狀態見
+  <a href="{{ url_for('projects.design') }}">研究設計 Research Design</a>。
+</p>
 
 {% if request.args.get('error') %}
 <p class="error" role="alert">
@@ -41,7 +46,7 @@
 <table class="projects">
   <thead>
     <tr>
-      <th>專案</th><th>狀態</th><th>模板</th><th>資料位置</th><th>操作</th>
+      <th>專案</th><th>模板</th><th>資料位置</th><th>操作</th>
     </tr>
   </thead>
   <tbody>
@@ -58,7 +63,6 @@
         <div class="muted">clone 自 {{ project.parent_project_id }}</div>
         {% endif %}
       </td>
-      <td>{{ project.state }}</td>
       <td class="mono">{{ project.template }}</td>
       <td class="mono small">
         {% if project.project_id == current_project_id %}
@@ -97,7 +101,7 @@
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="5" class="muted">尚無專案。</td></tr>
+    <tr><td colspan="4" class="muted">尚無專案。</td></tr>
   {% endfor %}
   </tbody>
 </table>

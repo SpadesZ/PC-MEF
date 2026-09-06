@@ -53,7 +53,6 @@ def test_create_writes_a_record_and_prepares_the_data_directories(registry, tmp_
     project = registry.create("sand-extension", "Sand Extension")
 
     assert project.project_id == "sand-extension"
-    assert project.state == "DRAFT"
     assert project.created_at, "created_at must be stamped"
 
     paths = resolve_paths("sand-extension", root=tmp_path)
@@ -118,12 +117,6 @@ def test_archive_and_unarchive_round_trip(registry):
     assert registry.unarchive("toggle-me").archived is False
 
 
-def test_set_state_rejects_an_unknown_state(registry):
-    registry.create("state-me", "State")
-    with pytest.raises(ValueError, match="unknown project state"):
-        registry.set_state("state-me", "NOT_A_STATE")
-
-
 # ---------------------------------------------------------------------------
 # Clone —— 本節是 Phase 7 最重要的不變量
 # ---------------------------------------------------------------------------
@@ -177,15 +170,10 @@ def test_clone_never_copies_scientific_data(registry, tmp_path):
         )
 
 
-def test_clone_resets_state_to_draft(registry):
+def test_clone_records_its_parent(registry):
+    """Clone 的科學狀態重設在 Profile 層（見 test_profile_registry）。"""
     registry.create("frozen-source", "Frozen Source")
-    registry.set_state("frozen-source", "FROZEN")
-
     clone = registry.clone("frozen-source", "fresh-clone", "Fresh Clone")
-    assert clone.state == "DRAFT", (
-        "a clone has no locks of its own; inheriting FROZEN would let an empty "
-        "project claim a scientific identity it never established"
-    )
     assert clone.parent_project_id == "frozen-source"
 
 
@@ -220,9 +208,9 @@ def test_legacy_migration_is_idempotent(registry):
 
 
 def test_legacy_migration_does_not_invent_a_scientific_state(registry):
-    """科學進度由 freeze/ 的 lock 與 final_gate 推導，不寫死在 metadata。"""
+    """科學進度由 freeze/ 的 lock 與 final_gate 推導，不寫死在 Project。"""
     project = registry.ensure_legacy_thesis_project()
-    assert project.state == "DRAFT", (
-        "migration must not assert FROZEN/FORMAL_READY; that would create a "
-        "second source of truth for scientific progress which will drift"
+    assert not hasattr(project, "state"), (
+        "a Project must not carry a scientific state machine; that belongs to "
+        "its Research Profiles"
     )

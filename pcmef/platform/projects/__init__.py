@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from pcmef.platform.projects.models import (
     PROJECT_SCHEMA_VERSION,
-    PROJECT_STATES,
     Project,
     ProjectPaths,
 )
@@ -42,7 +41,6 @@ __all__ = [
     "LEGACY_THESIS_PROJECT_ID",
     "PROJECTS_DIRNAME",
     "PROJECT_SCHEMA_VERSION",
-    "PROJECT_STATES",
     "Project",
     "ProjectIdError",
     "ProjectPaths",

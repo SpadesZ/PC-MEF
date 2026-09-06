@@ -12,7 +12,7 @@
 # 主要責任:
 #   1. list_projects() / get() 列出與讀取專案
 #   2. create() 以 O_EXCL 建立專案，競態時只有一個成功
-#   3. archive() / unarchive() 切換封存狀態
+#   3. archive() / unarchive() 切換封存狀態（**不是**科學狀態機）
 #   4. clone() 依 allowlist 複製設計，**拒絕複製科學結果**
 #   5. ensure_legacy_thesis_project() 冪等地把既有 PC-MEF 登記為第一個專案
 # 維護提醒:
@@ -201,7 +201,6 @@ class ProjectRegistry:
         *,
         template: str = "blank",
         description: str = "",
-        state: str = "DRAFT",
         parent_project_id: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> Project:
@@ -211,7 +210,6 @@ class ProjectRegistry:
             project_id=project_id,
             display_name=display_name or project_id,
             template=template,
-            state=state,
             created_at=_now(),
             parent_project_id=parent_project_id,
             legacy_layout=False,
@@ -223,11 +221,6 @@ class ProjectRegistry:
         for field in PROJECT_DATA_DIRS:
             getattr(paths, field).mkdir(parents=True, exist_ok=True)
         return project
-
-    def set_state(self, project_id: str, state: str) -> Project:
-        updated = replace(self.get(project_id), state=state)
-        self._write_existing(updated)
-        return updated
 
     def archive(self, project_id: str) -> Project:
         updated = replace(self.get(project_id), archived=True)
@@ -249,9 +242,9 @@ class ProjectRegistry:
     ) -> Project:
         """複製設計，**不複製任何科學結果**。
 
-        新專案一律回到 DRAFT：來源專案的 FROZEN 代表「那一組 lock 已
-        建立身分」，而複製出來的專案還沒有任何自己的 lock。
-        直接繼承 FROZEN 會讓一個空專案宣稱自己已凍結。
+        Profile 的狀態不在 Project 上，因此這裡沒有「重設狀態」這件事；
+        科學身分的繼承與否由 profiles.registry.clone() 決定，
+        它一律把新的 Profile 建成 DRAFT。
         """
         source = self.get(source_id)
         created = self.create(
@@ -259,7 +252,6 @@ class ProjectRegistry:
             display_name,
             template=source.template,
             description=description or source.description,
-            state="DRAFT",
             parent_project_id=source_id,
         )
 
@@ -295,9 +287,6 @@ class ProjectRegistry:
             # 正是 test_legacy_special_case_lives_only_in_the_resolver 要擋的。
             # Phase 7 建立 template registry 後，此處改為引用其常數。
             template=LEGACY_THESIS_PROJECT_ID,
-            # 遷移不評估科學狀態。真正的進度由 freeze/ 的 lock 與
-            # final_gate 推導，寫死在 metadata 只會多一個會過期的來源。
-            state="DRAFT",
             created_at=_now(),
             legacy_layout=True,
             description=(

@@ -4,7 +4,7 @@
 #         **不寫入任何科學資料。**
 # 檔案路徑: pcmef/platform/projects/context.py
 # 產生時間: 2026-09-06 15:30 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: 「目前在哪一個 project context」的單一解答處，以及給版型用的
 #           專案切換器資料。
 # 模組定位: 平台化 Phase 2。使用者第六節要求「所有 production service
@@ -14,7 +14,8 @@
 #   1. ProjectContext 綁定 Project 與其 ProjectPaths
 #   2. current_context() 由 session 解析目前專案，找不到即回退並標記
 #   3. select_project() 切換目前專案
-#   4. project_switcher() 產生版型需要的切換器資料
+#   4. project_switcher() 產生版型需要的切換器資料，
+#      其中的 state 取自該 Project 的代表性 Profile
 # 維護提醒:
 #   - 不得讓回退變成靜默。session 指向一個不存在或已封存的專案時，
 #     必須把 `fell_back` 標出來讓畫面顯示；靜默回退會讓使用者以為
@@ -22,7 +23,10 @@
 #   - 不得在本檔判斷 legacy 特例或自行組裝路徑。一律 resolve_paths()。
 #   - 不得把 ProjectContext 快取成模組級變數。它是 per-request 的；
 #     模組級快取會讓兩個同時開著不同專案的分頁互相污染。
+#   - 不得把 Profile 的狀態當成 Project 的屬性。畫面上那個
+#     FROZEN / DRAFT 標籤描述的是某一份研究設定，不是整個工作空間。
 #   - v0.1.0 新增：首版，對應平台化 Phase 2。
+#   - v0.2.0 變更：狀態改由 Profile 提供，對應平台化 Phase 3。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_project_context.py -v
 # ------------------------------------------------------------
@@ -155,18 +159,34 @@ def project_switcher(
     projects = registry.list_projects()
     if not any(p.project_id == context.project_id for p in projects):
         projects = [context.project, *projects]
+
+    # 畫面上的狀態是**這個 Project 的代表性 Profile** 的狀態，不是
+    # Project 的 —— Project 是工作空間，它沒有「已凍結」這種性質。
+    state = ""
+    profile_name = ""
+    try:
+        from pcmef.platform.profiles.registry import ProfileRegistry
+
+        active = ProfileRegistry(root=registry.root).active_profile(
+            context.project_id
+        )
+        if active is not None:
+            state, profile_name = active.state, active.display_name
+    except Exception:  # noqa: BLE001 - 版型不得因為讀不到 Profile 而 500
+        state, profile_name = "", ""
+
     return {
         "current_project": {
             "id": context.project_id,
             "name": context.display_name,
-            "state": context.project.state,
+            "state": state,
+            "profile": profile_name,
             "legacy": context.project.legacy_layout,
         },
         "project_options": [
             {
                 "id": p.project_id,
                 "name": p.display_name,
-                "state": p.state,
                 "current": p.project_id == context.project_id,
             }
             for p in projects
