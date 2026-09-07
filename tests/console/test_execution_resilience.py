@@ -751,10 +751,14 @@ def test_the_registry_and_the_cli_name_the_same_stages():
         if name.startswith("STAGE_") and isinstance(value, str)
     }
     for executor in executors.describe("pcmef-thesis"):
-        assert executor.stage_id in constants, (
-            f"{executor.kind} names a stage id that is not one of the shared "
-            f"constants: {executor.stage_id!r}"
-        )
+        # round 6：executor 涵蓋的可能不只一個 stage，而事件另有歸戶
+        # 的名字。兩者都必須用共用常數，否則其中一份改名不會報錯 ——
+        # 事件只是落在一個沒有人在看的名字底下。
+        for stage_id in (*executor.stage_ids, executor.event_stage_id):
+            assert stage_id in constants, (
+                f"{executor.kind} names a stage id that is not one of the "
+                f"shared constants: {stage_id!r}"
+            )
 
 
 def test_the_web_still_writes_no_events():

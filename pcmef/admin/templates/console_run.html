@@ -98,8 +98,16 @@
       <dt>執行的動作</dt>
       <dd>{{ attribution.execution.display_name or attribution.execution.kind }}
         <span class="muted mono small">{{ attribution.execution.kind }}</span>
-        {% if attribution.execution.in_research_pipeline %}
-        <span class="tag">流程步驟 {{ attribution.execution.stage_id }}</span>
+        {# round 5 的 execution 只有單數 stage_id、沒有 scope。
+           `| default([], true)` 讓那些歷史紀錄仍然畫得出來 ——
+           少了它，`| length` 會在 Undefined 上炸開，整頁 500。 #}
+        {% set covered = attribution.execution.stage_ids | default([], true) %}
+        {% if attribution.execution.scope == 'pipeline' %}
+        <span class="tag">涵蓋 {{ covered | length }} 個流程步驟</span>
+        <span class="muted mono small">{{ covered | join(' → ') }}</span>
+        {% elif attribution.execution.in_research_pipeline %}
+        <span class="tag">流程步驟
+          {{ covered | join(', ') or attribution.execution.stage_id | default('', true) }}</span>
         {% else %}
         <span class="muted small">不是研究流程的一步</span>
         {% endif %}

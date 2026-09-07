@@ -4,7 +4,7 @@
 #         「哪一個 template 有哪些 executor」**。
 # 檔案路徑: pcmef/platform/executors.py
 # 產生時間: 2026-09-07 15:40 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: Template → executor 的登記處。哪一個研究模板能跑哪幾種
 #           指令，以及每一種指令會寫出哪一個 stage 的事件。
 # 模組定位: Execution Layer Closure round 4 的第 5 項。
@@ -15,10 +15,11 @@
 #           「可不可以啟動」，這裡回答的是「這個專案有什麼可以啟動」。
 #           兩個問題都要有答案，缺一個就會出現上面那種結果。
 # 主要責任:
-#   1. Executor 描述一種可啟動的指令與它寫出的 stage
+#   1. Executor 描述一種可啟動的指令：涵蓋範圍、節點與事件歸戶名稱
 #   2. register() 讓 template 宣告自己的 executor
-#   3. executors_for() / supports() / stage_of() 供啟動與投影使用
+#   3. executors_for() / supports() / stage_of() / executor_of() 供查詢
 #   4. _ensure_registered() 讓查詢不依賴匯入順序
+#   5. SCOPES 區分 stage / pipeline / action
 # 維護提醒:
 #   - **不得以 project id 判斷。** 資格由 template 宣告，用 id 判斷與
 #     用名字判斷只差一層；test_the_executor_registry_is_keyed_by_template
@@ -31,6 +32,10 @@
 #     沒有它時這張表在還沒有人匯入 provider 的行程裡是空的 —— 而空表
 #     的意思是「沒有任何 executor」，於是碩論自己被拒絕執行。授權結果
 #     取決於匯入順序，是這一層最難重現的一種錯。
+#   - **不得把 scope 與 stage_ids 收回成單一 stage_id。** Formal E2
+#     涵蓋的是整條推論鏈；記成一個節點，紀錄就會宣稱它只做了最後一步。
+#   - v0.2.0 新增：scope / stage_ids / event_stage，對應 round 6 的
+#     第 6 項。
 #   - v0.1.0 新增：首版，對應 round 4 的第 5 項。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_execution_resilience.py -v
@@ -42,30 +47,52 @@ from dataclasses import dataclass
 
 __all__ = [
     "Executor",
+    "SCOPES",
+    "SCOPE_ACTION",
+    "SCOPE_PIPELINE",
+    "SCOPE_STAGE",
+    "STAGE_ARBITRATION",
     "STAGE_AUDIT",
     "STAGE_DECISION",
     "STAGE_LLM_SNAPSHOT",
     "STAGE_PERCEPTION",
+    "STAGE_RELIABILITY",
+    "STAGE_ROUTING",
     "STAGE_SIMULATION",
     "describe",
     "executors_for",
     "register",
     "registered_templates",
+    "executor_of",
     "stage_of",
     "supports",
 ]
 
-#: 每一支 executor 寫出的 stage id。
+#: 一支 executor 涵蓋多大範圍。
+#:
+#: 少了這個欄位，紀錄只能說「這次跑了 stage X」——而 Formal E2 跑的
+#: 是從感知到決策的整條推論鏈，記成單一 `decision` 會讓紀錄宣稱它
+#: 只做了最後一步。llm snapshot 與稽核則根本不是流程的一步，硬塞一個
+#: stage 進去同樣是說謊。
+SCOPE_STAGE = "stage"        # 實作流程裡的某一個節點
+SCOPE_PIPELINE = "pipeline"  # 一次跑過流程的一段（多個節點）
+SCOPE_ACTION = "action"      # 不是流程的一步（凍結、稽核）
+
+SCOPES: tuple[str, ...] = (SCOPE_STAGE, SCOPE_PIPELINE, SCOPE_ACTION)
+
+#: 流程節點與動作的名字。**單一來源。**
 #:
 #: 常數放在這裡而不是各自寫在 CLI 裡：登記處與 executor 必須說同一個
 #: 名字，而兩份字面值遲早會有一份被改到。改了之後不會報錯 —— 事件
-#: 只是落在一個沒有人在看的 stage 名下，畫面照常顯示「這一步沒開始」。
+#: 只是落在一個沒有人在看的名字底下，畫面照常顯示「這一步沒開始」。
 #:
-#: 前三個對應 PIPELINE_NODES 的 key；後兩個沒有對應節點（凍結與稽核
-#: 不是研究流程的一步），Run 頁會照實說「事件檔提到流程定義裡沒有的
-#: stage」——那句話是對的，不需要為了讓畫面好看而假裝它是一步。
+#: 前六個對應 PIPELINE_NODES 的 key；最後兩個沒有對應節點（凍結與
+#: 稽核不是研究流程的一步），它們只是事件的歸戶名稱。
 STAGE_SIMULATION = "simulation"
 STAGE_PERCEPTION = "perception"
+STAGE_RELIABILITY = "reliability"
+STAGE_ROUTING = "routing"
+STAGE_ARBITRATION = "arbitration"
 STAGE_DECISION = "decision"
 STAGE_LLM_SNAPSHOT = "llm_snapshot"
 STAGE_AUDIT = "audit"
@@ -75,17 +102,66 @@ STAGE_AUDIT = "audit"
 class Executor:
     """一種可以從 console 啟動的指令。
 
-    `stage_id` 是這支指令**自己宣告**它實作了流程裡的哪一步。由
+    `stage_ids` 是這支指令**自己宣告**它涵蓋流程裡的哪幾步。由
     executor 這一側宣告而不是由 console 指定：console 若能指定，
     它就能把任何一支指令的輸出說成任何一步的進度，而畫面上看不出
     差別。
+
+    `scope` 說的是涵蓋的大小 —— 單一節點、流程的一段，或者根本不是
+    流程的一步。少了它，Formal E2 會被記成一個 `decision` 節點，
+    而它其實從感知一路跑到決策。
     """
 
     kind: str
     display_name: str
-    stage_id: str
+    scope: str
+    #: 這支指令涵蓋的流程節點，依流程順序。`action` 一律為空。
+    stage_ids: tuple[str, ...] = ()
+    #: 事件實際寫在哪一個名字底下。
+    #:
+    #: 與 `stage_ids` **分開**，因為兩者回答不同問題：stage_ids 說
+    #: 「這次涵蓋了流程的哪幾步」，這個說「事件檔裡的 stage_id 欄位
+    #: 會是什麼」。action 沒有涵蓋任何流程節點，但它的事件仍然需要
+    #: 一個名字可以歸戶；不給的話，凍結與稽核的事件會混在一起。
+    #: 留空時取 stage_ids 的最後一個 —— 那是這次執行的結果所代表的
+    #: 那一步。
+    event_stage: str = ""
     #: 一句話說明這支指令做什麼。畫面上顯示給使用者看。
     summary: str = ""
+
+    def __post_init__(self) -> None:
+        if self.scope not in SCOPES:
+            raise ValueError(
+                f"executor {self.kind!r} declares unknown scope {self.scope!r}; "
+                f"expected one of {list(SCOPES)}"
+            )
+        if self.scope == SCOPE_ACTION and self.stage_ids:
+            raise ValueError(
+                f"executor {self.kind!r} is an action but names stages "
+                f"{list(self.stage_ids)}; an action is not a step of the pipeline"
+            )
+        if self.scope != SCOPE_ACTION and not self.stage_ids:
+            raise ValueError(
+                f"executor {self.kind!r} claims scope {self.scope!r} but names "
+                "no stage"
+            )
+        if not self.event_stage_id:
+            raise ValueError(
+                f"executor {self.kind!r} has nowhere to file its events; give "
+                "it an event_stage or a stage_ids entry"
+            )
+
+    @property
+    def event_stage_id(self) -> str:
+        """事件實際落在哪一個 stage 名下。
+
+        涵蓋多步時仍然只有一個事件流 —— executor 回報的是整體進度，
+        不是逐節點的轉換，因此預設取最後一個節點：那是這次執行的
+        結果所代表的那一步。
+        """
+        if self.event_stage:
+            return self.event_stage
+        return self.stage_ids[-1] if self.stage_ids else ""
 
 
 _BY_TEMPLATE: dict[str, dict[str, Executor]] = {}
@@ -137,10 +213,16 @@ def supports(template: str | None, kind: str) -> bool:
 
 
 def stage_of(template: str | None, kind: str) -> str:
-    """這個 executor 寫出的 stage id。沒登記就回空字串。"""
+    """這個 executor 的事件寫在哪一個 stage 名下。沒登記就回空字串。"""
     _ensure_registered()
     executor = _BY_TEMPLATE.get(template or "", {}).get(kind)
-    return executor.stage_id if executor else ""
+    return executor.event_stage_id if executor else ""
+
+
+def executor_of(template: str | None, kind: str):
+    """取得 executor 本身。沒登記就回 None。"""
+    _ensure_registered()
+    return _BY_TEMPLATE.get(template or "", {}).get(kind)
 
 
 def describe(template: str | None) -> tuple[Executor, ...]:

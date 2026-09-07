@@ -221,8 +221,16 @@ def test_an_unreaped_run_refuses_deletion_while_the_marker_stands(tmp_path,
     with pytest.raises(RunnerError, match="unreaped|still"):
         runner.delete(record.run_id)
 
-    # 逃生口：確認過行程死了、把標記拿掉之後就可以刪。
+    # 逃生口：確認過行程死了之後，**標記檔與 unreaped 狀態都要清掉**。
+    # 兩者是彼此的備援（其中一個可能單獨存活下來），因此只清一個仍然
+    # 擋著 —— 這正是 round 6 第 2 項要的行為。
     (runner.run_dir(record.run_id) / "unreaped_process.json").unlink()
+    with pytest.raises(RunnerError):
+        runner.delete(record.run_id)
+
+    cleared = runner.get(record.run_id)
+    cleared.status = "failed"
+    runner._save(cleared)
     runner.delete(record.run_id)
 
 
@@ -445,7 +453,11 @@ def test_the_attribution_records_what_was_actually_executed(env, monkeypatch):
     # 而這一次執行的**動作**另外記一份。
     execution = identity["execution"]
     assert execution["kind"] == "sim_smoke"
-    assert execution["stage_id"] == "simulation"
+    # round 6：單一 stage_id 換成 scope + stage_ids，因為 Formal E2
+    # 涵蓋的是整條推論鏈，用一個欄位表達不了。
+    assert execution["scope"] == "stage"
+    assert execution["stage_ids"] == ["simulation"]
+    assert execution["event_stage_id"] == "simulation"
     assert execution["template"] == "pcmef-thesis"
     assert execution["display_name"]
 
@@ -748,6 +760,8 @@ def test_no_guard_inspects_the_formal_entry_point_alone():
     —— 它不會報錯，只是不再守任何東西。
 
     因此：任何取 `cmd_formal_run_e2` 原始碼的地方，都必須把本體一起取。
+
+    SOURCE-GUARD-SCANNER —— 本檔含掃描用的正規式字面值，掃描器需略過。
     """
     import re as _re
 

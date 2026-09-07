@@ -95,8 +95,7 @@ class WriteTripwire:
         #
         # 先前用絕對前綴，於是 `outputs/perception/e2_final/x.json`
         # 這種相對寫法一個字都對不上，在 resolve() 之前就被放行 ——
-        # 而相對路徑正是最常見的寫法。那段程式碼的註解宣稱「相對路徑
-        # 在解析那一步才被攤平」，但根本走不到那一步。
+        # 而相對路徑正是最常見的寫法。
         #
         # 名字比對會有誤判（`freeze_candidate` 也含 "freeze"），
         # 那沒關係：粗篩只負責決定要不要付 resolve() 的代價，
@@ -104,9 +103,35 @@ class WriteTripwire:
         self._needles = tuple(
             root.name.lower() for root in self._roots if root.name
         )
+        #: 目錄 → 解析後的真實位置。**每個目錄只解析一次。**
+        #:
+        #: symlink 別名的名字裡可以一個 needle 都沒有（`shortcut`
+        #: 指向 `freeze`），所以光靠名字比對看不穿它，而唯一看得穿的
+        #: 是 resolve()。無條件解析每一次 open 會讓整輪測試慢到有人
+        #: 想關掉守衛；改成解析**目錄**並記住答案之後，代價變成
+        #: 「每個不同目錄一次 syscall」，而一輪測試的目錄數是幾百，
+        #: 寫入次數是幾十萬。
+        self._parent_cache: dict[str, Path | None] = {}
         #: 曾經嘗試過的寫入。即使被擋下也留著 —— 「試過」本身就是
         #: 要修的東西。
         self.violations: list[str] = []
+
+    def _under_a_root(self, resolved: Path) -> bool:
+        return any(
+            resolved == root or root in resolved.parents for root in self._roots
+        )
+
+    def _resolved_parent(self, raw: str) -> Path | None:
+        """這條路徑的所在目錄，攤平 symlink 與 `..` 之後。有快取。"""
+        key = os.path.dirname(raw) or "."
+        if key in self._parent_cache:
+            return self._parent_cache[key]
+        try:
+            resolved = Path(key).resolve()
+        except Exception:  # noqa: BLE001
+            resolved = None
+        self._parent_cache[key] = resolved
+        return resolved
 
     def _is_protected(self, path) -> bool:
         try:
@@ -118,18 +143,23 @@ class WriteTripwire:
                 raw = raw.decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 return False
+
+        # 第一關：名字上就帶著受保護根目錄的名字。相對與絕對都算，
+        # 不打任何 syscall。命中就直接做完整解析。
         lowered = raw.lower()
-        if not any(needle in lowered for needle in self._needles):
+        if any(needle in lowered for needle in self._needles):
+            try:
+                return self._under_a_root(Path(raw).resolve())
+            except Exception:  # noqa: BLE001
+                return False
+
+        # 第二關：名字什麼都沒說 —— symlink 別名走的就是這一條。
+        # 解析所在目錄（有快取）再判一次。少了這一關，一個叫
+        # `shortcut` 的別名就能整個繞過守衛。
+        parent = self._resolved_parent(raw)
+        if parent is None:
             return False
-        # 粗篩命中了才付解析的代價。相對路徑、`..` 與 symlink 都在
-        # 這一步被攤平 —— 而現在粗篩真的會讓它們走到這裡。
-        try:
-            resolved = Path(raw).resolve()
-        except Exception:  # noqa: BLE001
-            return False
-        return any(
-            resolved == root or root in resolved.parents for root in self._roots
-        )
+        return self._under_a_root(parent)
 
     def check_read(self, path) -> None:
         """讀取一律放行。這個方法存在是為了讓意圖寫在程式碼裡。"""

@@ -109,22 +109,34 @@ def _register() -> None:
     from pcmef.platform.pipeline.registry import register
 
     register(PROVIDER_NAME, pcmef_pipeline)
-    for kind, display_name, stage_id, summary in (
-        ("sim_smoke", "物理校準模擬", ex.STAGE_SIMULATION,
+    # scope 與 stage_ids 由 executor 這一側宣告。
+    #
+    # `formal_e2` 涵蓋的是**整條推論鏈**：一次正式執行從感知一路跑到
+    # 決策，把它記成單一 `decision` 節點，紀錄就會宣稱它只做了最後
+    # 一步。`llm_snapshot` 與 `audit_gates` 則根本不是流程的一步 ——
+    # 硬塞一個 stage 進去同樣是說謊，所以它們是 action，不列任何節點。
+    for kind, display_name, scope, stage_ids, event_stage, summary in (
+        ("sim_smoke", "物理校準模擬", ex.SCOPE_STAGE,
+         (ex.STAGE_SIMULATION,), "",
          "以場景設定算出 transient 並產出 smoke manifest。"),
-        ("surrogate_smoke", "代理模型四特徵", ex.STAGE_PERCEPTION,
+        ("surrogate_smoke", "代理模型四特徵", ex.SCOPE_STAGE,
+         (ex.STAGE_PERCEPTION,), "",
          "由既有模擬輸出萃取四特徵。"),
-        ("llm_snapshot", "LLM runtime 快照", ex.STAGE_LLM_SNAPSHOT,
+        ("llm_snapshot", "LLM runtime 快照", ex.SCOPE_ACTION, (),
+         ex.STAGE_LLM_SNAPSHOT,
          "解析 draft binding 成 lock candidate，可選擇凍結。"),
-        ("formal_e2", "Formal E2", ex.STAGE_DECISION,
-         "PC-MEF Formal E2 的預演與一次性正式執行。"),
-        ("audit_gates", "E1 gate 稽核", ex.STAGE_AUDIT,
+        ("formal_e2", "Formal E2", ex.SCOPE_PIPELINE,
+         (ex.STAGE_PERCEPTION, ex.STAGE_RELIABILITY, ex.STAGE_ROUTING,
+          ex.STAGE_ARBITRATION, ex.STAGE_DECISION), "",
+         "PC-MEF Formal E2 的預演與一次性正式執行，涵蓋感知到決策。"),
+        ("audit_gates", "E1 gate 稽核", ex.SCOPE_ACTION, (), ex.STAGE_AUDIT,
          "逐項檢查 E1 開跑前的十二個 gate。"),
     ):
         ex.register(
             PROVIDER_NAME,
-            ex.Executor(kind=kind, display_name=display_name,
-                        stage_id=stage_id, summary=summary),
+            ex.Executor(kind=kind, display_name=display_name, scope=scope,
+                        stage_ids=stage_ids, event_stage=event_stage,
+                        summary=summary),
         )
 
 

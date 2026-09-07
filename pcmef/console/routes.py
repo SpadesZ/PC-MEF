@@ -88,22 +88,41 @@ def _describe_execution(project, kind: str, stage_ids) -> dict:
     一次凍結的 run 帶著七個研究節點的快照，讀起來像它本來要跑完
     整條 pipeline 卻只做了一步 —— 而凍結根本不是流程的一步。
 
-    `in_research_pipeline` 由 executor 宣告的 stage 是否落在這個 run
-    自己的流程裡決定，**不是由畫面猜的**。
+    `scope` 與 `stage_ids` 由 executor 宣告，**不是由畫面猜的**。
+    少了它們，一次 Formal E2 會被記成單一 `decision` 節點，而它其實
+    從感知一路跑到決策 —— 紀錄會宣稱它只做了最後一步。
+
+    `in_research_pipeline` 看的是 executor 涵蓋的節點是否確實出現在
+    這個 run 自己的流程快照裡。
     """
-    from pcmef.platform.executors import describe, stage_of
+    from pcmef.platform.executors import SCOPE_ACTION, executor_of
 
     template = getattr(project, "template", "") or ""
-    stage_id = stage_of(template, kind)
-    display_name = next(
-        (e.display_name for e in describe(template) if e.kind == kind), ""
-    )
+    executor = executor_of(template, kind)
+    if executor is None:
+        # 沒登記過的 kind 走不到這裡（launch 會先擋下），但真的走到了
+        # 就照實說「不知道」，不要編一個 stage。
+        return {
+            "kind": kind, "scope": "", "stage_ids": [], "event_stage_id": "",
+            "display_name": "", "template": template,
+            "in_research_pipeline": False,
+        }
+
+    pipeline = tuple(stage_ids)
+    covered = [sid for sid in executor.stage_ids if sid in pipeline]
     return {
         "kind": kind,
-        "stage_id": stage_id,
-        "display_name": display_name,
+        "scope": executor.scope,
+        # 這次涵蓋的流程節點。action 為空 —— 它不是流程的一步。
+        "stage_ids": list(executor.stage_ids),
+        # 事件檔裡的 stage_id 欄位會是什麼。與上面那一組分開，
+        # 因為「涵蓋了什麼」與「事件寫在哪」是兩個問題。
+        "event_stage_id": executor.event_stage_id,
+        "display_name": executor.display_name,
         "template": template,
-        "in_research_pipeline": bool(stage_id) and stage_id in tuple(stage_ids),
+        "in_research_pipeline": (
+            executor.scope != SCOPE_ACTION and bool(covered)
+        ),
     }
 
 

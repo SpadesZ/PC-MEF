@@ -410,6 +410,10 @@ class _NoStageEvents:
     def stage_failed(self, detail: str = "") -> None:
         pass
 
+    @property
+    def terminal(self) -> str:
+        return ""
+
 
 class _StageEvents:
     """把某一個 stage 的事件寫進 run 目錄。**綁定單一 stage id。**
@@ -424,6 +428,13 @@ class _StageEvents:
         self._writer = RunEventWriter(run_dir)
         self._stage = stage_id
         self._announced = False
+        # 一次執行只有一個結局。**第一個終局事件說了算。**
+        #
+        # 交給呼叫點自律的話，遲早有兩個都送出：本體發了 stage_failed
+        # 再往外拋，入口的 catch-all 又發一次；或者收尾的列印出錯，
+        # 於是 stage_completed 之後又補上一個 stage_failed。畫面只會
+        # 顯示後到的那一個，所以一次成功的執行可以在最後一行變成失敗。
+        self._terminal = ""
 
     def _announce_losses(self) -> None:
         """掉過事件就在 log 裡說一次。
@@ -456,11 +467,22 @@ class _StageEvents:
         self._writer.stage_progress(self._stage, current, total=total, detail=detail)
         self._announce_losses()
 
+    @property
+    def terminal(self) -> str:
+        """已經寫下的結局。空字串代表還沒有。"""
+        return self._terminal
+
     def stage_completed(self, detail: str = "", artifacts=()) -> None:
+        if self._terminal:
+            return
+        self._terminal = "stage_completed"
         self._writer.stage_completed(self._stage, detail=detail, artifacts=artifacts)
         self._announce_losses()
 
     def stage_failed(self, detail: str = "") -> None:
+        if self._terminal:
+            return
+        self._terminal = "stage_failed"
         self._writer.stage_failed(self._stage, detail=detail)
         self._writer.run_failed(detail=detail)
         self._announce_losses()
@@ -2421,18 +2443,33 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
 
     產出 surrogate_smoke.csv：每個場景一列，含四特徵的均值與標準差、
     物理量與 recording 形狀，供 E1-G04 判定。
+
+    終局事件由 `_surrogate_smoke_body` 的 catch-all 補齊。拆成入口與
+    本體的理由與 formal 那條一樣：本體只負責 early return，例外的
+    終局事件由入口一次負責，兩邊都發會寫出兩筆。
     """
+    events = _stage_events(
+        getattr(args, "run_events", None), _stage_ids().STAGE_PERCEPTION
+    )
+    events.run_started(detail=f"simulation_out={args.simulation_out}")
+    try:
+        return _surrogate_smoke_body(args, events)
+    except BaseException as error:  # noqa: BLE001 - 任何一步炸開都是結局
+        # np.load、observe、generate_recording、寫 csv —— 先前這幾步
+        # 的例外都是靜默的，畫面只會說「沒有 stage 記錄」，讀起來像
+        # 從未開始。
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
+
+
+def _surrogate_smoke_body(args: argparse.Namespace, events) -> int:
+    """`cmd_surrogate_smoke` 的本體。終局事件由入口與這裡共同保證。"""
     import numpy as np
 
     from pcmef.core.constants import TOF_SCHEMA
     from pcmef.surrogate.calibration import PLACEHOLDER_SMOKE_CALIBRATION
     from pcmef.surrogate.single_acquisition import SensorSurrogate
     from pcmef.surrogate.temporal_model import TemporalModel
-
-    events = _stage_events(
-        getattr(args, "run_events", None), _stage_ids().STAGE_PERCEPTION
-    )
-    events.run_started(detail=f"simulation_out={args.simulation_out}")
 
     sim_root = Path(args.simulation_out)
     scenarios = (
@@ -3454,10 +3491,10 @@ def _formal_run_e2_body(args, events, deps) -> int:
         print(f"\nSTART_FORMAL_RUN = BLOCKED\n  {error}", file=sys.stderr)
         events.stage_failed(f"ClaimError: {error}")
         return 2
-    except BaseException as error:  # noqa: BLE001 - 崩潰也要留下痕跡
-        events.stage_failed(f"{type(error).__name__}: {error}")
-        raise
-
+    # 這裡**刻意沒有** catch-all。例外的終局事件由入口
+    # `cmd_formal_run_e2` 的 catch-all 負責 —— 兩邊都發的話，
+    # 同一次崩潰會寫出兩筆 stage_failed。本體只負責 early return
+    # 那幾條路徑，例外一律往上交。
     events.stage_completed(
         detail=f"dry_run={document['dry_run']}",
         artifacts=(str(document.get("report_path", "")),),

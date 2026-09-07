@@ -688,6 +688,29 @@ class ConsoleRunner:
             # 它仍在算圖、仍在寫檔，而沒有任何紀錄指向它。
             # 只 raise 不 reap 等於製造一個查不到的算圖行程。
             reaped = self._reap(process)
+            if not reaped:
+                # **紀錄不得停在 running。**
+                #
+                # `start()` 在 Popen 之前就存過一筆 status=running 的
+                # run.json。走到這裡時沒有人會再改它 —— 於是清單上永遠
+                # 顯示「執行中」，SSE 也永遠不收線，而其實**沒有任何人
+                # 在讀那個行程**。呼叫端保留這筆紀錄（它是唯一指向那個
+                # 行程的線索），因此這筆紀錄必須說出真相。
+                record.status = UNREAPED
+                record.exit_code = -1
+                record.finished_at = _now()
+                record.note = (
+                    f"啟動後無法接上輸出讀取（{type(error).__name__}: {error}），"
+                    "而且**子行程無法確認已結束**。它可能仍在執行並寫入檔案。"
+                    f"詳見同目錄的 {UNREAPED_FILENAME}。"
+                )
+                self._save_or_leave_a_trace(record, error)
+                self.mark_unreaped(
+                    run_id, process,
+                    reason=f"{type(error).__name__}: {error}",
+                    command=command,
+                    started_at=record.started_at,
+                )
             raise RunLaunchError(
                 f"run {run_id!r} started a process but could not attach its "
                 f"reader: {type(error).__name__}: {error}",
@@ -1013,17 +1036,24 @@ class ConsoleRunner:
                 "line-by-line evidence that the run happened and what it ran. "
                 "A dry-run record may be deleted."
             )
+        # **兩道判準，任一成立就拒絕。**
+        #
+        # 只看 marker 檔不夠：寫不出 marker 的情境正是磁碟滿，也就是
+        # reader 掛掉的同一個原因 —— 於是最該保留的那一筆反而變成
+        # 可以刪。只看 record 也不夠：run.json 自己可能寫壞。
+        # 兩者是彼此的備援，各自都可能單獨存活下來。
         marker = self.run_dir(run_id) / UNREAPED_FILENAME
-        if marker.exists():
+        if record.unreaped or marker.exists():
             # 刪掉它就刪掉了唯一指向那個行程的線索：機器上會有一個
             # 在寫檔的行程，而沒有任何東西說得出它是誰啟動的。
-            # 逃生口是先確認行程已死、把標記檔拿掉，再刪這筆紀錄。
+            # 逃生口是先確認行程已死，再把標記檔與 unreaped 狀態
+            # 一起清掉（見下方訊息），最後才刪這筆紀錄。
             raise RunnerError(
                 f"run {run_id!r} has an unreaped child process. "
                 f"{marker.as_posix()} names its pid and host; confirm the "
-                "process is gone and delete that file first. Deleting this "
-                "record now would leave a running process with nothing "
-                "pointing at it."
+                "process is gone, then delete that file and clear the "
+                "'unreaped' status before deleting this record. Deleting it "
+                "now would leave a running process with nothing pointing at it."
             )
         shutil.rmtree(self.run_dir(run_id))
         self._threads.pop(run_id, None)
