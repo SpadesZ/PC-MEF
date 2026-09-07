@@ -136,8 +136,17 @@ class RunLaunchError(RunnerError):
     行程，而沒有任何紀錄說得出它是誰、在跑什麼。
     """
 
-    def __init__(self, message: str, *, process_reaped: bool = True) -> None:
+    def __init__(
+        self, message: str, *, process_reaped: bool = True,
+        process: object = None, command: list[str] | None = None,
+        started_at: str = "",
+    ) -> None:
         self.process_reaped = process_reaped
+        # 收不掉時，這三樣是呼叫端唯一能拿來寫標記檔的線索。
+        # 沒有 pid 的「有個行程可能還活著」是一句廢話。
+        self.process = process
+        self.command = list(command or [])
+        self.started_at = started_at
         super().__init__(message)
 
 
@@ -194,6 +203,21 @@ FORMAL_POINTER = "formal_output.json"
 #: 本身沒能寫成功」的證據。清單上看不到它，但目錄裡有。
 RUN_CRASH_FILENAME = "run_crash.txt"
 
+#: 「子行程可能還活著」的標記檔。
+#:
+#: 兩條路徑會寫它：啟動時 reader 掛不上去（console.launch），以及
+#: 執行中 reader 死掉而行程收不掉（`_pump`）。**格式必須一致** ——
+#: 分成兩份寫法的話，其中一份遲早會少一個欄位，而少的通常是 pid。
+UNREAPED_FILENAME = "unreaped_process.json"
+
+#: 收尾時無法確認子行程已結束。
+#:
+#: 不是 "failed"：failed 可以直接重跑，這個必須先去機器上確認。
+UNREAPED = "unreaped"
+
+#: console 認定「已經結束」的狀態。unreaped 也算 —— 沒有人在讀它了。
+TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", UNREAPED})
+
 
 @dataclass(frozen=True)
 class RunSpec:
@@ -230,7 +254,23 @@ class RunRecord:
 
     @property
     def finished(self) -> bool:
-        return self.status in ("succeeded", "failed")
+        """這筆執行對 console 而言已經結束。
+
+        `unreaped` 也算結束：**沒有人在讀那個行程了**。不算的話，
+        SSE 會對著一個永遠不會有新輸出的 run 一直重試，畫面停在
+        「執行中」——而那正好是這個狀態要避免的誤解。
+        """
+        return self.status in TERMINAL_STATUSES
+
+    @property
+    def unreaped(self) -> bool:
+        """收尾時無法確認子行程已經結束。
+
+        與 `failed` 分開，因為要採取的行動不同：failed 直接重跑就好，
+        unreaped 必須先去機器上確認那個行程死了沒有 —— 它可能還在
+        寫檔。兩者在清單上長得一樣的話，沒有人會去做第二件事。
+        """
+        return self.status == UNREAPED
 
     @property
     def protected(self) -> bool:
@@ -488,6 +528,7 @@ class ConsoleRunner:
             return base + [
                 "surrogate", "smoke", "--simulation-out", str(source),
                 "--out", str(out_dir),
+                "--run-events", str(self.run_dir(run_id)),
             ]
         if spec.kind == "llm_snapshot":
             # --out 是**目錄**（snapshot.write 自己決定檔名為
@@ -651,6 +692,9 @@ class ConsoleRunner:
                 f"run {run_id!r} started a process but could not attach its "
                 f"reader: {type(error).__name__}: {error}",
                 process_reaped=reaped,
+                process=process,
+                command=command,
+                started_at=record.started_at,
             ) from error
         # 註冊放在 start() 之後：沒起來的執行緒留在表裡，wait() 會對著
         # 一個永遠不會結束的東西 join。
@@ -735,13 +779,32 @@ class ConsoleRunner:
                     handle.flush()
             exit_code = process.wait()
         except BaseException as error:  # noqa: BLE001 - 背景執行緒的最後一道
-            self._reap(process)
+            reaped = self._reap(process)
             record.exit_code = -1
-            record.status = "failed"
             record.finished_at = _now()
-            record.note = (
-                f"輸出無法寫入，執行已中止：{type(error).__name__}: {error}"
-            )
+            if reaped:
+                record.status = "failed"
+                record.note = (
+                    f"輸出無法寫入，執行已中止：{type(error).__name__}: {error}"
+                )
+            else:
+                # **收不掉就不能記成普通失敗。**
+                #
+                # 沒有人在讀它了，但它可能還在算、還在寫檔。記成
+                # failed 的話，這筆與一筆單純跑壞的執行在清單上長得
+                # 一模一樣，於是沒有人會去機器上確認那個行程死了沒有。
+                record.status = UNREAPED
+                record.note = (
+                    f"輸出無法寫入（{type(error).__name__}: {error}），"
+                    "而且**子行程無法確認已結束**。它可能仍在執行並寫入檔案。"
+                    f"詳見同目錄的 {UNREAPED_FILENAME}。"
+                )
+                self.mark_unreaped(
+                    record.run_id, process,
+                    reason=f"{type(error).__name__}: {error}",
+                    command=record.command,
+                    started_at=record.started_at,
+                )
             self._save_or_leave_a_trace(record, error)
             return
 
@@ -754,6 +817,64 @@ class ConsoleRunner:
                 "請以 manifest 的 counts 判定實際成敗。"
             )
         self._save_or_leave_a_trace(record, None)
+
+    def mark_unreaped(
+        self, run_id: str, process: object, *, reason: str,
+        command: list[str] | None = None, started_at: str = "",
+    ) -> None:
+        """記下「這個子行程可能還活著」，並且說得出它是誰。
+
+        沒有 pid 的這句話是廢話：使用者要做的事是去機器上找到它並
+        終止它，而「有個行程可能還在跑」不告訴他要找什麼。因此
+        pid、指令、主機名與啟動時間**都要有** —— 少一個就少一條
+        線索，而這是唯一一份線索。
+
+        兩條路徑共用這一個函式：啟動時 reader 掛不上去，以及執行中
+        reader 死掉。分成兩份寫法的話，其中一份遲早會少一個欄位。
+
+        寫不進去也不拋：呼叫端已經在處理另一個失敗了。
+        """
+        import socket
+
+        try:
+            pid = getattr(process, "pid", None)
+        except Exception:  # noqa: BLE001
+            pid = None
+        try:
+            host = socket.gethostname()
+        except Exception:  # noqa: BLE001
+            host = ""
+
+        payload = {
+            "run_id": run_id,
+            "pid": pid,
+            "command": list(command or []),
+            "host": host,
+            "started_at": started_at or _now(),
+            "detected_at": _now(),
+            "reason": reason,
+            "note": (
+                "This process could not be confirmed dead. The run record is "
+                "deliberately kept: it is the only thing naming the process. "
+                "Find it by pid on the host above, confirm it is gone, delete "
+                "this file, then delete the run."
+            ),
+        }
+        try:
+            directory = self.run_dir(run_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            # os.open 而不是 Path.write_text：走到這裡通常正是一般
+            # 檔案寫入已經壞掉的時候。
+            handle = os.open(
+                directory / UNREAPED_FILENAME,
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+            )
+            with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(
+                    json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+                )
+        except BaseException:  # noqa: BLE001 - 已經在處理另一個失敗了
+            pass
 
     def _save_or_leave_a_trace(self, record: RunRecord, cause: object) -> None:
         """存下紀錄；存不下去就至少留一個說得出原因的檔案。
@@ -891,6 +1012,18 @@ class ConsoleRunner:
                 f"{self.formal_out.as_posix()}; this record holds the only "
                 "line-by-line evidence that the run happened and what it ran. "
                 "A dry-run record may be deleted."
+            )
+        marker = self.run_dir(run_id) / UNREAPED_FILENAME
+        if marker.exists():
+            # 刪掉它就刪掉了唯一指向那個行程的線索：機器上會有一個
+            # 在寫檔的行程，而沒有任何東西說得出它是誰啟動的。
+            # 逃生口是先確認行程已死、把標記檔拿掉，再刪這筆紀錄。
+            raise RunnerError(
+                f"run {run_id!r} has an unreaped child process. "
+                f"{marker.as_posix()} names its pid and host; confirm the "
+                "process is gone and delete that file first. Deleting this "
+                "record now would leave a running process with nothing "
+                "pointing at it."
             )
         shutil.rmtree(self.run_dir(run_id))
         self._threads.pop(run_id, None)

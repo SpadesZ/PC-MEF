@@ -42,6 +42,33 @@
     </p>
   </header>
 
+{# 「子行程可能還活著」要說得出**要去找什麼**。只給一個 unreaped
+   徽章，等於告訴使用者他有麻煩了而不告訴他麻煩在哪裡 —— 而這份
+   標記檔裡有 pid、指令與主機名（round 5 第 1、2 項）。 #}
+{% if unreaped %}
+<section class="card">
+  <h2>子行程可能仍在執行<span class="hint">這一筆需要人工確認</span></h2>
+  <div class="body">
+    <p><span class="badge bad">未確認終止</span>
+      收尾時無法確認這次執行的子行程已經結束。它可能仍在計算並寫入檔案。</p>
+    <table>
+      <tbody>
+        <tr><th>pid</th><td class="mono">{{ unreaped.pid }}</td></tr>
+        <tr><th>主機</th><td class="mono">{{ unreaped.host }}</td></tr>
+        <tr><th>啟動時間</th><td class="mono">{{ unreaped.started_at }}</td></tr>
+        <tr><th>指令</th><td class="mono">{{ unreaped.command | join(' ') }}</td></tr>
+        <tr><th>原因</th><td class="note">{{ unreaped.reason }}</td></tr>
+      </tbody>
+    </table>
+    <p class="note">
+      這筆紀錄<strong>刻意保留</strong>：它是唯一指向那個行程的線索。
+      到上面那台主機用 pid 找到它、確認已終止，再刪掉
+      <span class="mono">unreaped_process.json</span>，之後才能刪除這筆紀錄。
+    </p>
+  </div>
+</section>
+{% endif %}
+
   {# 第二層分頁。沒有內容的仍然列出但不可點 —— 見檔頭。 #}
 {# 這一筆執行**屬於誰**。放在最上面，因為 Run 頁可以從書籤直接打開，
  # 而版型頂端顯示的是「目前選中的 Project」——兩者不必然相同。
@@ -64,6 +91,20 @@
         <span class="muted mono small">{{ attribution.profile_id }} · {{ attribution.profile_version }}</span>
         {% else %}<span class="muted">啟動時未選定 Profile</span>{% endif %}
       </dd>
+      {# 這一次**實際執行的動作**，與下面那個研究流程是兩件事。
+         沒有這一行的話，一次凍結的 run 帶著七個研究節點，讀起來
+         像它本來要跑完整條 pipeline 卻只做了一步（round 5 第 4 項）。 #}
+      {% if attribution.execution and attribution.execution.kind %}
+      <dt>執行的動作</dt>
+      <dd>{{ attribution.execution.display_name or attribution.execution.kind }}
+        <span class="muted mono small">{{ attribution.execution.kind }}</span>
+        {% if attribution.execution.in_research_pipeline %}
+        <span class="tag">流程步驟 {{ attribution.execution.stage_id }}</span>
+        {% else %}
+        <span class="muted small">不是研究流程的一步</span>
+        {% endif %}
+      </dd>
+      {% endif %}
       <dt>Pipeline</dt>
       <dd class="mono">{{ attribution.pipeline_id }}
         · {{ attribution.stage_ids | length }} stages

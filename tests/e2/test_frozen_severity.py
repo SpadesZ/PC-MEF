@@ -222,5 +222,9 @@ def test_cli_sends_none_when_no_flag_is_given():
     """沒給旗標時 CLI 必須送 None，而不是自己組一個 dict。"""
     from pcmef import cli
 
-    source = inspect.getsource(cli.cmd_formal_run_e2)
+    # 入口與本體一起看：`cmd_formal_run_e2` 已拆成「入口 + 本體」，
+    # 入口只負責把任何結局都寫成終局事件，實際的邏輯在本體裡。
+    # 只看入口的話，這條守衛會安靜地變成永遠通過。
+    source = (inspect.getsource(cli.cmd_formal_run_e2)
+              + inspect.getsource(cli._formal_run_e2_body))
     assert "if args.vision_severity is None and args.tof_severity is None" in source

@@ -2429,6 +2429,11 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
     from pcmef.surrogate.single_acquisition import SensorSurrogate
     from pcmef.surrogate.temporal_model import TemporalModel
 
+    events = _stage_events(
+        getattr(args, "run_events", None), _stage_ids().STAGE_PERCEPTION
+    )
+    events.run_started(detail=f"simulation_out={args.simulation_out}")
+
     sim_root = Path(args.simulation_out)
     scenarios = (
         sorted(p for p in sim_root.iterdir() if p.is_dir()) if sim_root.is_dir() else []
@@ -2438,14 +2443,17 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
             f"error: no simulation scenarios under {sim_root}; run `sim smoke` first",
             file=sys.stderr,
         )
+        events.stage_failed(f"no simulation scenarios under {sim_root}")
         return 1
+
+    events.stage_started(total=len(scenarios))
 
     surrogate = SensorSurrogate(PLACEHOLDER_SMOKE_CALIBRATION)
     model = TemporalModel(surrogate)
     rows: list[dict[str, object]] = []
     non_finite = 0
 
-    for scenario in scenarios:
+    for index, scenario in enumerate(scenarios, start=1):
         transient_path = scenario / "transient.npy"
         axis_path = scenario / "transient_time.npy"
         ambient_path = scenario / "transient_ambient.npy"
@@ -2462,6 +2470,7 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
                 "to regenerate this scenario.",
                 file=sys.stderr,
             )
+            events.stage_failed(f"{scenario.name}: no transient_ambient.npy")
             return 1
         ambient_transient = np.load(ambient_path)
 
@@ -2490,6 +2499,8 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
             row[f"{metric}_sd"] = float(recording.values[:, index].std())
         row["all_finite"] = finite
         rows.append(row)
+        # 每一個場景**真的算完之後**才前進一格。
+        events.stage_progress(index, len(scenarios), detail=scenario.name)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2510,7 +2521,14 @@ def cmd_surrogate_smoke(args: argparse.Namespace) -> int:
         "evidence for E1-G04 only and carry no fidelity claim (E1-G12).",
         file=sys.stderr,
     )
-    return 1 if non_finite else 0
+    if non_finite:
+        events.stage_failed(f"{non_finite} scenario(s) produced non-finite values")
+        return 1
+    events.stage_completed(
+        detail=f"{len(rows)} scenario(s)",
+        artifacts=((out_dir / "surrogate_smoke.csv").as_posix(),),
+    )
+    return 0
 
 
 def _run_sim_worker(args: argparse.Namespace) -> int:
@@ -3287,6 +3305,43 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     events.run_started(detail=f"mode={args.mode}")
     events.stage_started(detail="pre-flight")
 
+    # **從這裡到最後一個 return 之間的每一條路徑都要留下終局事件。**
+    #
+    # 這一整段包在 try 裡，是因為 early return 之外還有 exception：
+    # pre-flight 自己壞掉、lineage 讀不到、binding 解析失敗。它們與
+    # 「pre-flight 判定不通過」對畫面而言一樣 —— 留白的話都顯示
+    # 「沒有 stage 記錄」，讀起來像從未開始，而它其實開始了而且失敗了。
+    try:
+        return _formal_run_e2_body(
+            args, events, dict(
+                LLM_MODE_EXECUTE=LLM_MODE_EXECUTE, LLM_MODE_SKIP=LLM_MODE_SKIP,
+                FormalE2Error=FormalE2Error, ClaimError=ClaimError,
+                run_formal_e2_full=run_formal_e2_full,
+                subprocess=subprocess, uuid=uuid,
+                datetime=datetime, timezone=timezone,
+            ),
+        )
+    except BaseException as error:  # noqa: BLE001 - 崩潰同樣是一個結局
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
+
+
+def _formal_run_e2_body(args, events, deps) -> int:
+    """`cmd_formal_run_e2` 的本體。終局事件由呼叫端與這裡共同保證。
+
+    拆出來是為了讓「每一條 return 之前都發過終局事件」看得出來 ——
+    包在一個大 try 裡的話，讀的人分不清哪些 return 已經發過。
+    """
+    LLM_MODE_EXECUTE = deps["LLM_MODE_EXECUTE"]
+    LLM_MODE_SKIP = deps["LLM_MODE_SKIP"]
+    FormalE2Error = deps["FormalE2Error"]
+    ClaimError = deps["ClaimError"]
+    run_formal_e2_full = deps["run_formal_e2_full"]
+    subprocess = deps["subprocess"]
+    uuid = deps["uuid"]
+    datetime = deps["datetime"]
+    timezone = deps["timezone"]
+
     report = _formal_preflight(args)
     print("pre-flight")
     for check in report["checks"]:
@@ -3318,6 +3373,11 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
                 "error: the working tree has uncommitted changes. A formal run "
                 "records a commit and must be produced from it.",
                 file=sys.stderr,
+            )
+            # 拒絕是一個**結局**。留白的話 Run 頁顯示「沒有 stage 記錄」，
+            # 讀起來像這次執行從未開始。
+            events.stage_failed(
+                "refused: the working tree has uncommitted changes"
             )
             return 2
 
@@ -4451,6 +4511,11 @@ def build_parser() -> argparse.ArgumentParser:
     sur_smoke.add_argument(
         "--sample-interval-source", default="edge_impulse_export:interval_ms",
         help="上述間隔的出處；不得留空",
+    )
+    sur_smoke.add_argument(
+        "--run-events",
+        help="把 stage 事件寫進這個 run 目錄（append-only JSONL）。"
+             "由 console 傳入；**只有真正在跑的這一支會寫**。",
     )
     sur_smoke.set_defaults(func=cmd_surrogate_smoke)
 

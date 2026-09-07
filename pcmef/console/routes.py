@@ -63,7 +63,51 @@ def _deny_action(message: str, status: int):
     return jsonify({"error": message}), status
 
 
-def _resolve_run_identity(context, profile):
+def _unreaped_marker(run_dir):
+    """讀回「子行程可能還活著」的標記。沒有就是 None。
+
+    讀不出來時回 None 而不是編一個：這一頁本來就是在處理一個
+    已經出錯的狀態，再加上一份猜測只會讓人查更久。
+    """
+    from pcmef.console.runner import UNREAPED_FILENAME
+
+    path = Path(run_dir) / UNREAPED_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"note": f"{path.as_posix()} 存在但讀不出來。"}
+
+
+def _describe_execution(project, kind: str, stage_ids) -> dict:
+    """這一次**實際執行的動作**。與研究流程分開記。
+
+    `pipeline_snapshot` 說的是「這個研究的流程長什麼樣」，這裡說的是
+    「這一次按下去跑了哪一支 executor」。兩者混成同一份的後果是：
+    一次凍結的 run 帶著七個研究節點的快照，讀起來像它本來要跑完
+    整條 pipeline 卻只做了一步 —— 而凍結根本不是流程的一步。
+
+    `in_research_pipeline` 由 executor 宣告的 stage 是否落在這個 run
+    自己的流程裡決定，**不是由畫面猜的**。
+    """
+    from pcmef.platform.executors import describe, stage_of
+
+    template = getattr(project, "template", "") or ""
+    stage_id = stage_of(template, kind)
+    display_name = next(
+        (e.display_name for e in describe(template) if e.kind == kind), ""
+    )
+    return {
+        "kind": kind,
+        "stage_id": stage_id,
+        "display_name": display_name,
+        "template": template,
+        "in_research_pipeline": bool(stage_id) and stage_id in tuple(stage_ids),
+    }
+
+
+def _resolve_run_identity(context, profile, kind: str = ""):
     """把**已經解析好的**身分展開成這次執行的歸屬快照。
 
     `context` 與 `profile` 由 `launch.launch_run()` 解析一次後傳進來。
@@ -101,6 +145,9 @@ def _resolve_run_identity(context, profile):
         "design_digest": design_digest,
         "definition": definition,
         "artifact_roots": context.paths.as_dict(),
+        "execution": _describe_execution(
+            context.project, kind, definition.stage_ids
+        ),
     }
 
 
@@ -128,6 +175,7 @@ def _write_attribution(run_dir, run_id: str, identity) -> None:
         stage_ids=definition.stage_ids,
         artifact_roots=identity["artifact_roots"],
         pipeline_snapshot=definition.to_json(),
+        execution=identity.get("execution", {}),
     ))
 
 
@@ -488,6 +536,11 @@ def run_page(run_id: str, section: str = "overview"):
     # 沒有事件檔就是沒有 stage 級記錄（舊的 run 都是這樣），
     # 畫面會說明這件事而不是顯示一條假的進度條。
     context["stage_progress"] = _stage_progress(run_dir, attribution)
+
+    # 「子行程可能還活著」必須在畫面上說得出**要去找什麼**。
+    # 只顯示一個 unreaped 徽章，等於告訴使用者「你有麻煩了」而不告訴他
+    # 麻煩在哪裡 —— 而這份標記檔裡有 pid、指令與主機名。
+    context["unreaped"] = _unreaped_marker(run_dir)
 
     label = next(s.label for s in RUN_SECTIONS if s.key == section)
     return render_template(

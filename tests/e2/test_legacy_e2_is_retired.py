@@ -104,7 +104,11 @@ def test_pilot_default_directory_is_the_pilot_set():
 
 def test_formal_run_e2_is_wired_to_the_full_executor():
     """唯一的 Formal E2 入口必須呼叫 run_formal_e2_full，而不是 gate 的那條。"""
-    source = inspect.getsource(cli.cmd_formal_run_e2)
+    # 入口與本體一起看：`cmd_formal_run_e2` 已拆成「入口 + 本體」，
+    # 入口只負責把任何結局都寫成終局事件，實際的邏輯在本體裡。
+    # 只看入口的話，這條守衛會安靜地變成永遠通過。
+    source = (inspect.getsource(cli.cmd_formal_run_e2)
+              + inspect.getsource(cli._formal_run_e2_body))
     assert "run_formal_e2_full" in source
     assert "gate.run_formal_e2" not in source
     assert "from pcmef.perception.gate import run_formal_e2" not in source
@@ -112,7 +116,11 @@ def test_formal_run_e2_is_wired_to_the_full_executor():
 
 def test_formal_run_e2_does_not_reimplement_the_loop():
     """CLI 不得自己寫決策迴圈；它只負責 pre-flight 與交棒。"""
-    source = inspect.getsource(cli.cmd_formal_run_e2)
+    # 入口與本體一起看：`cmd_formal_run_e2` 已拆成「入口 + 本體」，
+    # 入口只負責把任何結局都寫成終局事件，實際的邏輯在本體裡。
+    # 只看入口的話，這條守衛會安靜地變成永遠通過。
+    source = (inspect.getsource(cli.cmd_formal_run_e2)
+              + inspect.getsource(cli._formal_run_e2_body))
     assert "decide_case" not in source
     assert "build_case_evidence" not in source
 

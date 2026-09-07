@@ -3,7 +3,7 @@
 #         測試。不被任何 production 模組匯入。
 # 檔案路徑: tests/conftest.py
 # 產生時間: 2026-09-07 11:05 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 跑測試不得改到 repo 的科研輸出與專案 metadata —— 這裡在
 #           session 前後各取一次指紋，變了就讓整輪失敗。
 # 模組定位: Execution Layer Closure round 3 的第 6 項。
@@ -28,6 +28,11 @@
 #     那段時間確實存在一份假資料；抓得到它的只有寫入當下的攔截。
 #   - 不得讓 tripwire 擋到讀取。tests/e2 正當地讀 canonical 路徑做
 #     位址運算，擋到它就會有人把整個守衛關掉。
+#   - **不得把粗篩改回比對絕對路徑前綴。** 相對路徑（最常見的寫法）
+#     一個字都對不上，於是在 resolve() 之前就被放行 —— 整道守衛
+#     等於只擋得住已經寫成絕對路徑的那一種。
+#   - v0.3.0 修正：粗篩改比對根目錄名稱，讓相對路徑、`..` 與 symlink
+#     真的走到 resolve()。對應 round 5 的第 3 項。
 #   - v0.2.0 新增：WriteTripwire 以稽核事件攔下寫入，對應 round 4 的
 #     第 4 項（寫了又刪同樣算污染）。
 #   - v0.1.0 新增：首版，對應 round 3 的第 6 項。
@@ -85,13 +90,19 @@ class WriteTripwire:
 
     def __init__(self, protected) -> None:
         self._roots = [Path(p).resolve() for p in protected]
-        # 先用字串前綴粗篩，命中了才做真正的路徑解析。
+        # 粗篩比對的是每個受保護根目錄的**最後一段名字**，不是它的
+        # 絕對路徑前綴。
         #
-        # 這條路徑跑在每一次 open() 上：整輪測試有數十萬次，而其中
-        # 真正命中的是零次。resolve() 會打 syscall，放在粗篩前面會
-        # 讓整個 suite 慢到有人想關掉守衛 —— 而被關掉的守衛等於沒有。
-        self._prefixes = tuple(
-            str(root).lower().rstrip("\\/") for root in self._roots
+        # 先前用絕對前綴，於是 `outputs/perception/e2_final/x.json`
+        # 這種相對寫法一個字都對不上，在 resolve() 之前就被放行 ——
+        # 而相對路徑正是最常見的寫法。那段程式碼的註解宣稱「相對路徑
+        # 在解析那一步才被攤平」，但根本走不到那一步。
+        #
+        # 名字比對會有誤判（`freeze_candidate` 也含 "freeze"），
+        # 那沒關係：粗篩只負責決定要不要付 resolve() 的代價，
+        # 真正的判定在下面。**寧可多解析幾次，不可少擋一次。**
+        self._needles = tuple(
+            root.name.lower() for root in self._roots if root.name
         )
         #: 曾經嘗試過的寫入。即使被擋下也留著 —— 「試過」本身就是
         #: 要修的東西。
@@ -108,10 +119,10 @@ class WriteTripwire:
             except Exception:  # noqa: BLE001
                 return False
         lowered = raw.lower()
-        if not any(prefix in lowered for prefix in self._prefixes):
+        if not any(needle in lowered for needle in self._needles):
             return False
         # 粗篩命中了才付解析的代價。相對路徑、`..` 與 symlink 都在
-        # 這一步才被攤平 —— 粗篩會漏掉它們，這一步不會。
+        # 這一步被攤平 —— 而現在粗篩真的會讓它們走到這裡。
         try:
             resolved = Path(raw).resolve()
         except Exception:  # noqa: BLE001

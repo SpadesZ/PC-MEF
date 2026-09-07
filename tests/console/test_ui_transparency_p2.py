@@ -326,10 +326,19 @@ def test_two_ids_never_collapse_onto_one_directory():
 
 
 def test_the_auto_run_id_is_not_second_resolution_only():
-    """同一秒啟動的兩次預演不得拿到同一個目錄。"""
+    """同一秒啟動的兩次預演不得拿到同一個目錄。
+
+    入口與本體一起看：`cmd_formal_run_e2` 已拆成「入口 + 本體」，
+    入口只負責把任何結局都寫成終局事件，實際組出 run_id 的那一行在
+    本體裡。只看入口的話，這條守衛會安靜地變成永遠通過。
+    守的規則沒變（NOTE-088）—— 只有秒級時間戳的話，同一秒內啟動的
+    兩次預演會拿到同一個目錄。
+    """
     from pcmef import cli
 
-    source = inspect_source(cli.cmd_formal_run_e2)
+    source = inspect_source(cli.cmd_formal_run_e2) + inspect_source(
+        cli._formal_run_e2_body
+    )
     assert "uuid.uuid4().hex" in source, "自動 run_id 必須帶隨機尾碼"
     assert "%Y%m%dT%H%M%S" in source     # 時間戳仍在，方便人讀
 

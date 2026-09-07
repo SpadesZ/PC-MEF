@@ -123,35 +123,21 @@ def _discard(runner, run_id: str) -> None:
         pass
 
 
-def _mark_unreaped(runner, run_id: str, reason: str) -> None:
+def _mark_unreaped(runner, run_id: str, error) -> None:
     """把「行程可能還活著」寫進這筆 run。
 
-    寫的是一個獨立的檔案而不是改 run.json：run record 的形狀由
-    runner 定義，而這是一個例外狀態的註記，不是它的欄位。
-    寫不進去也不拋 —— 這條路徑已經在處理另一個失敗了。
+    格式由 `runner.mark_unreaped()` 決定，兩條路徑共用同一份 ——
+    啟動時 reader 掛不上去（這裡），以及執行中 reader 死掉
+    （`ConsoleRunner._pump`）。各寫一份的話，其中一份遲早會少一個
+    欄位，而少的通常是 pid，也就是唯一能讓人找到那個行程的東西。
     """
-    import json
-    from datetime import datetime, timezone
-
-    try:
-        directory = runner.run_dir(run_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "unreaped_process.json").write_text(
-            json.dumps({
-                "run_id": run_id,
-                "reason": reason,
-                "at": datetime.now(timezone.utc).astimezone().isoformat(),
-                "note": (
-                    "The launch failed and the child process could not be "
-                    "confirmed dead. This record is deliberately NOT rolled "
-                    "back: it is the only thing pointing at that process. "
-                    "Check for it manually, terminate it, then delete this run."
-                ),
-            }, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-    except Exception:  # noqa: BLE001
-        pass
+    process = getattr(error, "process", None)
+    runner.mark_unreaped(
+        run_id, process,
+        reason=str(error),
+        command=getattr(error, "command", None),
+        started_at=getattr(error, "started_at", ""),
+    )
 
 
 def launch_run(runner, spec, *, capability: str):
@@ -189,7 +175,7 @@ def launch_run(runner, spec, *, capability: str):
     _require_executor(context.project, spec.kind)
 
     try:
-        identity = _resolve_run_identity(context, profile)
+        identity = _resolve_run_identity(context, profile, spec.kind)
     except LaunchRefused:
         # 已經是一個有理由與狀態碼的拒絕。**不得再包一層** ——
         # 包起來之後畫面上顯示的是「無法確定歸屬：<真正的理由>」，
@@ -223,7 +209,7 @@ def launch_run(runner, spec, *, capability: str):
         # 仍可能在寫檔的行程的線索。刪掉之後，機器上有一個算圖的
         # 行程，而沒有任何東西說得出它是誰啟動的、在跑什麼。
         # 留著一筆狀態不明的紀錄，比留下一個查不到的行程好。
-        _mark_unreaped(runner, run_id, str(error))
+        _mark_unreaped(runner, run_id, error)
         raise LaunchRefused(
             f"這次執行沒有啟動成功，而且**子行程可能仍在執行**：{error}"
             f" 紀錄 {run_id} 已保留，供你手動確認並終止該行程。",

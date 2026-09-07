@@ -3,7 +3,7 @@
 #         頁讀取。**write-once：寫下之後不得再改。**
 # 檔案路徑: pcmef/platform/runs/attribution.py
 # 產生時間: 2026-09-08 09:20 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 一次 run 的歸屬快照 —— 它屬於哪個 Project / Profile，
 #           當時的 pipeline 是什麼形狀。
 # 模組定位: post-platform audit P0-1 的修正。歷史 run **不得**用
@@ -17,6 +17,7 @@
 #   4. digest_of() 產生設計與流程的內容指紋
 #   5. owned_by() 判定某個 project 是否擁有這次 run
 #   6. attribution_boundary() 安裝／讀取歸屬邊界，壞掉即 fail-closed
+#   7. execution 記錄這一次實際執行的動作（與研究流程分開）
 # 維護提醒:
 #   - **不得提供更新歸屬的函式。** 可被改寫的歸屬等於沒有歸屬；
 #     一次 run 的 Project/Profile 是它的身分，不是它的設定。
@@ -27,6 +28,12 @@
 #   - **不得在邊界讀不到時退回「現在時間」。** 那會把所有既有 run 一次
 #     推到邊界之前，於是刪掉歸屬檔就能把任何一筆變成碩論的 —— 而且
 #     偏偏發生在檔案已經壞掉、最不該放寬的時候。
+#   - **不得把 execution 與 pipeline_snapshot 併回同一份。** 前者是
+#     「這一次跑了什麼」，後者是「這個研究的流程長什麼樣」；混在一起
+#     之後，一次凍結的 run 會帶著七個研究節點，讀起來像它本來要跑完
+#     整條 pipeline。
+#   - v0.3.0 新增：execution 區塊，對應 round 5 的第 4 項。
+#     舊檔沒有這個欄位仍讀得回來（預設空字典）。
 #   - v0.2.0 變更：attribution_boundary() 改為 fail-closed，對應
 #     Execution Layer Closure round 2 的 P0-3。
 #   - v0.1.0 新增：首版，對應 post-platform audit P0-1。
@@ -119,6 +126,18 @@ class RunAttribution:
     #: Output 說明或 artifact 角色，歷史 run 會被新的定義重新解釋，
     #: 而畫面不會說它被改寫過（P1-1）。
     pipeline_snapshot: Mapping[str, Any] = field(default_factory=dict)
+    #: 這一次**實際執行了什麼**。與 pipeline_snapshot 是兩件事。
+    #:
+    #: pipeline_snapshot 描述的是「這個研究的流程長什麼樣」；execution
+    #: 描述的是「這一次按下去跑了哪一支 executor」。兩者混成同一份的
+    #: 後果是：一次 llm snapshot 的 run 帶著七個研究節點的快照，
+    #: 讀起來像它本來要跑完整條 pipeline 卻只做了一步 —— 而它根本
+    #: 不是流程的一步。
+    #:
+    #: 欄位：kind / stage_id / display_name / template /
+    #: in_research_pipeline。空字典代表這筆 run 早於本機制（歷史 run），
+    #: **不得替它推論一個**。
+    execution: Mapping[str, Any] = field(default_factory=dict)
     created_at: str = ""
     note: str = ""
 
@@ -138,6 +157,7 @@ class RunAttribution:
             "stage_ids": list(self.stage_ids),
             "artifact_roots": dict(self.artifact_roots),
             "pipeline_snapshot": dict(self.pipeline_snapshot),
+            "execution": dict(self.execution),
             "created_at": self.created_at
             or datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "note": self.note,
@@ -165,6 +185,9 @@ class RunAttribution:
             stage_ids=tuple(str(s) for s in data.get("stage_ids", ())),
             artifact_roots=dict(data.get("artifact_roots", {})),
             pipeline_snapshot=dict(data.get("pipeline_snapshot", {})),
+            # 歷史 run 沒有這個欄位。缺就是缺 —— **不得替它推論一個**，
+            # 那會讓「這筆早於本機制」與「這筆執行了某個動作」分不開。
+            execution=dict(data.get("execution", {})),
             created_at=str(data.get("created_at", "")),
             note=str(data.get("note", "")),
         )
