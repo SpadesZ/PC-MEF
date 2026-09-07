@@ -27,6 +27,26 @@ from __future__ import annotations
 import pytest
 
 
+def csrf_token(client) -> str:
+    """從 session 取 CSRF token，而不是從畫面上刮。
+
+    刮畫面的寫法在「沒有 executor / 沒有能力」的專案上會誤導：那些
+    專案根本不會畫出任何表單，於是「拿不到 token」看起來像頁面壞了，
+    而它正是預期行為。要驗的是**端點**擋不擋得住，因此 token 必須與
+    畫面上有沒有按鈕無關。
+    """
+    from pcmef.admin.auth import new_csrf_token
+    from pcmef.admin.routes_llm import CSRF_SESSION_KEY
+
+    client.get("/console")
+    with client.session_transaction() as session:
+        token = session.get(CSRF_SESSION_KEY)
+        if not token:
+            token = new_csrf_token()
+            session[CSRF_SESSION_KEY] = token
+    return token
+
+
 def _start_attributed(app, spec, *, project_id: str = "pcmef-thesis"):
     """以合法歸屬啟動一次 run，回傳 RunRecord。
 

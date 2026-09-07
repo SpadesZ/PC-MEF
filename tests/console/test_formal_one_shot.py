@@ -185,9 +185,30 @@ def test_a_dry_run_without_a_run_id_is_refused(tmp_path):
 
 
 def test_console_run_directory_holds_no_scientific_result(runner, tmp_path):
-    """指令不得把報告寫進 run 目錄；那裡只留指標。"""
+    """指令不得把**科學輸出**寫進 run 目錄；那裡只留指標與 UI 紀錄。
+
+    逐一檢查會決定科學結果落點的旗標，而不是整條指令的字串比對：
+    `--run-events` 也指向 run 目錄，但它寫的是 stage 事件 —— UI 用的
+    觀測記錄，刪掉不會失去任何科學證據。把它一起擋掉，等於為了這條
+    測試而放棄進度顯示；而放寬成「整條指令都不准提到 run 目錄」則會
+    在下一次有人加旗標時再壞一次。
+    """
     command = _command(runner, "formal")
-    assert str(runner.run_dir("run-under-test")) not in " ".join(command)
+    run_dir = str(runner.run_dir("run-under-test"))
+
+    scientific_flags = ("--out", "--base", "--ds-dir", "--freeze-dir",
+                        "--registry-dir", "--agent-cache")
+    for flag in scientific_flags:
+        if flag in command:
+            value = command[command.index(flag) + 1]
+            assert run_dir not in value, (
+                f"{flag} points into the console run directory; scientific "
+                "results must land in the canonical location"
+            )
+
+    # 對照：真的有一個旗標指向 run 目錄，而它是 UI 觀測記錄那一個。
+    assert "--run-events" in command
+    assert command[command.index("--run-events") + 1] == run_dir
 
 
 def test_the_pointer_names_the_canonical_report(runner, tmp_path):

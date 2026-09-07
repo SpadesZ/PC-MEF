@@ -3,7 +3,7 @@
 #         每個 run 一個 append-only JSONL 檔。**Web 只讀，不寫。**
 # 檔案路徑: pcmef/platform/runs/events.py
 # 產生時間: 2026-09-07 16:10 +08:00
-# 版本: v0.1.0
+# 版本: v0.2.0
 # 功能說明: run 的 stage 事件記錄 —— 寫入、讀取與 schema。
 # 模組定位: 平台化 Phase 5 的 source of truth。
 #           **進度由 executor 寫出的事件決定**，前端只是把事件重播成畫面。
@@ -11,7 +11,7 @@
 #           正是使用者最想知道發生什麼的時候。
 # 主要責任:
 #   1. EVENT_TYPES 定義六種事件與其語意
-#   2. RunEventWriter 以 append-only 方式寫入，一行一事件
+#   2. RunEventWriter 以 append-only 方式寫入，失敗只計數不拋
 #   3. read_events() 讀回事件序列，壞行略過但計數
 #   4. emit_* 便利函式給 executor 使用
 # 維護提醒:
@@ -21,6 +21,11 @@
 #     可被重建的前提；就地修改會讓失敗過程消失。
 #   - 不得因為一行壞掉就丟棄整份記錄。壞行略過並計數，
 #     否則一個寫到一半的行會讓整次執行看起來沒發生過。
+#   - **不得讓寫入失敗往外拋。** 事件檔是觀測記錄，不是實驗的一部分；
+#     把「看不到進度」升級成「沒有結果」是這個模組能造成的最大傷害。
+#   - 不得讓 fail-soft 變成靜默。掉了幾筆要留在 dropped / last_error，
+#     否則「沒有進度」與「寫不進去」在畫面上長得一樣。
+#   - v0.2.0 變更：寫入 fail-soft 並計數，對應 round 4 的第 1 項。
 #   - v0.1.0 新增：首版，對應平台化 Phase 5。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_run_progress.py -v
@@ -125,23 +130,57 @@ class RunEventWriter:
     **只有 executor 該持有它。** 每一次 write 都開檔、寫入、關檔：
     執行中途被中斷時，已寫出的行仍然完整，而那正是要重建
     「跑到哪裡壞掉」所需要的東西。
+
+    **寫入失敗一律 fail-soft。** 這個檔案是觀測記錄，不是實驗的一部分：
+    磁碟滿了、handle 用盡、fsync 在網路磁碟上失敗，都不該讓一次算了
+    半小時的模擬跟著失敗。「看不到進度」與「沒有結果」是兩件事，而把
+    前者升級成後者是這個模組能造成的最大傷害。
+
+    但 fail-soft **不等於假裝沒事**：掉了幾筆、為什麼掉，都留在
+    `dropped` 與 `last_error`，由 executor 在結束時說出來。靜默的
+    fail-soft 會讓「這次執行沒有進度」與「進度寫不進去」看起來一樣，
+    而那是兩種完全不同的問題。
     """
 
     def __init__(self, run_dir: str | Path) -> None:
         self._path = Path(run_dir) / EVENT_FILENAME
+        #: 寫失敗而丟掉的事件數。
+        self.dropped = 0
+        #: 最後一次失敗的原因，供 executor 在結束時列印。
+        self.last_error = ""
 
     @property
     def path(self) -> Path:
         return self._path
 
+    @property
+    def degraded(self) -> bool:
+        """有沒有掉過事件。畫面與 log 都該據此說明記錄不完整。"""
+        return self.dropped > 0
+
     def _append(self, event: RunEvent) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event.to_json(), ensure_ascii=False, sort_keys=True)
-        with open(self._path, "a", encoding="utf-8") as stream:
-            stream.write(line + "\n")
-            stream.flush()
-            # 中斷時未 flush 的行會整行消失；那會讓最後一步看起來沒開始過。
-            os.fsync(stream.fileno())
+        """寫一行。**任何失敗都只記在自己身上，不往外拋。**
+
+        catch 的是 `Exception` 而不只是 `OSError`：這條路徑上還有序列化
+        與時間格式化，而在 executor 的中途被任何一種打斷，結果都是同一
+        件事 —— 一次成功的實驗被記錄設施拖垮。
+
+        **但 KeyboardInterrupt 與 SystemExit 照常往外傳。** 那兩個是
+        「使用者要停下來」，不是「這一行寫不進去」；吞掉它們會讓
+        Ctrl-C 在恰好落在 fsync 那一瞬間時失效，而那種失效沒有規律，
+        看起來只會像「有時候按了沒反應」。
+        """
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(event.to_json(), ensure_ascii=False, sort_keys=True)
+            with open(self._path, "a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
+                stream.flush()
+                # 中斷時未 flush 的行會整行消失；那會讓最後一步看起來沒開始過。
+                os.fsync(stream.fileno())
+        except Exception as error:  # noqa: BLE001 - telemetry 不得拖垮執行
+            self.dropped += 1
+            self.last_error = f"{type(error).__name__}: {error}"
 
     def run_started(self, detail: str = "") -> None:
         self._append(RunEvent(RUN_STARTED, detail=detail))

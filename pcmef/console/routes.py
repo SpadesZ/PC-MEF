@@ -336,7 +336,9 @@ def page():
     # 這裡只是讓看得到的與按得動的一致 —— 一顆按下去永遠 403 的按鈕，
     # 讀起來像系統壞了，而其實是這個 Project 本來就不該有這個動作。
     from pcmef.platform.capabilities import capabilities_for
+    from pcmef.platform.executors import describe, supports
 
+    template = ""
     try:
         from pcmef.console.project_routes import request_context
 
@@ -344,19 +346,33 @@ def page():
         granted = capabilities_for(
             context.project, getattr(context.selected, "profile", None)
         )
+        template = getattr(context.project, "template", "") or ""
     except Exception:  # noqa: BLE001 - Run 首頁不得因能力解析失敗而 500
         granted = frozenset()
 
+    # 模擬表單只在這個研究模板真的有那支 executor 時才畫出來。
+    # `classes` 同理：那四個類別是 PC-MEF 的，不是平台的 —— 列給
+    # 一個沒有該 executor 的專案看，等於邀請它去跑別人的場景。
+    may_simulate = supports(template, "sim_smoke")
     return render_template(
         "console.html",
         **nav_context("run"),
         breadcrumb=breadcrumb(("實驗 Run", None), project_name=_project_name()),
         csrf_token=token,
         presets=PRESETS,
-        classes=current_app.config.get("PCMEF_CONSOLE_CLASSES", []),
+        classes=(
+            current_app.config.get("PCMEF_CONSOLE_CLASSES", [])
+            if may_simulate else []
+        ),
         active=active,
-        may_read_llm_snapshot=LLM_SNAPSHOT_READ in granted,
-        may_freeze_llm_runtime=LLM_RUNTIME_FREEZE in granted,
+        may_simulate=may_simulate,
+        executors=describe(template),
+        may_read_llm_snapshot=(
+            LLM_SNAPSHOT_READ in granted and supports(template, "llm_snapshot")
+        ),
+        may_freeze_llm_runtime=(
+            LLM_RUNTIME_FREEZE in granted and supports(template, "llm_snapshot")
+        ),
     )
 
 

@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -129,7 +130,15 @@ class RunLaunchError(RunnerError):
     與「跑完之後失敗」分開：**沒跑起來的 run 不該存在**。呼叫端接到
     這個例外時必須把整筆 run 收回，否則會留下一個有歸屬、有紀錄、
     但從未執行過的目錄，而它在清單上與真的跑過的長得一模一樣。
+
+    `process_reaped` 為 False 時**不得回滾**：那代表行程可能還活著，
+    而 run 目錄是唯一指向它的線索。刪掉之後，機器上有一個在寫檔的
+    行程，而沒有任何紀錄說得出它是誰、在跑什麼。
     """
+
+    def __init__(self, message: str, *, process_reaped: bool = True) -> None:
+        self.process_reaped = process_reaped
+        super().__init__(message)
 
 
 def _now() -> str:
@@ -178,6 +187,12 @@ DEFAULT_FORMAL_OUT = "outputs/perception/e2_final"
 #: 任何 formal artifact —— 但畫面仍然要知道那次 run 的報告在哪裡，
 #: 這份指標就是那條線。
 FORMAL_POINTER = "formal_output.json"
+
+#: 連 run.json 都寫不進去時留下的最後線索。
+#:
+#: 名字刻意與 run record 分開：它不是紀錄的一部分，而是「這筆紀錄
+#: 本身沒能寫成功」的證據。清單上看不到它，但目錄裡有。
+RUN_CRASH_FILENAME = "run_crash.txt"
 
 
 @dataclass(frozen=True)
@@ -482,7 +497,10 @@ class ConsoleRunner:
             # 候選快照永遠會產生，隨這次 run 存著；--freeze 才會寫
             # freeze/llm_runtime.lock.json，而且前提未齊時是 CLI 自己
             # 拒絕（exit 2），不是這裡判斷的。
-            command = base + ["llm", "snapshot", "--out", str(out_dir)]
+            command = base + [
+                "llm", "snapshot", "--out", str(out_dir),
+                "--run-events", str(self.run_dir(run_id)),
+            ]
             if spec.params.get("freeze"):
                 command.append("--freeze")
             return command
@@ -498,6 +516,7 @@ class ConsoleRunner:
             mode = str(spec.params.get("mode", "dry-run"))
             command = base + [
                 "formal", "run-e2", "--mode", mode, "--out", str(self.formal_out),
+                "--run-events", str(self.run_dir(run_id)),
             ]
             if mode == "dry-run":
                 # 用 console 的 run_id 當預演目錄名：兩者因此指的是同一次
@@ -507,7 +526,10 @@ class ConsoleRunner:
                 # 正式執行才接快取：dry run 本來就不呼叫 provider。
                 command += ["--agent-cache", str(self.agent_cache_root)]
             return command
-        return base + ["audit", "e1-gates", "--out", str(out_dir)]
+        return base + [
+            "audit", "e1-gates", "--out", str(out_dir),
+            "--run-events", str(self.run_dir(run_id)),
+        ]
 
     def formal_pointer(self, run_id: str) -> dict[str, Any] | None:
         """這次 run 的 formal 報告落在哪裡。不是 formal run 就回 None。"""
@@ -624,10 +646,11 @@ class ConsoleRunner:
             # 會回滾 run 目錄，於是這個行程之後不會出現在任何清單上 ——
             # 它仍在算圖、仍在寫檔，而沒有任何紀錄指向它。
             # 只 raise 不 reap 等於製造一個查不到的算圖行程。
-            self._reap(process)
+            reaped = self._reap(process)
             raise RunLaunchError(
                 f"run {run_id!r} started a process but could not attach its "
-                f"reader: {type(error).__name__}: {error}"
+                f"reader: {type(error).__name__}: {error}",
+                process_reaped=reaped,
             ) from error
         # 註冊放在 start() 之後：沒起來的執行緒留在表裡，wait() 會對著
         # 一個永遠不會結束的東西 join。
@@ -635,34 +658,59 @@ class ConsoleRunner:
         return record
 
     @staticmethod
-    def _reap(process: "subprocess.Popen[str]") -> None:
+    def _reap(process: "subprocess.Popen[str]") -> bool:
         """收掉一個已經啟動、但不會有人讀它的子行程。
 
+        回傳**這個行程確定已經結束**與否。呼叫端據此決定要不要把
+        run 目錄刪掉：那個目錄是唯一指向這個行程的線索，收不掉就
+        不能刪（見 `console.launch._discard`）。
+
         terminate 之後**一定要 wait**：只送訊號不回收會留下 zombie，
-        而 zombie 在 `ps` 上看起來與正在跑的沒有兩樣。真的殺不掉時
-        再 kill 一次；兩次都失敗就只能放手，但那時 log 裡至少有痕跡。
+        而 zombie 在 `ps` 上看起來與正在跑的沒有兩樣。
+
+        **terminate 失敗不是放棄的理由。** 先前這裡在 terminate 拋
+        例外時直接 break，於是 kill 永遠不會被嘗試 —— 而 terminate
+        會拋的情況（權限不足、行程處於不可中斷狀態）正是最需要
+        升級成 kill 的情況。
         """
         try:
             if process.stdout is not None:
                 process.stdout.close()
         except Exception:  # noqa: BLE001 - 關不掉不影響收行程
             pass
+
+        if ConsoleRunner._already_gone(process):
+            return True
+
         for signal_name in ("terminate", "kill"):
-            if process.poll() is not None:
-                break
             try:
                 getattr(process, signal_name)()
-            except Exception:  # noqa: BLE001 - 已經結束時會拋，不是錯誤
-                break
+            except Exception:  # noqa: BLE001 - 送不出訊號就換下一個手段
+                # **continue，不是 break。** 送不出 terminate 正是該
+                # 改用 kill 的時候。
+                continue
             try:
                 process.wait(timeout=_REAP_TIMEOUT_SECONDS)
-                break
+                return True
             except Exception:  # noqa: BLE001 - 逾時就升級成 kill
                 continue
+
+        # 兩種訊號都送過了，最後再問一次。確認不到就是確認不到 ——
+        # **不得回報成功**：呼叫端會據此保留唯一指向它的紀錄。
+        return ConsoleRunner._already_gone(process)
+
+    @staticmethod
+    def _already_gone(process: "subprocess.Popen[str]") -> bool:
+        """這個行程已經結束了嗎。**非阻塞。**
+
+        刻意只問 `poll()`，不 `wait()`：在送訊號**之前**等它自己結束，
+        等於為一個我們已經決定要收掉的行程再賠上五秒，而且那五秒
+        發生在 HTTP 請求裡。問不出來就當成還活著。
+        """
         try:
-            process.wait(timeout=_REAP_TIMEOUT_SECONDS)
+            return process.poll() is not None
         except Exception:  # noqa: BLE001
-            pass
+            return False
 
     def _pump(self, record: RunRecord, process: "subprocess.Popen[str]") -> None:
         """在背景把已啟動的子行程輸出逐行寫進 log 檔。
@@ -694,7 +742,7 @@ class ConsoleRunner:
             record.note = (
                 f"輸出無法寫入，執行已中止：{type(error).__name__}: {error}"
             )
-            self._save(record)
+            self._save_or_leave_a_trace(record, error)
             return
 
         record.exit_code = exit_code
@@ -705,7 +753,59 @@ class ConsoleRunner:
                 "非零 exit code 也可能是 NOTE-012 的 drjit DLL-detach 崩潰；"
                 "請以 manifest 的 counts 判定實際成敗。"
             )
-        self._save(record)
+        self._save_or_leave_a_trace(record, None)
+
+    def _save_or_leave_a_trace(self, record: RunRecord, cause: object) -> None:
+        """存下紀錄；存不下去就至少留一個說得出原因的檔案。
+
+        `_save()` 自己也會失敗 —— 磁碟滿的時候，log 寫不進去，run.json
+        同樣寫不進去。先前那個例外從背景執行緒逃走，沒有人接得到：
+        紀錄停在「執行中」，而畫面上只是看起來特別久。
+
+        退而求其次的順序是刻意的：run.json → crash 檔 → stderr。
+        每一層都比上一層更不可能失敗，而最後一層至少會出現在
+        伺服器的輸出裡。**這個函式在任何情況下都不得往外拋。**
+        """
+        try:
+            self._save(record)
+            return
+        except BaseException as save_error:  # noqa: BLE001
+            cause = cause or save_error
+
+        detail = (
+            f"run_id={record.run_id}\n"
+            f"kind={record.kind}\n"
+            f"status={record.status}\n"
+            f"exit_code={record.exit_code}\n"
+            f"note={record.note}\n"
+            f"cause={type(cause).__name__}: {cause}\n"
+        )
+        try:
+            # os.open + write：不經過 Path.open 與 write_text，因為
+            # 走到這裡通常正是它們壞掉的時候。
+            #
+            # O_BINARY 與 "wb"：Windows 上 os.open 預設是文字模式，
+            # 再包一層文字 wrapper 會把 \n 翻譯兩次，寫出 \r\r\n。
+            # 自己編碼、以二進位寫出，兩邊都不會插手。
+            path = self.run_dir(record.run_id) / RUN_CRASH_FILENAME
+            handle = os.open(
+                path,
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+            )
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(detail.encode("utf-8", errors="replace"))
+            return
+        except BaseException:  # noqa: BLE001
+            pass
+
+        try:
+            print(
+                f"console run {record.run_id} could not record its own "
+                f"outcome:\n{detail}",
+                file=sys.stderr, flush=True,
+            )
+        except BaseException:  # noqa: BLE001 - 真的沒有辦法了
+            pass
 
     # -- 讀取 -------------------------------------------------------------
 

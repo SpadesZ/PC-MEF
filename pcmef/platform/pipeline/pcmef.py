@@ -95,10 +95,37 @@ def pcmef_pipeline(context: Any = None) -> PipelineDefinition:
     )
 
 
+#: 這個研究模板實作了哪幾支 executor。
+#:
+#: 與 pipeline provider 登記在同一個地方，因為它們回答的是同一件事的
+#: 兩半：pipeline 說「這個研究長什麼樣」，executor 說「它有什麼可以
+#: 真的跑」。分在兩處登記，遲早會有一個模板宣告了流程卻沒有執行器，
+#: 或者相反 —— 而後者正是空專案跑出碩論場景的形狀。
+#:
+#: stage_id 對應 PIPELINE_NODES 的 key；沒有對應節點的（凍結、稽核）
+#: 用自己的名字，Run 頁會照實說「事件檔提到流程定義裡沒有的 stage」。
 def _register() -> None:
+    from pcmef.platform import executors as ex
     from pcmef.platform.pipeline.registry import register
 
     register(PROVIDER_NAME, pcmef_pipeline)
+    for kind, display_name, stage_id, summary in (
+        ("sim_smoke", "物理校準模擬", ex.STAGE_SIMULATION,
+         "以場景設定算出 transient 並產出 smoke manifest。"),
+        ("surrogate_smoke", "代理模型四特徵", ex.STAGE_PERCEPTION,
+         "由既有模擬輸出萃取四特徵。"),
+        ("llm_snapshot", "LLM runtime 快照", ex.STAGE_LLM_SNAPSHOT,
+         "解析 draft binding 成 lock candidate，可選擇凍結。"),
+        ("formal_e2", "Formal E2", ex.STAGE_DECISION,
+         "PC-MEF Formal E2 的預演與一次性正式執行。"),
+        ("audit_gates", "E1 gate 稽核", ex.STAGE_AUDIT,
+         "逐項檢查 E1 開跑前的十二個 gate。"),
+    ):
+        ex.register(
+            PROVIDER_NAME,
+            ex.Executor(kind=kind, display_name=display_name,
+                        stage_id=stage_id, summary=summary),
+        )
 
 
 _register()

@@ -76,13 +76,80 @@ def action_context():
     return context, getattr(context.selected, "profile", None)
 
 
+def _require_executor(project, kind: str) -> None:
+    """這個 Project 的研究模板有沒有這一支 executor。
+
+    以 **template** 判定，不以 project id：資格是模板宣告出來的屬性，
+    用 id 判斷與用名字判斷只差一層。
+    """
+    from pcmef.platform.executors import describe, supports
+
+    template = getattr(project, "template", "") or ""
+    if supports(template, kind):
+        return
+
+    available = describe(template)
+    name = getattr(project, "display_name", None) or getattr(
+        project, "project_id", "<unknown>"
+    )
+    if available:
+        offered = "、".join(e.display_name for e in available)
+        detail = f"這個專案可以執行的是：{offered}。"
+    else:
+        detail = (
+            "這個專案的研究模板還沒有任何 executor —— 它有自己的流程"
+            "定義，但還沒有能真正執行那個流程的程式。"
+        )
+    raise LaunchRefused(
+        f"專案「{name}」不能執行 {kind}。{detail}"
+        "執行器屬於研究模板，不是平台的通用功能；"
+        "借用別的研究的執行器，跑出來的結果會標著這個專案的名字，"
+        "內容卻是別人的場景。",
+        403,
+    )
+
+
 def _discard(runner, run_id: str) -> None:
     """收回一筆沒有起跑的 run。**只在回滾路徑上使用。**
 
     刪除本身失敗不再拋出：那會蓋掉原本真正的失敗原因。
+
+    **只有在確定沒有行程還活著時才可以呼叫。** 目錄裡的歸屬與指令是
+    唯一指向那個行程的線索。
     """
     try:
         shutil.rmtree(runner.run_dir(run_id), ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _mark_unreaped(runner, run_id: str, reason: str) -> None:
+    """把「行程可能還活著」寫進這筆 run。
+
+    寫的是一個獨立的檔案而不是改 run.json：run record 的形狀由
+    runner 定義，而這是一個例外狀態的註記，不是它的欄位。
+    寫不進去也不拋 —— 這條路徑已經在處理另一個失敗了。
+    """
+    import json
+    from datetime import datetime, timezone
+
+    try:
+        directory = runner.run_dir(run_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "unreaped_process.json").write_text(
+            json.dumps({
+                "run_id": run_id,
+                "reason": reason,
+                "at": datetime.now(timezone.utc).astimezone().isoformat(),
+                "note": (
+                    "The launch failed and the child process could not be "
+                    "confirmed dead. This record is deliberately NOT rolled "
+                    "back: it is the only thing pointing at that process. "
+                    "Check for it manually, terminate it, then delete this run."
+                ),
+            }, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -115,6 +182,12 @@ def launch_run(runner, spec, *, capability: str):
     except CapabilityError as error:
         raise LaunchRefused(str(error), 403) from None
 
+    # 能力說「可以啟動」，executor registry 說「有什麼可以啟動」。
+    # **兩個問題都要有答案。** 少了這一條，一個只有 RUN_SIMULATION 的
+    # 空專案按下開始，跑的是 PC-MEF 的四個瓶內液態類別與那支瓶子的
+    # 幾何 —— 結果標著它自己的名字，內容卻是別人的研究。
+    _require_executor(context.project, spec.kind)
+
     try:
         identity = _resolve_run_identity(context, profile)
     except LaunchRefused:
@@ -141,8 +214,21 @@ def launch_run(runner, spec, *, capability: str):
     try:
         return runner.start(spec, run_id=run_id)
     except RunLaunchError as error:
-        _discard(runner, run_id)
-        raise LaunchRefused(f"這次執行沒有啟動成功：{error}", 409) from None
+        if getattr(error, "process_reaped", True):
+            _discard(runner, run_id)
+            raise LaunchRefused(f"這次執行沒有啟動成功：{error}", 409) from None
+        # **收不掉的行程不得連同紀錄一起消失。**
+        #
+        # 這個目錄裡有歸屬、有指令、有 run id —— 它是唯一指向那個
+        # 仍可能在寫檔的行程的線索。刪掉之後，機器上有一個算圖的
+        # 行程，而沒有任何東西說得出它是誰啟動的、在跑什麼。
+        # 留著一筆狀態不明的紀錄，比留下一個查不到的行程好。
+        _mark_unreaped(runner, run_id, str(error))
+        raise LaunchRefused(
+            f"這次執行沒有啟動成功，而且**子行程可能仍在執行**：{error}"
+            f" 紀錄 {run_id} 已保留，供你手動確認並終止該行程。",
+            409,
+        ) from None
     except (FormalRunRefused, RunnerError):
         # 白名單與參數檢查的拒絕**照原樣往上拋**：它們各有自己的狀態碼
         # （403 / 400），包成 409 會把「你不准這樣跑」講成「現在跑不成」。

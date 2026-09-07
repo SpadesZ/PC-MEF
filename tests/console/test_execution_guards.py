@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -61,8 +62,17 @@ def _select(client, project_id):
 
 
 def _token(client) -> str:
-    body = client.get("/console").get_data(as_text=True)
-    return re.search(r'name="csrf_token" value="([^"]+)"', body).group(1)
+    """從 session 取 CSRF token。實作見 tests/console/conftest.py。
+
+    沒有 executor 或沒有能力的專案不會畫出表單，因此不能從畫面上刮。
+    """
+    import importlib.util
+
+    location = Path(__file__).resolve().parent / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_pcmef_console_helpers", location)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.csrf_token(client)
 
 
 def _start(client) -> str:

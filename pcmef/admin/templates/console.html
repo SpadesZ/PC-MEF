@@ -69,6 +69,21 @@
   <section class="card" id="run-simulation">
     <h2>跑一次模擬<span class="hint">選一個 preset 就能開始；要調參數再展開下面</span></h2>
     <div class="body">
+      {# 模擬表單是 executor 的投影。這個研究模板沒有登記 sim_smoke
+         的話就不畫 —— 表單裡那四個類別與那支瓶子的幾何是 PC-MEF 的，
+         列給別的專案看等於邀請它去跑別人的場景（round 4 第 5 項）。 #}
+      {% if not may_simulate %}
+      <p class="note">
+        <span class="badge warn">這個研究模板沒有模擬執行器</span>
+        這個 Project 有自己的流程定義，但還沒有能真正執行它的程式。
+        執行器屬於研究模板，不是平台的通用功能。
+        {% if executors %}
+        目前可以執行的是：
+        {% for e in executors %}<span class="mono">{{ e.display_name }}</span>
+        {%- if not loop.last %}、{% endif %}{% endfor %}。
+        {% endif %}
+      </p>
+      {% else %}
       <form method="post" action="{{ url_for('console.start_run') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="kind" value="sim_smoke">
@@ -142,6 +157,7 @@
           <span class="note">執行過程會即時逐行顯示，就像在看終端機</span>
         </p>
       </form>
+      {% endif %}
     </div>
   </section>
 

@@ -324,16 +324,29 @@ def cmd_audit_e1_gates(args: argparse.Namespace) -> int:
     """
     from pcmef.audit.e1_gates import AuditPaths, audit_e1_gates, parse_gate_range
 
-    report = audit_e1_gates(
-        AuditPaths(
-            inventory=Path(args.inventory), splits=Path(args.splits),
-            simulation=Path(args.simulation), surrogate=Path(args.surrogate),
-            provenance=Path(args.provenance), freeze=Path(args.freeze_dir),
-            tests=Path(args.tests),
-        )
+    events = _stage_events(
+        getattr(args, "run_events", None), _stage_ids().STAGE_AUDIT
     )
-    required = parse_gate_range(args.require) if args.require else None
-    return _emit_audit(report, args.out, "e1_gate_audit.json", required)
+    events.run_started(detail=f"freeze={args.freeze_dir}")
+    events.stage_started(detail="reading the twelve E1 gates")
+    try:
+        report = audit_e1_gates(
+            AuditPaths(
+                inventory=Path(args.inventory), splits=Path(args.splits),
+                simulation=Path(args.simulation), surrogate=Path(args.surrogate),
+                provenance=Path(args.provenance), freeze=Path(args.freeze_dir),
+                tests=Path(args.tests),
+            )
+        )
+        required = parse_gate_range(args.require) if args.require else None
+        code = _emit_audit(report, args.out, "e1_gate_audit.json", required)
+    except BaseException as error:  # noqa: BLE001 - 失敗也要留下痕跡
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
+    # exit code 非零代表被指名的 gate 沒過 —— 那是稽核的**結論**，
+    # 不是稽核本身失敗。stage 照樣算完成，結論在報告裡。
+    events.stage_completed(detail=f"exit={code}")
+    return code
 
 
 def cmd_audit_heldout_firewall(args: argparse.Namespace) -> int:
@@ -356,13 +369,22 @@ def cmd_audit_real_split_policy(args: argparse.Namespace) -> int:
     return _emit_audit(report, args.out, "real_split_policy_audit.json")
 
 
-#: `sim smoke` 實作的是流程定義裡的哪一個 stage。
+#: 每一支 executor 實作的是流程定義裡的哪一個 stage。
 #:
 #: 由 **executor 這一側**宣告，不由 console 指定。console 若能指定
 #: stage id，它就能把任何一支指令的輸出說成任何一步的進度 ——
-#: 而畫面上看不出差別。若這次 run 的流程快照裡沒有這個 stage，
-#: Run 頁會照實說「事件檔提到流程定義裡沒有的 stage」。
-_SIM_SMOKE_STAGE = "simulation"
+#: 而畫面上看不出差別。
+#:
+#: 名字取自 `pcmef.platform.executors`，與登記處共用同一組常數：
+#: 兩份字面值遲早會有一份被改到，而改了之後不會報錯 —— 事件只是落在
+#: 一個沒有人在看的 stage 名下，畫面照常顯示「這一步沒開始」。
+#:
+#: 若這次 run 的流程快照裡沒有這個 stage（凍結與稽核就不是研究流程
+#: 的一步），Run 頁會照實說「事件檔提到流程定義裡沒有的 stage」。
+def _stage_ids():
+    from pcmef.platform import executors
+
+    return executors
 
 
 class _NoStageEvents:
@@ -401,23 +423,47 @@ class _StageEvents:
 
         self._writer = RunEventWriter(run_dir)
         self._stage = stage_id
+        self._announced = False
+
+    def _announce_losses(self) -> None:
+        """掉過事件就在 log 裡說一次。
+
+        說**一次**，在第一次掉的時候：留到結束才說的話，一次崩潰的
+        執行就永遠不會說。而不說的話，畫面上「這一步沒有進度」與
+        「進度寫不進去」長得完全一樣 —— 前者是執行的問題，後者是
+        機器的問題，處置方式相反。
+        """
+        if self._announced or not self._writer.degraded:
+            return
+        self._announced = True
+        print(
+            f"note: stage events are being dropped ({self._writer.last_error}). "
+            "The run itself is unaffected; only its progress display is "
+            "incomplete.",
+            file=sys.stderr, flush=True,
+        )
 
     def run_started(self, detail: str = "") -> None:
         self._writer.run_started(detail=detail)
+        self._announce_losses()
 
     def stage_started(self, total: int | None = None, detail: str = "") -> None:
         self._writer.stage_started(self._stage, total=total, detail=detail)
+        self._announce_losses()
 
     def stage_progress(self, current: int, total: int | None = None,
                        detail: str = "") -> None:
         self._writer.stage_progress(self._stage, current, total=total, detail=detail)
+        self._announce_losses()
 
     def stage_completed(self, detail: str = "", artifacts=()) -> None:
         self._writer.stage_completed(self._stage, detail=detail, artifacts=artifacts)
+        self._announce_losses()
 
     def stage_failed(self, detail: str = "") -> None:
         self._writer.stage_failed(self._stage, detail=detail)
         self._writer.run_failed(detail=detail)
+        self._announce_losses()
 
 
 def _stage_events(run_events: str | None, stage_id: str):
@@ -454,7 +500,9 @@ def cmd_sim_smoke(args: argparse.Namespace) -> int:
     # variant 不存在時，SimulationController 的建構就會拋 —— 若事件
     # 等到那之後才開始寫，這次執行在畫面上會是一片空白，看起來像
     # 「從未開始」，而它其實開始了而且失敗了。
-    events = _stage_events(getattr(args, "run_events", None), _SIM_SMOKE_STAGE)
+    events = _stage_events(
+        getattr(args, "run_events", None), _stage_ids().STAGE_SIMULATION
+    )
     events.run_started(detail=f"config={args.config}")
 
     try:
@@ -2934,12 +2982,21 @@ def cmd_llm_snapshot(args: argparse.Namespace) -> int:
     from pcmef.core.locks import LockStore
     from pcmef.llm.snapshot import build_runtime_snapshot, freeze_runtime_snapshot
 
-    service = _admin_service(args)
-    snapshot = build_runtime_snapshot(
-        service.registry, service.config,
-        schemas_dir=args.schemas_dir, prompts_dir=args.prompts_dir,
+    events = _stage_events(
+        getattr(args, "run_events", None), _stage_ids().STAGE_LLM_SNAPSHOT
     )
-    path = snapshot.write(args.out)
+    events.run_started(detail="freeze" if args.freeze else "check only")
+    events.stage_started(detail="resolving the draft bindings")
+    try:
+        service = _admin_service(args)
+        snapshot = build_runtime_snapshot(
+            service.registry, service.config,
+            schemas_dir=args.schemas_dir, prompts_dir=args.prompts_dir,
+        )
+        path = snapshot.write(args.out)
+    except BaseException as error:  # noqa: BLE001 - 失敗也要留下痕跡
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
 
     print(f"candidate hash : {snapshot.candidate_hash()}")
     print(f"runtime config : {snapshot.runtime_config_hash[:16]}")
@@ -2962,15 +3019,31 @@ def cmd_llm_snapshot(args: argparse.Namespace) -> int:
                 "see NOTES.md NOTE-005).",
                 file=sys.stderr,
             )
+            events.stage_failed(
+                "not freezable: " + "; ".join(snapshot.blocking_reasons)
+            )
             return 2
+        # 沒要求凍結時，「算出候選」就是這次執行的全部工作，因此算完成。
+        events.stage_completed(
+            detail="candidate written; not freezable",
+            artifacts=(Path(path).as_posix(),),
+        )
         return 0
 
     print("\nfreezable: all prerequisites met")
     if not args.freeze:
         print("re-run with --freeze to write freeze/llm_runtime.lock.json")
+        events.stage_completed(
+            detail="candidate written; freezable",
+            artifacts=(Path(path).as_posix(),),
+        )
         return 0
 
-    lock_path = freeze_runtime_snapshot(LockStore(args.freeze_dir), snapshot)
+    try:
+        lock_path = freeze_runtime_snapshot(LockStore(args.freeze_dir), snapshot)
+    except BaseException as error:  # noqa: BLE001 - 凍結失敗要看得見
+        events.stage_failed(f"freeze failed: {type(error).__name__}: {error}")
+        raise
     store = LockStore(args.freeze_dir)
     print(f"llm_runtime.lock frozen: {lock_path.resolve()}")
     print(f"  payload hash: {store.load_hash('llm_runtime')}")
@@ -2978,6 +3051,10 @@ def cmd_llm_snapshot(args: argparse.Namespace) -> int:
         "\nfrom now on the formal runner resolves bindings from this lock only; "
         "editing the live SQLite binding table cannot change an existing run "
         "(SRC-SAI Appendix J1)."
+    )
+    events.stage_completed(
+        detail="llm_runtime.lock frozen",
+        artifacts=(Path(lock_path).as_posix(),),
     )
     return 0
 
@@ -3204,6 +3281,12 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     )
     from pcmef.experiments.run_claim import ClaimError
 
+    events = _stage_events(
+        getattr(args, "run_events", None), _stage_ids().STAGE_DECISION
+    )
+    events.run_started(detail=f"mode={args.mode}")
+    events.stage_started(detail="pre-flight")
+
     report = _formal_preflight(args)
     print("pre-flight")
     for check in report["checks"]:
@@ -3213,6 +3296,9 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
         print("\nSTART_FORMAL_RUN = BLOCKED", file=sys.stderr)
         for blocker in report["blockers"]:
             print(f"  - {blocker}", file=sys.stderr)
+        # 被 pre-flight 擋下是**這次執行的結局**，不是它沒發生過。
+        # 留白的話，Run 頁會顯示「沒有 stage 記錄」，讀起來像沒跑。
+        events.stage_failed("pre-flight blocked: " + "; ".join(report["blockers"]))
         return 2
 
     lineage = report["lineage"]
@@ -3252,9 +3338,14 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
         )
 
     started = time.time()
+    steps = {"n": 0}
 
     def say(message: str) -> None:
         print(f"[{time.time() - started:7.1f}s] {message}", flush=True)
+        # executor 本來就會逐步回報進度；把同一句話同時寫成事件，
+        # 畫面看到的就是**它自己說的**那一步，而不是估出來的。
+        steps["n"] += 1
+        events.stage_progress(steps["n"], None, detail=message)
 
     try:
         document = run_formal_e2_full(
@@ -3297,11 +3388,20 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
         )
     except FormalE2Error as error:
         print(f"\nerror: {error}", file=sys.stderr)
+        events.stage_failed(f"FormalE2Error: {error}")
         return 2
     except ClaimError as error:
         print(f"\nSTART_FORMAL_RUN = BLOCKED\n  {error}", file=sys.stderr)
+        events.stage_failed(f"ClaimError: {error}")
         return 2
+    except BaseException as error:  # noqa: BLE001 - 崩潰也要留下痕跡
+        events.stage_failed(f"{type(error).__name__}: {error}")
+        raise
 
+    events.stage_completed(
+        detail=f"dry_run={document['dry_run']}",
+        artifacts=(str(document.get("report_path", "")),),
+    )
     print(f"\n  report            {document['report_path']}")
     print(f"  dry_run           {document['dry_run']}")
     print(f"  scientific_result {document['scientific_result']}")
@@ -3971,6 +4071,10 @@ def build_parser() -> argparse.ArgumentParser:
     e1_gates.add_argument("--tests", default="tests")
     e1_gates.add_argument("--freeze-dir", default="freeze")
     e1_gates.add_argument("--out", help="另把報告寫成 JSON 的目錄")
+    e1_gates.add_argument(
+        "--run-events",
+        help="把 stage 事件寫進這個 run 目錄（append-only JSONL）。由 console 傳入；**只有真正在跑的這一支會寫**。",
+    )
     e1_gates.set_defaults(func=cmd_audit_e1_gates)
 
     firewall = audit_sub.add_parser(
@@ -4502,6 +4606,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--freeze", action="store_true",
         help="前提齊備時寫入 freeze/llm_runtime.lock.json（不可覆寫）",
     )
+    snapshot_cmd.add_argument(
+        "--run-events",
+        help="把 stage 事件寫進這個 run 目錄（append-only JSONL）。由 console 傳入；**只有真正在跑的這一支會寫**。",
+    )
     snapshot_cmd.set_defaults(func=cmd_llm_snapshot)
 
     cache_parser = llm_sub.add_parser("cache", help="Agent artifact cache")
@@ -4710,6 +4818,10 @@ def build_parser() -> argparse.ArgumentParser:
             "模型/prompt/schema/runtime 只問一次；中斷後 resume 不會重複付費。"
             "不指定就完全不使用快取。dry-run 下無效（本來就不呼叫 provider）。"
         ),
+    )
+    formal_run.add_argument(
+        "--run-events",
+        help="把 stage 事件寫進這個 run 目錄（append-only JSONL）。由 console 傳入；**只有真正在跑的這一支會寫**。",
     )
     formal_run.set_defaults(func=cmd_formal_run_e2)
 
