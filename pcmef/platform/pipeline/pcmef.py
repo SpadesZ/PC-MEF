@@ -127,7 +127,7 @@ def _register() -> None:
          "解析 draft binding 成 lock candidate，可選擇凍結。"),
         ("formal_e2", "Formal E2", ex.SCOPE_PIPELINE,
          (ex.STAGE_PERCEPTION, ex.STAGE_RELIABILITY, ex.STAGE_ROUTING,
-          ex.STAGE_ARBITRATION, ex.STAGE_DECISION), "",
+          ex.STAGE_ARBITRATION, ex.STAGE_DECISION), ex.STAGE_FORMAL_E2,
          "PC-MEF Formal E2 的預演與一次性正式執行，涵蓋感知到決策。"),
         ("audit_gates", "E1 gate 稽核", ex.SCOPE_ACTION, (), ex.STAGE_AUDIT,
          "逐項檢查 E1 開跑前的十二個 gate。"),

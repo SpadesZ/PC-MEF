@@ -281,6 +281,47 @@ def _snapshot_definition(attribution):
     return None
 
 
+def _aggregate_definition(attribution):
+    """涵蓋多步的執行要用的「單一整體進度」定義。不適用時回 None。
+
+    Formal E2 一次跑過感知到決策，但它只回報一條整體進度，不是逐節點
+    的轉換。照研究流程重播的話，畫面會列出七個未開始的節點，再加一句
+    「事件檔提到流程定義裡沒有的 stage」—— 而這次執行確實跑了，那個
+    stage 名字也確實是預期的。兩句都在誤導。
+
+    這裡改用一個**只有一步**的定義：那一步就是這次執行本身。研究流程
+    涵蓋了哪幾個節點，由歸屬的 `execution.stage_ids` 另外說明。
+    """
+    from pcmef.platform.executors import SCOPE_PIPELINE
+    from pcmef.platform.pipeline.models import PipelineDefinition, PipelineStage
+
+    execution = dict(getattr(attribution, "execution", None) or {})
+    if execution.get("scope") != SCOPE_PIPELINE:
+        return None
+    bucket = str(execution.get("event_stage_id") or "")
+    if not bucket:
+        return None
+
+    covered = [str(s) for s in execution.get("stage_ids", ())]
+    name = str(execution.get("display_name") or execution.get("kind") or bucket)
+    return PipelineDefinition(
+        pipeline_id=bucket,
+        display_name=f"{name} 整體進度",
+        note=(
+            "這一次執行涵蓋流程的 " + " → ".join(covered) + "；"
+            "executor 回報的是整體進度，不是逐節點的轉換。"
+            if covered else ""
+        ),
+        stages=(
+            PipelineStage(
+                stage_id=bucket,
+                display_name=f"{name}（整體）",
+                summary="涵蓋 " + "、".join(covered) if covered else "",
+            ),
+        ),
+    )
+
+
 def _stage_progress(run_dir, attribution=None):
     """這一次 run 的 stage 進度。讀事件，不寫事件。
 
@@ -304,17 +345,35 @@ def _stage_progress(run_dir, attribution=None):
         if not events:
             return {
                 "definition": definition, "progress": None,
-                "available": False, "snapshot": snapshot,
+                "available": False, "snapshot": snapshot, "aggregate": None,
             }
+
+        # 涵蓋多步的執行（Formal E2）把事件歸在自己的 aggregate 名下。
+        # 那個名字不是流程節點，所以照研究流程重播只會得到七個未開始
+        # 的節點加一句「事件檔提到流程定義裡沒有的 stage」——**兩句都
+        # 是誤導**：這次執行確實跑了，而那個 stage 名字確實是預期的。
+        aggregate = _aggregate_definition(attribution)
+        if aggregate is not None:
+            return {
+                "definition": definition,
+                "progress": build_progress(
+                    aggregate, events, skipped_lines=skipped
+                ),
+                "available": True,
+                "snapshot": snapshot,
+                "aggregate": aggregate,
+            }
+
         return {
             "definition": definition,
             "progress": build_progress(definition, events, skipped_lines=skipped),
             "available": True,
             "snapshot": snapshot,
+            "aggregate": None,
         }
     except Exception:  # noqa: BLE001 - Run 頁不得因進度讀取失敗而 500
         return {"definition": None, "progress": None,
-                "available": False, "snapshot": False}
+                "available": False, "snapshot": False, "aggregate": None}
 
 
 class _RunPipelineContext:

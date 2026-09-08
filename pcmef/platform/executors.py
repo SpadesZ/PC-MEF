@@ -54,6 +54,7 @@ __all__ = [
     "STAGE_ARBITRATION",
     "STAGE_AUDIT",
     "STAGE_DECISION",
+    "STAGE_FORMAL_E2",
     "STAGE_LLM_SNAPSHOT",
     "STAGE_PERCEPTION",
     "STAGE_RELIABILITY",
@@ -94,6 +95,10 @@ STAGE_RELIABILITY = "reliability"
 STAGE_ROUTING = "routing"
 STAGE_ARBITRATION = "arbitration"
 STAGE_DECISION = "decision"
+#: 涵蓋多步的執行用自己的名字歸戶事件，**不掛在任何一個研究節點下**。
+#: 掛在 `decision` 上的話，Run 頁會顯示「決策這一步完成了」，
+#: 而實際發生的是整條鏈跑完了、其餘六個節點看起來沒動過。
+STAGE_FORMAL_E2 = "formal_e2"
 STAGE_LLM_SNAPSHOT = "llm_snapshot"
 STAGE_AUDIT = "audit"
 

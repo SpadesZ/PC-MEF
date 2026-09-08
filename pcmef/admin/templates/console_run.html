@@ -147,7 +147,8 @@
       {% if stage_progress.available %}
         {{ stage_progress.progress.completed_count }} / {{ stage_progress.progress.total_stages }} 個 stage 完成
       {% else %}此次執行沒有 stage 級記錄{% endif %}
-      {% if stage_progress.snapshot %}· 依啟動當下的流程快照重播
+      {% if stage_progress.aggregate %}· 整體進度，非逐節點
+      {% elif stage_progress.snapshot %}· 依啟動當下的流程快照重播
       {% else %}· <strong>無流程快照</strong>，以通用流程顯示{% endif %}
     </span>
   </h2>
@@ -159,6 +160,12 @@
       共 {{ stage_progress.definition.stages | length }} 個 stage）仍列於下方，
       但每一個都標為未知 —— <strong>不會用經過時間推估進度</strong>。
     </p>
+    {% endif %}
+
+    {# 涵蓋多步的執行只回報一條整體進度。照研究流程列出七個未開始的
+       節點會讀成「這次執行幾乎什麼都沒做」，而它其實跑完了整條鏈。 #}
+    {% if stage_progress.aggregate %}
+    <p class="note">{{ stage_progress.aggregate.note }}</p>
     {% endif %}
 
     <ol class="runstage-list">
@@ -203,7 +210,8 @@
       {% endfor %}
     </ol>
 
-    {% if stage_progress.available and stage_progress.progress.unknown_stages %}
+    {% if stage_progress.available and not stage_progress.aggregate
+          and stage_progress.progress.unknown_stages %}
     <p class="note">
       事件檔提到流程定義裡沒有的 stage：
       {% for s in stage_progress.progress.unknown_stages %}<span class="mono">{{ s }}</span>{% if not loop.last %}、{% endif %}{% endfor %}

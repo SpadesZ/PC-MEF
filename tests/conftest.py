@@ -3,7 +3,7 @@
 #         測試。不被任何 production 模組匯入。
 # 檔案路徑: tests/conftest.py
 # 產生時間: 2026-09-07 11:05 +08:00
-# 版本: v0.3.0
+# 版本: v0.4.0
 # 功能說明: 跑測試不得改到 repo 的科研輸出與專案 metadata —— 這裡在
 #           session 前後各取一次指紋，變了就讓整輪失敗。
 # 模組定位: Execution Layer Closure round 3 的第 6 項。
@@ -31,6 +31,10 @@
 #   - **不得把粗篩改回比對絕對路徑前綴。** 相對路徑（最常見的寫法）
 #     一個字都對不上，於是在 resolve() 之前就被放行 —— 整道守衛
 #     等於只擋得住已經寫成絕對路徑的那一種。
+#   - **不得用相對片段當快取的鍵。** `"."` 在 chdir 之後指的是別的
+#     地方；沿用舊答案就是一條走得通的繞道。鍵一律先 abspath()。
+#   - v0.4.0 修正：目錄快取的鍵改為絕對路徑，切換 cwd 之後不再沿用
+#     舊解析。對應 round 7 的第 1 項。
 #   - v0.3.0 修正：粗篩改比對根目錄名稱，讓相對路徑、`..` 與 symlink
 #     真的走到 resolve()。對應 round 5 的第 3 項。
 #   - v0.2.0 新增：WriteTripwire 以稽核事件攔下寫入，對應 round 4 的
@@ -122,8 +126,22 @@ class WriteTripwire:
         )
 
     def _resolved_parent(self, raw: str) -> Path | None:
-        """這條路徑的所在目錄，攤平 symlink 與 `..` 之後。有快取。"""
-        key = os.path.dirname(raw) or "."
+        """這條路徑的所在目錄，攤平 symlink 與 `..` 之後。有快取。
+
+        **快取的鍵必須是絕對路徑。** 先前用的是
+        `os.path.dirname(raw) or "."`，於是一個裸檔名永遠落在鍵 `"."`
+        上 —— 而 `"."` 在 `chdir()` 之後指的是別的地方。在普通目錄下
+        寫過一次之後，守衛記住的是舊 cwd 的答案；接著切進受保護目錄
+        再用裸檔名寫，它會沿用那個舊答案並放行。
+
+        `abspath()` 只做字面拼接與正規化（相對路徑時取一次 cwd），
+        不走 symlink —— 真正的攤平仍然由下面的 `resolve()` 負責。
+        因此鍵綁定了「當下的 cwd」，而每個實際目錄仍然只解析一次。
+        """
+        try:
+            key = os.path.abspath(os.path.dirname(raw) or os.curdir)
+        except Exception:  # noqa: BLE001 - 取不到 cwd 就不要猜
+            return None
         if key in self._parent_cache:
             return self._parent_cache[key]
         try:

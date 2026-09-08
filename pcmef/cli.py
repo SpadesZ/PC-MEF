@@ -3337,7 +3337,10 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     from pcmef.experiments.run_claim import ClaimError
 
     events = _stage_events(
-        getattr(args, "run_events", None), _stage_ids().STAGE_DECISION
+        # Formal E2 涵蓋整條推論鏈，事件因此歸在自己的 aggregate 名下，
+        # **不掛在 decision 節點上** —— 掛上去畫面會說「決策這一步完成
+        # 了」，而其餘六個節點看起來沒動過。
+        getattr(args, "run_events", None), _stage_ids().STAGE_FORMAL_E2
     )
     events.run_started(detail=f"mode={args.mode}")
     events.stage_started(detail="pre-flight")
@@ -3495,10 +3498,6 @@ def _formal_run_e2_body(args, events, deps) -> int:
     # `cmd_formal_run_e2` 的 catch-all 負責 —— 兩邊都發的話，
     # 同一次崩潰會寫出兩筆 stage_failed。本體只負責 early return
     # 那幾條路徑，例外一律往上交。
-    events.stage_completed(
-        detail=f"dry_run={document['dry_run']}",
-        artifacts=(str(document.get("report_path", "")),),
-    )
     print(f"\n  report            {document['report_path']}")
     print(f"  dry_run           {document['dry_run']}")
     print(f"  scientific_result {document['scientific_result']}")
@@ -3522,6 +3521,21 @@ def _formal_run_e2_body(args, events, deps) -> int:
             else f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}"
         )
     print("\n  worst-condition macro-F1 is the primary robustness endpoint")
+
+    # **成功事件緊貼真正的成功 return。**
+    #
+    # 先前它發在上面那二十幾行 document 取值與格式化之前。那一段
+    # 炸掉的話：終局唯一，所以事件檔留下的是 completed（後到的
+    # failed 被丟掉），而 CLI 以非零結束、run.json 說 failed ——
+    # 兩份紀錄各說各話，而它們都在磁碟上。
+    #
+    # 這一行與 `return 0` 之間不得再插入任何語句；
+    # test_the_success_event_is_the_last_statement_before_the_return
+    # 會直接擋下。
+    events.stage_completed(
+        detail=f"dry_run={document['dry_run']}",
+        artifacts=(str(document.get("report_path", "")),),
+    )
     return 0
 
 

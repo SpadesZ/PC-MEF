@@ -972,11 +972,43 @@ class ConsoleRunner:
             encoding="utf-8",
         )
 
+    def _project_unreaped(self, run_id: str, record: RunRecord) -> RunRecord:
+        """紀錄還說 running，但標記檔已經在了 —— **以標記檔為準。**
+
+        兩者由不同的寫入路徑產生（`_save_or_leave_a_trace()` 走
+        `Path.write_text`，標記走 `os.open`），因此其中一個可能單獨
+        成功。標記存在就代表沒有人在讀那個行程了；繼續顯示 running
+        會讓清單上出現一筆永遠不會結束的執行，SSE 也永遠不收線。
+
+        **只在讀取時解讀，不回寫磁碟。** run.json 寫不成功正是走到
+        這裡的原因之一，再寫一次只會再失敗，而且會蓋掉「當時到底
+        發生什麼」。
+        """
+        if record.finished:
+            return record
+        if not (self.run_dir(run_id) / UNREAPED_FILENAME).exists():
+            return record
+        record.status = UNREAPED
+        if record.exit_code is None:
+            record.exit_code = -1
+        if not record.finished_at:
+            record.finished_at = _now()
+        if not record.note:
+            record.note = (
+                "紀錄仍寫著執行中，但同目錄有 "
+                f"{UNREAPED_FILENAME} —— 收尾時無法確認子行程已結束。"
+                "這裡以標記檔為準。"
+            )
+        return record
+
     def get(self, run_id: str) -> RunRecord:
         path = self.record_path(run_id)
         if not path.exists():
             raise RunnerError(f"run {run_id!r} not found")
-        return RunRecord.from_json(json.loads(path.read_text(encoding="utf-8")))
+        return self._project_unreaped(
+            run_id,
+            RunRecord.from_json(json.loads(path.read_text(encoding="utf-8"))),
+        )
 
     def list_runs(self, limit: int = 30, query: str = "") -> list[RunRecord]:
         """最近的執行紀錄，新到舊。query 非空時只留匹配的。
@@ -989,9 +1021,13 @@ class ConsoleRunner:
         for folder in self.run_root.iterdir():
             path = folder / "run.json"
             if path.exists():
-                records.append(
-                    RunRecord.from_json(json.loads(path.read_text(encoding="utf-8")))
-                )
+                # 清單與單筆必須說同一句話，所以這裡也要投影。
+                records.append(self._project_unreaped(
+                    folder.name,
+                    RunRecord.from_json(
+                        json.loads(path.read_text(encoding="utf-8"))
+                    ),
+                ))
         # 以 started_at 排序，不以目錄名。run_id 只有**秒**級解析度
         # （`%Y%m%dT%H%M%S-` + 6 個十六進位字元），因此同一秒內建立的幾筆
         # 在目錄名上只差那 6 個隨機字元 —— 排序於是退化成 uuid 的字典序，
