@@ -3,12 +3,12 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.7.0  
+**文件版本：** v0.7.1  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
 **日期：** 2026-09-25  
 **取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
 **上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
-**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，HEAD `eb8ad9c`  
+**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，round 9 程式碼 `5cbc43b`（父提交 `7f8e67e`；round 8 程式碼 `eb8ad9c`）  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
 **本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
 
@@ -2447,6 +2447,40 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
 不再有機會拋出例外。把「排版壞掉」記成「實驗失敗」的代價是
 ——claim 已經 `COMPLETE`，重跑會被擋住。
 
+### 科學完成點之後，連中斷都不改判（round 9）
+
+上一條的 fail-soft 只接 `Exception`。`KeyboardInterrupt` 與
+`SystemExit` 不是 `Exception`：摘要印到一半按下 Ctrl-C，會穿到入口的
+catch-all，寫下 `stage_failed`、以非零結束，console 依 exit code 把
+`run.json` 記成 `failed` —— 而 report 與 claim 都已經完成。
+
+`cli._ScienceIsComplete` 標記**科學完成點**（`run_formal_e2_full()`
+成功回來的那一刻）：
+
+| 時點 | 例外 / 中斷 | 結果 |
+|---|---|---|
+| 越界**之前**（科學還在跑） | 任何例外，含 KeyboardInterrupt / SystemExit | **照常往外拋**、`stage_failed`；executor 把 claim 標成可 resume |
+| 越界**之後** | 任何例外，含 KeyboardInterrupt / SystemExit | stderr 警告；終局事件 `stage_completed`（終局唯一，至多一筆）；exit 0；`run.json` = `succeeded` |
+| 越界之後的 SIGINT（主執行緒） | 改成**只記錄、不拋出** | 同上，並註記「越界後收到中斷」 |
+
+- 入口 catch-all 以 `boundary.crossed` 分流：越界之後一律交給
+  `_settle_after_the_boundary()` 補齊終局事件並回 0，**不得 raise**。
+- 由命令列啟動（`main()` 從 `sys.argv` 取參數）時，SIGINT 的延後
+  維持到行程結束；被當成函式呼叫（測試）時離開入口就還原。
+- 端到端驗證：真的子行程、真的 SIGINT、console 依 exit code 寫下的
+  `run.json`（`test_the_persisted_run_record_follows_the_scientific_boundary`）。
+
+**已知剩餘窗口（不修）：**
+1. executor 回來到 `cross()` 立旗之間的直譯器檢查點（兩個）。要關掉
+   它只能在越界之前就遮蔽 SIGINT，那會改變科學執行中的中斷語意。
+2. executor **內部**在 `mark_complete` 之後還會呼叫一次 progress
+   callback（`claim ... COMPLETE`）。依定義它在「回來之前」，因此那
+   一行若拋出，照常記成失敗 —— 而 claim 已是 `COMPLETE`。要收掉它得
+   改 `e2_formal.py` 或讓越界前的 progress 輸出 fail-soft，兩者都改變
+   越界之前的語意，本輪不做。
+3. `SIGTERM` / `TerminateProcess` / `CTRL_BREAK` 直接終止行程，Python
+   接不到；越界之後被這樣殺掉，`run.json` 依 exit code 仍是 `failed`。
+
 ## 49.5 UNREAPED：收不掉的子行程
 
 執行結束時若無法確認子行程已終止：
@@ -2480,7 +2514,7 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
 
 `PROTECTED_PATHS` = `outputs/perception/e2_final`、`freeze/`、`projects/`。
 
-**WriteTripwire 的三道關卡**（`tests/conftest.py`）：
+**WriteTripwire 的四道關卡**（`tests/conftest.py`）：
 
 1. **名字粗篩**：路徑字面含受保護根目錄名稱 → 完整 `resolve()` 判定。
    比對的是**最後一段名字**而非絕對路徑前綴 —— 用前綴的話，相對路徑
@@ -2494,14 +2528,47 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
    判定用 **reparse point**，**不得只用 `os.path.islink()`**
    —— 它對 Windows junction 回傳 `False`，而 `resolve()` 照樣跟著走。
 
-代價控制：第 3 關用一次**不跟著連結走**的 `lstat()`；絕大多數寫入的
-目標還不存在，當場 ENOENT 返回，代價就停在那裡。
+4. **最後一段是另一個名字的同一個檔案（hardlink）**（round 9）：
+   hardlink 沒有 target、沒有 reparse point，路徑解析從哪一邊出發都
+   只回到它自己。判準改成身分 `(st_dev, st_ino)`，比對受保護檔案的
+   身分索引。`os.link` 在 session 內本來就會被擋；這一關補的是
+   **session 開始前就已存在**的 hardlink（實測：Windows 與 Linux 上
+   `open(alias, "w")` 都直接改掉受保護內容）。
 
-> **已知缺口：hardlink。** hardlink 是同一個 inode，沒有 reparse point
-> 也沒有 target，路徑解析看不見它。緩解：`os.link` 本身有稽核事件，
-> **session 內**建立指向受保護路徑的 hardlink 會當場被擋；漏的只有
-> session 開始前就已存在於磁碟上的 hardlink。要真的補需要比對
-> `st_ino`/`st_dev`。
+代價控制：第 3、4 關共用一次**不跟著連結走**的 `lstat()`；絕大多數寫入
+的目標還不存在，當場 ENOENT 返回，代價就停在那裡。已存在而
+`st_nlink == 1` 的檔案不可能是別人的別名，不查索引；身分索引第一次
+真的需要時才建（受保護樹目前 1613 檔），多數 session 從頭到尾不會建。
+
+**寫入落點相對於目錄描述子（openat / `dir_fd`，round 9）：**
+
+POSIX 上 `os.open(name, flags, dir_fd=fd)` 的 `name` 相對於 fd 指向的
+目錄，不是 cwd。CPython 的 `open` 稽核事件只有 `(path, mode, flags)`，
+**不帶 dir_fd**；其餘事件（`os.remove` / `os.rmdir` / `os.mkdir` /
+`os.rename` / `os.link` / `os.symlink`）帶著 dir_fd，但守衛先前忽略它。
+Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改到受保護
+內容，第九種（`shutil.rmtree`）回報「擋下」時底下的檔案已經刪光。
+
+| 路徑 | 處置 |
+|---|---|
+| 帶 dir_fd 的稽核事件 | 以 `/proc/self/fd/N`（Linux）或 `F_GETPATH`（macOS）取得描述子位置，接上相對名字後再走四道關卡 |
+| `os.open(..., dir_fd=)` | `open` 事件看不到 dir_fd，改由 `os.open` 的窄包裝在**有 dir_fd 且為寫入**時判定；其餘寫入仍由稽核事件負責 |
+| `shutil.rmtree` | 在 `shutil.rmtree` 事件上、**刪第一個檔案之前**判定；刪受保護根目錄的祖先也算 |
+| `O_RDONLY \| O_TRUNC` | 算寫入（Linux 上它會把檔案截空） |
+| 看不出描述子指向哪裡 | **fail closed**，不猜 |
+
+**平台涵蓋：**
+
+| | Windows | Linux | macOS / 其他 POSIX |
+|---|---|---|---|
+| dir_fd 家族 | 不可達（`os.supports_dir_fd` 為空；目錄也開不成 fd） | 實測涵蓋 | `F_GETPATH` 有實作、**未實測**；兩者皆無的平台 fail closed |
+| hardlink | 實測涵蓋 | 實測涵蓋 | 同 Linux 路徑，未實測 |
+| `rmtree` | 原本就逐一以完整路徑刪（第一個檔案即被擋）；現在更早 | fd-based，現在於事件上擋下 | 同 Linux |
+
+**仍然看不到的（由指紋比對兜底）：** 在 `_guard_dir_fd_opens` 裝上之前
+就把 `os.open` 存成別名的程式碼；`os.mkfifo` / `os.mknod`（沒有稽核
+事件）；經由 C 擴充直接寫檔。`chmod` / `utime` 屬於 metadata，依
+「內容相同而 mtime 變了不算污染」的既有判準，不當成寫入。
 
 ## 50.2 守衛自己也會失效（本平台最重要的一課）
 
@@ -2530,21 +2597,38 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
 
 - TCP 綁定預設一律拒絕；真的需要時以
   `LISTENERS.allowing(port)` **明確宣告**，離開時若沒收掉當場失敗。
-- session 前後比對本機 listening ports，抓子行程留下來的。
+- `allowing(8790)` 在**宣告當下**就拒絕。
 
 這一條先前是用正規式**掃描原始碼**守的，而掃描原始碼守不住任何東西：
 `getattr(sock, "bind")(...)`、包一層 helper、從 library 裡繞出去 ——
 三種寫法都掃不到，三種都會真的佔住一個 port。
 
-> **已知涵蓋範圍：** 稽核事件只到本行程；子行程由 port 盤點兜底，
-> 而 `psutil` 在無管理員權限下列得到的 port 少於 `netstat`，
-> 因此第二層不是 100% 涵蓋。
+**判準是擁有權，不是 port 號碼（round 9）。** 先前離開 `allowing()`
+時拿 port 號碼去對全機 listening ports：`allowing(0)` 因此驗不到
+（OS 挑的號碼要綁完才知道），而 session 層的全機比對會把任何無關程式
+在這段期間開的 port 算到測試頭上。現在：
+
+| 層 | 看什麼 | 需要 |
+|---|---|---|
+| `allowing()` 離開時 | 範圍內綁定的**每一個 socket 物件**是否已 close（port 0 同樣適用）；沒收的由守衛代為 close 後失敗 | 無 |
+| `allowing()` 離開時 | pytest **行程樹**在範圍內新開、仍在 LISTEN 的（子行程開的 server、dup 出來的 fd） | psutil |
+| session 結束 | pytest 行程樹自己的 listener 前後比對 | psutil |
+| 每個測試結束 | `ChildProcessLedger`：這個測試 spawn 過（稽核事件記一筆）才列行程樹；仍活著的子行程歸到**那一個測試**的 teardown 失敗 | psutil |
+
+- 子行程只回報、**不代為終止**，也不需要管理員權限：列的是自己的子孫。
+- 本機實測（Windows、無管理員）：`psutil` 與 `netstat -ano` 列出的
+  LISTEN port 完全一致（44 / 44），8790 由 `com.docker.backend` 持有；
+  先前「psutil 少於 netstat」的觀察本輪未能重現。判準已不依賴全機清單。
+
+> **已知涵蓋範圍：** 子行程在測試結束前就把孫行程分離出去、自己先結束
+> 的話，孫行程不再掛在 pytest 底下，行程樹看不到它。沒有 psutil 的
+> 環境（例如目前的 `pcmef-research:local` 映像）只剩 socket 物件那一層。
 
 ---
 
 # 51. 目前實作狀態與已知缺口
 
-本節是 v0.7.0 的**現況快照**，會隨實作前進而過期；
+本節是 v0.7.1 的**現況快照**，會隨實作前進而過期；
 §0.4 的裁決規則在它過期之後仍然適用。
 
 ## 51.1 Final E2 Gate：1 / 8
@@ -2593,28 +2677,51 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
 
 ## 51.3 測試現況
 
-| 範圍 | 結果 |
+| 範圍 | 結果（round 9，Windows、py 3.10.11） |
 |---|---|
-| `tests/console/` + `tests/platform/` + `tests/e2/` | 1004 collected、998 passed、6 skipped、**0 failed** |
-| `tests/`（全量） | 3792 — 3754 passed、**13 failed**、25 skipped |
+| `tests/`（全量） | 3846 collected — 3795 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1053 collected；在上面那一輪全量中 **0 failed** |
+| 同範圍的另一輪 | 1032 passed、19 skipped、**2 failed** —— 兩個都是 §51.4 第 2 項的 `run.json` 撕裂讀取（`JSONDecodeError`），發生在未修改的 `test_execution_closure` / `test_execution_forensics`；單獨各跑 15 次，round 8 程式碼與本輪都是 0 / 30 |
+| Linux 容器（`pcmef-research:local`，repo 唯讀掛載） | 8 個守衛相關模組 220 passed、7 skipped、0 failed |
+
+本輪新增 `test_execution_boundaries.py` 49 項。3846 = 3797 + 49：
+這個工作樹不含新檔時 collect 3797，乾淨 checkout 的 HEAD collect 3792
+（即 round 8 記的數字）—— 差的 5 項是工作樹裡未進版控的檔案帶出的
+參數化案例，不是測試本身的增減。
 
 - 13 個 failure 是**歷史既有**、與平台化無關的科學程式碼項目：
   `test_paired` ×2、`test_calibration_objective` ×5、
   `test_calibration_plan` ×1、`test_calibration_prereg` ×4、
   `test_repo_integrity` ×1。**不得為了讓它們變綠而改科學程式碼。**
-- 6 個 skip 全是 symlink 建立權限（Windows 未開 Developer Mode）。
-  §50.1 第 3 關的行為驗證因此在本機以 junction 代跑，
-  並另於 Linux 容器以真 file symlink 端到端驗過。
+- 38 個 skip：13 個是 POSIX 專屬的 dir_fd 測試（Windows 沒有 dir_fd，
+  另有一條測試斷言這個前提）；6 個是 symlink 建立權限（Windows 未開
+  Developer Mode，§50.1 第 3 關因此在本機以 junction 代跑，並於 Linux
+  容器以真 file symlink 端到端驗過）；19 個是模擬堆疊（mitsuba/drjit 的
+  LLVM backend 不在這台機器上）。
+- Linux 容器沒有 psutil，行程擁有權那 5 條測試在那裡 skip；該層只在
+  Windows 實測。
 
 ## 51.4 已知缺口（依優先序）
 
 1. **Final E2 尚有 7 項 blocker**（§51.1），其中 AMD-007/008/009 尚未
    凍結、Golden Baseline 尚未 canonical。
-2. **hardlink 別名繞得過 WriteTripwire**（§50.1）。
-3. **`allowing(0)` 驗不到收尾**：port 0 由 OS 挑號，離開時無從確認，
-   只能靠 session 結束的整體盤點兜底。
-4. **稽核事件只涵蓋本行程**，子行程的 port 盤點涵蓋率受 `psutil`
-   權限限制（§50.3）。
+2. **`run.json` 不是原子寫入**（round 9 新發現，**未修**，不在該輪
+   授權範圍內）：`ConsoleRunner._save()` 以 `Path.write_text()` 先截斷
+   再寫。(a) 同時讀取會讀到半份：tmp 實測併發下 3000 次 `get()` 有
+   1487 次 `JSONDecodeError`，測試套件裡表現為 Run 頁偶發 500；
+   (b) 截斷之後寫入失敗（磁碟滿）會留下 0 byte 的 `run.json`，而
+   `list_runs()` 沒有逐筆容錯，`/console`、`/results`、formal 頁從此
+   **永久 500**，直到有人手動刪檔。修法：暫存檔 + `os.replace()`
+   （Windows 需對讀者造成的 sharing violation 短暫重試）加上
+   `list_runs()` 逐筆容錯。**在它修好之前，Execution / Action Layer
+   不是 hard-lock 候選。**
+3. **守衛設計上看不到、由指紋比對兜底的**（§50.1、§50.3）：在
+   `_guard_dir_fd_opens` 之前就存成別名的 `os.open`；`os.mkfifo` /
+   `os.mknod`；C 擴充直接寫檔；已分離且父行程先結束的孫行程；
+   沒有 psutil 的環境只剩 socket 物件那一層。
+4. **科學完成點的剩餘窗口**（§49.4）：executor 回來到立旗之間的
+   直譯器檢查點；executor 內部 `mark_complete` 之後的 progress
+   callback；無法攔截的行程終止（SIGTERM / TerminateProcess）。
 5. **Phase 3 尚未開始**：`scenarios/`、`sensors/`、`compatibility/`、
    `artifacts/` 四個子套件尚未實作（§39），
    因此 §7 / §8 的 Wizard、§10 的相容矩陣、UAT-01~03 都還不能跑。
@@ -2642,7 +2749,7 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
 術語（Research Profile vs Project）與導航（13 vs 5）兩項不一致，
 裁決均為**以 CURRENT 為準**，已寫入 §20。
 
-## G.2 round 2~8 新增（原 delta 稽核未涵蓋）
+## G.2 round 2~9 新增（原 delta 稽核未涵蓋）
 
 | 輪次 | 主題 | 落點 |
 |---|---|---|
@@ -2659,6 +2766,11 @@ claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
 | r8 | tripwire 末段別名繞道 | §50.1 第 3 關 |
 | r8 | 科學 COMPLETE 不得被呈現層改判 | §49.4 |
 | r8 | 執行期 listener 守衛 | §50.3 |
+| r9 | dir_fd / openat 落點、`rmtree` 事前判定、`O_TRUNC` | §50.1 |
+| r9 | hardlink 以 inode 身分判定 | §50.1 第 4 關 |
+| r9 | listener 以擁有權驗收尾（含 port 0）、子行程帳本 | §50.3 |
+| r9 | 科學完成點之後連 KeyboardInterrupt / SystemExit 都不改判 | §49.4 |
+| r9 | `run.json` 非原子寫入（發現、未修） | §51.4 第 2 項 |
 
 ## G.3 v0.6.0 原樣沿用、未改動的章節
 
