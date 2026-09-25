@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -294,9 +295,28 @@ def _plant(runs, run_id, started_at):
     (directory / "log.txt").write_text("x", encoding="utf-8")
 
 
+def _boundary_offset(runs, days: int) -> str:
+    """相對於**實際安裝的邊界**前後挪幾天。
+
+    先前這兩條測試把日期寫死：邊界是在測試當下才安裝的（`now`），
+    而寫死的 `2026-09-09` 只在牆上時鐘還沒走到那天之前算是「邊界
+    之後」。過了那天，同一個字面值就落到邊界之前，於是「新的孤兒
+    run」被判成 legacy，而測試從那天起每天都失敗 —— 失敗的原因與
+    它要守的規則完全無關。日期一律由邊界推出來。
+    """
+    from datetime import timedelta
+
+    from pcmef.platform.runs import BOUNDARY_FILENAME
+
+    installed = json.loads(
+        (runs / BOUNDARY_FILENAME).read_text(encoding="utf-8")
+    )["installed_at"]
+    return (datetime.fromisoformat(installed) + timedelta(days=days)).isoformat()
+
+
 def test_a_run_from_before_the_boundary_is_honoured_as_legacy(env):
     client, runs = env
-    _plant(runs, "old-legacy", "2026-09-01T10:00:00+08:00")
+    _plant(runs, "old-legacy", _boundary_offset(runs, -7))
     _select(client, "pcmef-thesis")
     assert client.get("/console/runs/old-legacy").status_code == 200
 
@@ -304,7 +324,7 @@ def test_a_run_from_before_the_boundary_is_honoured_as_legacy(env):
 def test_a_new_run_missing_its_attribution_is_not_treated_as_legacy(env):
     """刪掉歸屬檔不得把任何 run 變成碩論的（P1-4）。"""
     client, runs = env
-    _plant(runs, "new-orphan", "2026-09-09T10:00:00+08:00")
+    _plant(runs, "new-orphan", _boundary_offset(runs, +7))
     _select(client, "pcmef-thesis")
     assert client.get("/console/runs/new-orphan").status_code == 404
 

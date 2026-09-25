@@ -3,7 +3,7 @@
 #         測試。不被任何 production 模組匯入。
 # 檔案路徑: tests/conftest.py
 # 產生時間: 2026-09-07 11:05 +08:00
-# 版本: v0.4.0
+# 版本: v0.5.0
 # 功能說明: 跑測試不得改到 repo 的科研輸出與專案 metadata —— 這裡在
 #           session 前後各取一次指紋，變了就讓整輪失敗。
 # 模組定位: Execution Layer Closure round 3 的第 6 項。
@@ -17,6 +17,7 @@
 #   3. repo_is_not_polluted 在 session 前後比對並在變動時失敗
 #   4. PROTECTED_PATHS / WriteTripwire 在寫入當下就攔下
 #   5. repo_is_not_written_to 以稽核事件掛上 tripwire
+#   6. ListenerTripwire 攔下測試開出來的真實 TCP listener
 # 維護提醒:
 #   - **不得把這個守衛改成只警告。** 污染是靜默的：outputs/ 不進版控，
 #     所以除了這裡沒有任何東西會告訴你它被寫過。
@@ -33,6 +34,11 @@
 #     等於只擋得住已經寫成絕對路徑的那一種。
 #   - **不得用相對片段當快取的鍵。** `"."` 在 chdir 之後指的是別的
 #     地方；沿用舊答案就是一條走得通的繞道。鍵一律先 abspath()。
+#   - **不得只解析所在目錄就下判斷。** 最後一段自己可以是 symlink 或
+#     junction；父層乾淨不代表寫入落點乾淨。判定別名時也不得只用
+#     `os.path.islink()` —— junction 會讓它回傳 False。
+#   - v0.5.0 修正：最後一段是別名時也解析並判定，涵蓋 symlink 與
+#     Windows junction。對應 round 8 的第 1 項。
 #   - v0.4.0 修正：目錄快取的鍵改為絕對路徑，切換 cwd 之後不再沿用
 #     舊解析。對應 round 7 的第 1 項。
 #   - v0.3.0 修正：粗篩改比對根目錄名稱，讓相對路徑、`..` 與 symlink
@@ -46,8 +52,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
+import socket
+import stat
 import sys
 from pathlib import Path
 
@@ -151,6 +160,37 @@ class WriteTripwire:
         self._parent_cache[key] = resolved
         return resolved
 
+    def _final_component_is_an_alias(self, raw: str) -> bool:
+        """這條路徑的**最後一段**本身是不是一個別名。
+
+        解析所在目錄擋得住 `別名目錄/檔案`，擋不住 `目錄/別名檔案`：
+        父層是一個再普通不過的位置，名字上也看不出什麼，而
+        `open()` 會沿著最後那一段的連結寫進受保護的檔案裡。
+        `safe/alias.json -> freeze/.../lock.json` 就是這條路。
+
+        **不得用 `os.path.islink()` 單獨判定。** 它對 Windows 的
+        junction 回傳 False，而 `resolve()` 照樣跟著走 —— 於是
+        junction 變成一條「守衛看不見、作業系統卻認得」的繞道。
+        這裡改看 reparse point 屬性，symlink 與 junction 一起涵蓋。
+
+        用 `lstat()` 而不是 `resolve()`：前者一次 syscall 且**不跟著
+        連結走**，後者要把每一段都走過。絕大多數寫入的目標根本還不
+        存在，`lstat()` 當場 ENOENT 返回，代價就停在這裡。
+        """
+        try:
+            info = os.lstat(raw)
+        except (OSError, ValueError):
+            # 還不存在的檔案不可能是別名 —— 建立它的是這次寫入本身。
+            return False
+        if stat.S_ISLNK(info.st_mode):
+            return True
+        # Windows：junction 與 directory symlink 都是 reparse point，
+        # 但只有後者會讓 S_ISLNK 成立。
+        if getattr(info, "st_reparse_tag", 0):
+            return True
+        attributes = getattr(info, "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
     def _is_protected(self, path) -> bool:
         try:
             raw = os.fspath(path)
@@ -177,7 +217,21 @@ class WriteTripwire:
         parent = self._resolved_parent(raw)
         if parent is None:
             return False
-        return self._under_a_root(parent)
+        if self._under_a_root(parent):
+            return True
+
+        # 第三關：父層乾淨，但**最後一段自己是別名**。
+        #
+        # 少了這一關，`safe/alias.json -> freeze/.../lock.json` 一路
+        # 通行：名字裡沒有 needle，父層 `safe/` 解析出來也不受保護，
+        # 而 `open(alias, "w")` 會沿著連結寫進 freeze/ 裡的那個檔案。
+        # 守衛擋的是「寫到哪裡」，不是「路徑長什麼樣子」。
+        if not self._final_component_is_an_alias(raw):
+            return False
+        try:
+            return self._under_a_root(Path(raw).resolve())
+        except Exception:  # noqa: BLE001
+            return False
 
     def check_read(self, path) -> None:
         """讀取一律放行。這個方法存在是為了讓意圖寫在程式碼裡。"""
@@ -195,7 +249,112 @@ class WriteTripwire:
         raise ProtectedPathWrite(message)
 
 
-def _install_tripwire(tripwire: WriteTripwire) -> None:
+#: 唯一的正式 localhost UI port。測試不得另外開別的。
+OFFICIAL_UI_PORT = 8790
+
+
+class RealListenerOpened(AssertionError):
+    """測試開了一個真的 TCP listener。**當場擋下。**"""
+
+
+class ListenerTripwire:
+    """測試不得在本機開出真的 TCP listener。
+
+    先前這條規則是用正規式掃描原始碼來守的，而掃描原始碼守不住任何
+    東西：`getattr(socket, "bind")`、包一層 helper、從 library 裡繞
+    出去 —— 三種寫法都掃不到，而三種都會真的佔住一個 port。掃描能
+    回答的只有「有沒有人把這幾個字面值寫出來」。
+
+    這裡改成在**綁定當下**攔截。Flask 的 `test_client` 完全不碰
+    socket（它直接走 WSGI），因此一個字都不用改就照樣通過 —— 這正是
+    測試本來就該用的方式。
+
+    **涵蓋範圍只到本行程。** 子行程自己開的 listener 稽核事件看不到，
+    那一段由 session 前後的 listener 盤點負責（`listening_ports()`）。
+    兩層的失敗模式不同，因此兩層都要。
+    """
+
+    def __init__(self) -> None:
+        #: 明確開放的 port。空的 —— 預設一個都不准。
+        self._allowed: set[int] = set()
+        #: 全部綁定嘗試，包含被放行的。盤點用。
+        self.attempts: list[str] = []
+        #: 被擋下來的那些。即使測試自己吞掉例外也留著。
+        self.violations: list[str] = []
+
+    @contextlib.contextmanager
+    def allowing(self, port: int):
+        """明確開放一個 port，**且離開時必須已經收掉**。
+
+        需要真的 listener 的測試走這裡，於是「哪一個測試開了什麼」
+        寫在測試自己的程式碼裡，而不是靠事後 netstat 去猜。
+
+        **`allowing(0)` 驗不到收尾。** port 0 是「讓 OS 挑一個」，
+        而實際挑到的號碼只有綁完才知道，因此離開時無從確認它收掉了
+        沒有 —— 這一種只由 session 結束時的整體盤點兜底。要讓收尾
+        當場被檢查，就得用實際的 port 號碼進來。
+        """
+        self._allowed.add(port)
+        try:
+            yield
+        finally:
+            self._allowed.discard(port)
+            still_open = [p for p in listening_ports() if p == port]
+            if still_open:
+                raise RealListenerOpened(
+                    f"port {port} is still listening after the test that "
+                    "opened it finished; a temporary listener must be closed "
+                    "by the test that opened it"
+                )
+
+    def check_bind(self, sock, address) -> None:
+        family = getattr(sock, "family", None)
+        kind = getattr(sock, "type", None)
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            return
+        # UDP 不是 listener。記下來，不擋。
+        if kind != socket.SOCK_STREAM:
+            return
+        port = None
+        if isinstance(address, tuple) and len(address) >= 2:
+            if isinstance(address[1], int):
+                port = address[1]
+        where = f"{address!r}"
+        self.attempts.append(where)
+        if port is not None and port in self._allowed:
+            return
+        self.violations.append(where)
+        raise RealListenerOpened(
+            f"a test tried to bind a real TCP socket to {where}. "
+            f"{OFFICIAL_UI_PORT} is the only official localhost UI port, and "
+            "tests must not occupy it or any other. Use Flask's test_client "
+            "(it speaks WSGI directly and binds nothing). If a real listener "
+            "is genuinely required, take it through LISTENERS.allowing(port) "
+            "so that it is declared and torn down."
+        )
+
+
+def listening_ports() -> set[int]:
+    """這台機器上正在 LISTEN 的 port。
+
+    用來做 session 前後的盤點 —— 稽核事件只看得到本行程，子行程留下
+    的 listener 只有這裡看得到。
+    """
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001 - 沒有 psutil 就退回「盤點不了」
+        return set()
+    found: set[int] = set()
+    try:
+        for connection in psutil.net_connections(kind="inet"):
+            if connection.status == psutil.CONN_LISTEN and connection.laddr:
+                found.add(connection.laddr.port)
+    except Exception:  # noqa: BLE001 - 權限不足時不要拖垮測試
+        return set()
+    return found
+
+
+def _install_tripwire(tripwire: WriteTripwire, listeners=None) -> None:
     """把守衛掛到 CPython 的稽核事件上。
 
     用 audit hook 而不是 monkeypatch `open`：真正的寫入會經過
@@ -228,7 +387,9 @@ def _install_tripwire(tripwire: WriteTripwire) -> None:
             elif event in ("os.rename", "os.replace", "os.link", "os.symlink"):
                 for target in args[:2]:
                     tripwire.check_write(target)
-        except ProtectedPathWrite:
+            elif event == "socket.bind" and listeners is not None:
+                listeners.check_bind(args[0], args[1])
+        except (ProtectedPathWrite, RealListenerOpened):
             raise
         except Exception:  # noqa: BLE001 - 守衛自己壞掉不得拖垮測試
             return
@@ -265,6 +426,33 @@ def fingerprint(paths) -> str:
 #: session 內共用的一份守衛。測試可以讀它的 violations。
 TRIPWIRE = WriteTripwire(PROTECTED_PATHS)
 
+#: session 內共用的 listener 守衛。需要真 listener 的測試用
+#: `LISTENERS.allowing(port)` 明確宣告。
+LISTENERS = ListenerTripwire()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_test_leaves_a_listener_behind():
+    """測試不得開出真的 TCP listener，也不得留下任何一個。
+
+    兩層：稽核事件在綁定當下擋住本行程的嘗試，session 前後的盤點
+    抓子行程留下來的。掃描原始碼的那一版兩種都抓不到。
+    """
+    before = listening_ports()
+    yield
+    if LISTENERS.violations:
+        raise AssertionError(
+            "the test session opened real TCP listeners: "
+            f"{sorted(set(LISTENERS.violations))}"
+        )
+    leaked = sorted(listening_ports() - before)
+    if leaked:
+        raise AssertionError(
+            "the test session left new listeners behind on this machine: "
+            f"{leaked}. Tests must not pollute the local port state; "
+            f"{OFFICIAL_UI_PORT} is the only official localhost UI port."
+        )
+
 
 @pytest.fixture(scope="session", autouse=True)
 def repo_is_not_written_to():
@@ -273,7 +461,7 @@ def repo_is_not_written_to():
     這一層與下面的指紋比對互補：指紋回答「跑完之後有沒有變」，
     這裡回答「過程中有沒有碰過」。寫了又刪的那一種只有這裡抓得到。
     """
-    _install_tripwire(TRIPWIRE)
+    _install_tripwire(TRIPWIRE, LISTENERS)
     yield
     if TRIPWIRE.violations:
         raise AssertionError(

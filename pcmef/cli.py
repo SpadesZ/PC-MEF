@@ -3366,6 +3366,32 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
         raise
 
 
+def _warn_summary_is_unavailable(error: BaseException, document) -> None:
+    """摘要印不出來時說一句話，**而且自己絕對不能再炸**。
+
+    走到這裡代表科學結果已經完成並落地，失敗的只是把它排版出來。
+    因此這個函式不得往外拋任何例外：它一拋，就等於呈現層的毛病
+    又一次把成功的實驗改判成失敗，而那正是這個函式存在的原因。
+
+    連 `print` 都要包起來 —— 會走到這裡的原因之一就是 stdout 壞了。
+    """
+    try:
+        path = ""
+        try:
+            path = str(document.get("report_path", ""))
+        except Exception:  # noqa: BLE001 - document 形狀不對也不能擋路
+            path = ""
+        print(
+            "\nwarning: the run completed and the report is written; only the "
+            f"on-screen summary failed ({type(error).__name__}: {error}). "
+            "The scientific result and the claim are unaffected."
+            + (f"\n  report            {path}" if path else ""),
+            file=sys.stderr,
+        )
+    except Exception:  # noqa: BLE001 - 連警告都印不出來就安靜收場
+        return
+
+
 def _formal_run_e2_body(args, events, deps) -> int:
     """`cmd_formal_run_e2` 的本體。終局事件由呼叫端與這裡共同保證。
 
@@ -3498,29 +3524,49 @@ def _formal_run_e2_body(args, events, deps) -> int:
     # `cmd_formal_run_e2` 的 catch-all 負責 —— 兩邊都發的話，
     # 同一次崩潰會寫出兩筆 stage_failed。本體只負責 early return
     # 那幾條路徑，例外一律往上交。
-    print(f"\n  report            {document['report_path']}")
-    print(f"  dry_run           {document['dry_run']}")
-    print(f"  scientific_result {document['scientific_result']}")
-    print(f"  llm_arm_evaluated {document['llm_arm_evaluated']}")
-    print(f"  rows              {document['dataset']['total_rows']}")
-    print(f"  routing           {json.dumps(document['routing']['counts'])}")
-    print(f"  escalated         {document['routing']['escalated_cases']}"
-          f" ({document['routing']['escalation_rate']:.1%})")
-    if dry_run:
-        print(f"  skipped escalated {document['skipped_escalated_cases']}"
-              "  (pcmef_full arm omitted by construction)")
-    worst = document.get("worst_condition_macro_f1", {})
-    worst_at = document.get("worst_condition_at", {})
-    print(f"\n  {'arm':20s} {'accuracy':>9s} {'macroF1':>9s} {'worstF1':>9s}  weakest")
-    for name, block in document["results"].items():
-        cell = worst.get(name)
-        print(
-            f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f} "
-            f"{cell:>9.4f}  {worst_at.get(name, '')}"
-            if cell is not None
-            else f"  {name:20s} {block['accuracy']:>9.4f} {block['macro_f1']:>9.4f}"
-        )
-    print("\n  worst-condition macro-F1 is the primary robustness endpoint")
+    # 到這一行為止，科學結果**已經落地**：report 寫在磁碟上，
+    # 一次性 claim 也已經標成 COMPLETE。底下全部只是講給人看。
+    #
+    # **呈現失敗不得把已完成的科學結果改判成失敗。** 這二十幾行的
+    # 任何一個 KeyError、格式化錯誤，或 stdout 被關掉造成的
+    # BrokenPipeError，以前都會往上拋到入口的 catch-all，寫下
+    # stage_failed 並以非零結束 —— 而磁碟上的 report 與 claim 明明
+    # 白白寫著成功。那不是「兩份紀錄不一致」而已，那是**把一次跑完
+    # 的正式實驗報成失敗**，而重跑會被 claim 擋住。
+    #
+    # 因此這一段整個 fail-soft：印不出來就說印不出來，科學結論、
+    # claim 狀態、終局事件與 exit code 一律維持成功。
+    try:
+        print(f"\n  report            {document['report_path']}")
+        print(f"  dry_run           {document['dry_run']}")
+        print(f"  scientific_result {document['scientific_result']}")
+        print(f"  llm_arm_evaluated {document['llm_arm_evaluated']}")
+        print(f"  rows              {document['dataset']['total_rows']}")
+        print(f"  routing           {json.dumps(document['routing']['counts'])}")
+        print(f"  escalated         {document['routing']['escalated_cases']}"
+              f" ({document['routing']['escalation_rate']:.1%})")
+        if dry_run:
+            print(f"  skipped escalated {document['skipped_escalated_cases']}"
+                  "  (pcmef_full arm omitted by construction)")
+        worst = document.get("worst_condition_macro_f1", {})
+        worst_at = document.get("worst_condition_at", {})
+        print(f"\n  {'arm':20s} {'accuracy':>9s} {'macroF1':>9s} "
+              f"{'worstF1':>9s}  weakest")
+        for name, block in document["results"].items():
+            cell = worst.get(name)
+            print(
+                f"  {name:20s} {block['accuracy']:>9.4f} "
+                f"{block['macro_f1']:>9.4f} "
+                f"{cell:>9.4f}  {worst_at.get(name, '')}"
+                if cell is not None
+                else f"  {name:20s} {block['accuracy']:>9.4f} "
+                     f"{block['macro_f1']:>9.4f}"
+            )
+        print("\n  worst-condition macro-F1 is the primary robustness endpoint")
+    except Exception as error:  # noqa: BLE001 - 呈現層一律 fail-soft
+        # 報告路徑是這裡唯一真正重要的一句話，所以連警告都要再包一層：
+        # stdout 已經壞掉時，連這一句都可能再炸一次。
+        _warn_summary_is_unavailable(error, document)
 
     # **成功事件緊貼真正的成功 return。**
     #
@@ -3532,8 +3578,10 @@ def _formal_run_e2_body(args, events, deps) -> int:
     # 這一行與 `return 0` 之間不得再插入任何語句；
     # test_the_success_event_is_the_last_statement_before_the_return
     # 會直接擋下。
+    # 取值一律用 .get()：這一行與 return 之間不得有任何會炸的東西，
+    # 而 document 的形狀是上游給的，不是這裡保證的。
     events.stage_completed(
-        detail=f"dry_run={document['dry_run']}",
+        detail=f"dry_run={document.get('dry_run')}",
         artifacts=(str(document.get("report_path", "")),),
     )
     return 0

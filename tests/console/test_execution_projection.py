@@ -31,6 +31,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+import socket
 from pathlib import Path
 
 import pytest
@@ -200,6 +202,176 @@ def test_the_cache_still_avoids_repeated_resolution(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 1b Tripwire：最後一段自己是別名
+# ---------------------------------------------------------------------------
+
+
+def _can_make_file_symlinks(where: Path) -> bool:
+    """這台機器能不能做出 file symlink。
+
+    用實際做一個來判斷，而不是看 `os.name` —— Windows 開了
+    Developer Mode 就做得出來，而寫死 `os.name == "nt"` 會讓這條
+    守衛在做得到的機器上也一起被跳過。
+    """
+    probe = where / "_probe_target"
+    link = where / "_probe_link"
+    try:
+        probe.write_text("x", encoding="utf-8")
+        os.symlink(probe, link)
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    finally:
+        for path in (link, probe):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return True
+
+
+def test_a_write_through_a_file_symlink_never_reaches_the_protected_file(
+    tmp_path,
+):
+    """**P0：最後一段是 symlink 的那條繞道。**
+
+    `safe/alias.json -> protected/lock.json`：名字裡沒有任何受保護
+    根目錄的字樣，父層 `safe/` 解析出來也乾乾淨淨 —— 只解析所在目錄
+    的守衛因此整條放行，而 `open(alias, "w")` 會沿著連結寫進去。
+
+    這裡用真的 file symlink，而且檢查受保護的檔案**內容沒有被動過**：
+    「有沒有擋下例外」與「有沒有真的寫進去」是兩件事。
+    """
+    if not _can_make_file_symlinks(tmp_path):
+        pytest.skip("this machine cannot create file symlinks")
+
+    guard = _guard_module()
+    protected = tmp_path / "freeze"
+    protected.mkdir()
+    target = protected / "lock.json"
+    target.write_text("ORIGINAL", encoding="utf-8")
+
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    alias = safe / "alias.json"
+    os.symlink(target, alias)
+
+    tripwire = guard.WriteTripwire([protected])
+    with pytest.raises(guard.ProtectedPathWrite):
+        tripwire.check_write(str(alias))
+
+    assert target.read_text(encoding="utf-8") == "ORIGINAL", (
+        "the protected file was modified through the alias"
+    )
+
+
+def test_the_audit_hook_blocks_an_open_through_a_file_symlink(tmp_path):
+    """端到端：真的 `open(alias, "w")`，由稽核事件擋下。"""
+    if not _can_make_file_symlinks(tmp_path):
+        pytest.skip("this machine cannot create file symlinks")
+
+    guard = _guard_module()
+    protected = tmp_path / "freeze"
+    protected.mkdir()
+    target = protected / "lock.json"
+    target.write_text("ORIGINAL", encoding="utf-8")
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    alias = safe / "alias.json"
+    os.symlink(target, alias)
+
+    tripwire = guard.WriteTripwire([protected])
+    guard._install_tripwire(tripwire)
+
+    with pytest.raises(guard.ProtectedPathWrite):
+        with open(alias, "w", encoding="utf-8") as handle:
+            handle.write("OVERWRITTEN")
+
+    assert target.read_text(encoding="utf-8") == "ORIGINAL"
+
+
+def test_a_junction_final_component_is_blocked_even_though_islink_says_no(
+    tmp_path,
+):
+    """Windows junction：`os.path.islink()` 說不是連結，`resolve()` 卻跟著走。
+
+    這是同一條繞道的 Windows 版本。用 `islink()` 單獨判定的修法會在
+    這裡整個漏掉，所以這條測試刻意把 `islink()` 的答案一起斷言出來
+    —— 它為 False 而守衛仍然必須擋下。
+    """
+    if os.name != "nt":
+        pytest.skip("junctions are a Windows construct")
+
+    import subprocess
+
+    guard = _guard_module()
+    protected = tmp_path / "freeze"
+    protected.mkdir()
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    alias = safe / "alias"
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(alias), str(protected)],
+        capture_output=True, text=True,
+    )
+    if made.returncode != 0:
+        pytest.skip("this machine cannot create junctions")
+
+    assert os.path.islink(alias) is False, (
+        "if islink() ever starts reporting junctions, this test's premise "
+        "changed — the guard must still not depend on it"
+    )
+
+    tripwire = guard.WriteTripwire([protected])
+    with pytest.raises(guard.ProtectedPathWrite):
+        tripwire.check_write(str(alias))
+
+
+def test_an_ordinary_file_beside_an_alias_is_still_allowed(tmp_path):
+    """對照組：同一個目錄裡的普通檔案不得被誤擋。"""
+    guard = _guard_module()
+    protected = tmp_path / "freeze"
+    protected.mkdir()
+    safe = tmp_path / "safe"
+    safe.mkdir()
+
+    tripwire = guard.WriteTripwire([protected])
+    tripwire.check_write(str(safe / "ordinary.json"))
+    assert not tripwire.violations
+
+
+def test_the_alias_check_does_not_resolve_paths_that_do_not_exist(tmp_path):
+    """代價要停在 lstat：還不存在的落點不得付 resolve() 的錢。
+
+    絕大多數寫入的目標都還不存在（建立它的就是這次寫入），所以這條
+    路徑上一次 `resolve()` 都不該發生。
+    """
+    import unittest.mock
+
+    guard = _guard_module()
+    protected = tmp_path / "freeze"
+    protected.mkdir()
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    tripwire = guard.WriteTripwire([protected])
+    tripwire.check_write(str(safe / "warm.json"))   # 先把父層快取起來
+
+    resolved = {"n": 0}
+    original = Path.resolve
+
+    def counting(self, *args, **kwargs):
+        resolved["n"] += 1
+        return original(self, *args, **kwargs)
+
+    with unittest.mock.patch.object(Path, "resolve", counting):
+        for index in range(50):
+            tripwire.check_write(str(safe / f"new{index}.json"))
+
+    assert resolved["n"] == 0, (
+        f"{resolved['n']} resolutions for writes to files that do not exist"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2 Formal 成功事件的位置
 # ---------------------------------------------------------------------------
 
@@ -247,15 +419,17 @@ def _document(**overrides):
     return document
 
 
-def test_a_crash_while_formatting_the_summary_is_not_recorded_as_success(
-    tmp_path, monkeypatch
+def test_a_crash_while_formatting_the_summary_still_records_success(
+    tmp_path, monkeypatch, capsys
 ):
-    """**成功事件不得早於可能失敗的後處理。**
+    """**已經完成的科學結果不得被呈現層改判成失敗。**
 
-    先前 `stage_completed()` 發在二十幾行 document 取值與格式化之前。
-    那段炸掉的話：事件檔說 completed（終局唯一，後到的 failed 被丟），
-    而 CLI 以非零結束、run.json 說 failed。兩份紀錄各說各話，而它們
-    都在磁碟上。
+    `run_formal_e2_full()` 回來的那一刻，report 已經寫在磁碟上、
+    一次性 claim 也已經標成 COMPLETE。之後那二十幾行純粹是排版。
+
+    round 7 把成功事件移到 `return 0` 前面，讓事件檔與 exit code 對上
+    ——但對到的是**失敗**：磁碟上的 report 說成功，CLI 卻說失敗，而
+    claim 已經 COMPLETE，重跑會被擋住。排版失敗因此改為 fail-soft。
     """
     _stub_preflight(monkeypatch, tmp_path)
     # 少一個鍵就會在後處理那一段 KeyError。
@@ -267,17 +441,18 @@ def test_a_crash_while_formatting_the_summary_is_not_recorded_as_success(
     )
     from pcmef import cli
 
-    with pytest.raises(BaseException):
-        cli.cmd_formal_run_e2(_formal_args(tmp_path))
-
-    assert _terminal_events(tmp_path / "run") == ["stage_failed"], (
-        "a run that never finished printing its summary did not succeed"
+    assert cli.cmd_formal_run_e2(_formal_args(tmp_path)) == 0, (
+        "the science finished; a formatting error must not change the exit code"
+    )
+    assert _terminal_events(tmp_path / "run") == ["stage_completed"]
+    assert "warning" in capsys.readouterr().err.lower(), (
+        "fail-soft must still say out loud that the summary was not rendered"
     )
 
 
-def test_a_crash_in_the_per_arm_table_is_not_recorded_as_success(tmp_path,
-                                                                 monkeypatch):
-    """逐臂表格那一段同樣在成功事件之後。"""
+def test_a_crash_in_the_per_arm_table_still_records_success(tmp_path,
+                                                            monkeypatch):
+    """逐臂表格那一段同樣只是排版，炸掉不改判。"""
     _stub_preflight(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "pcmef.experiments.e2_formal.run_formal_e2_full",
@@ -286,10 +461,55 @@ def test_a_crash_in_the_per_arm_table_is_not_recorded_as_success(tmp_path,
     )
     from pcmef import cli
 
-    with pytest.raises(BaseException):
-        cli.cmd_formal_run_e2(_formal_args(tmp_path))
+    assert cli.cmd_formal_run_e2(_formal_args(tmp_path)) == 0
+    assert _terminal_events(tmp_path / "run") == ["stage_completed"]
 
-    assert _terminal_events(tmp_path / "run") == ["stage_failed"]
+
+def test_a_broken_stdout_does_not_turn_a_finished_run_into_a_failure(
+    tmp_path, monkeypatch
+):
+    """stdout 壞掉是最真實的那一種：`| head` 關掉管線就會這樣。
+
+    連 fail-soft 的警告本身都印不出去，而科學結果仍然必須是成功。
+    """
+    _stub_preflight(monkeypatch, tmp_path)
+
+    class _ClosedPipe:
+        def write(self, *_a, **_k):
+            raise BrokenPipeError(32, "broken pipe")
+
+        def flush(self, *_a, **_k):
+            raise BrokenPipeError(32, "broken pipe")
+
+    def _science_then_the_pipe_closes(*_a, **_k):
+        # 管線是在科學跑完之後才斷的 —— 那正是要守的那一刻。
+        monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+        monkeypatch.setattr(sys, "stderr", _ClosedPipe())
+        return _document()
+
+    monkeypatch.setattr(
+        "pcmef.experiments.e2_formal.run_formal_e2_full",
+        _science_then_the_pipe_closes,
+    )
+    from pcmef import cli
+
+    assert cli.cmd_formal_run_e2(_formal_args(tmp_path)) == 0
+    assert _terminal_events(tmp_path / "run") == ["stage_completed"]
+
+
+def test_a_malformed_document_cannot_break_the_success_event(tmp_path,
+                                                             monkeypatch):
+    """終局事件取值一律 .get()：它與 return 之間不得有會炸的東西。"""
+    _stub_preflight(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "pcmef.experiments.e2_formal.run_formal_e2_full",
+        # 連 dry_run 都沒有 —— 事件仍然要發得出去。
+        lambda *a, **k: {"results": {}},
+    )
+    from pcmef import cli
+
+    assert cli.cmd_formal_run_e2(_formal_args(tmp_path)) == 0
+    assert _terminal_events(tmp_path / "run") == ["stage_completed"]
 
 
 def test_a_clean_formal_run_still_records_success(tmp_path, monkeypatch):
@@ -560,20 +780,151 @@ def test_a_single_stage_run_still_shows_its_node(env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_no_test_opens_a_listening_socket():
-    """8790 是唯一的正式 localhost UI port；測試一律走 test_client。"""
-    import re
+def test_the_listener_guard_is_a_runtime_guard_not_a_source_scan():
+    """8790 是唯一的正式 localhost UI port。
 
-    offenders = []
-    here = Path(__file__).name
-    for path in sorted(Path("tests").rglob("*.py")):
-        if path.name == here:
-            continue
-        for number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if line.lstrip().startswith("#"):
-                continue
-            if re.search(r"\.run\(\s*host=|socket\.bind\(|make_server\(", line):
-                offenders.append(f"{path.as_posix()}:{number}")
-    assert not offenders, f"these start a real listener: {offenders}"
+    先前這條規則是掃原始碼守的 —— 而掃原始碼守不住任何東西：
+    `getattr(socket, "bind")`、包一層 helper、從 library 裡繞出去，
+    三種寫法都掃不到，三種都會真的佔住一個 port。守衛因此改成在
+    綁定當下攔截，這條測試確認它真的是那樣運作的。
+    """
+    guard = _guard_module()
+
+    assert hasattr(guard, "ListenerTripwire"), (
+        "the listener guard must exist as a runtime tripwire"
+    )
+    assert guard.OFFICIAL_UI_PORT == 8790
+    # 真的綁下去才算數：這裡用一個獨立的 tripwire 實例，不動 session 的。
+    listeners = guard.ListenerTripwire()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(guard.RealListenerOpened):
+            listeners.check_bind(sock, ("127.0.0.1", 8791))
+    finally:
+        sock.close()
+    assert listeners.violations, "a blocked bind must still be recorded"
+
+
+def _session_guard(request):
+    """pytest 自己載入的那一份 `tests/conftest.py`。
+
+    `_guard_module()` 是用 importlib 另外載的一份副本，於是它的
+    `RealListenerOpened` 與 session 實際掛上去的**不是同一個類別**，
+    `LISTENERS` 也是另一個物件。要斷言真實綁定被擋下，必須拿到
+    session 這一份。
+
+    **不得用 `sys.modules["conftest"]` 去找。** `tests/conftest.py`
+    與 `tests/console/conftest.py` 兩份都叫 `conftest`，後載入的會把
+    前一份蓋掉 —— 拿到的是隔壁那個。pytest 的 plugin manager 兩份
+    都留著，而且記得各自的檔案路徑。
+    """
+    here = Path(__file__).resolve().parents[1] / "conftest.py"
+    for plugin in request.config.pluginmanager.get_plugins():
+        path = getattr(plugin, "__file__", None)
+        if path and Path(path).resolve() == here:
+            return plugin
+    raise AssertionError("the session conftest is not registered with pytest")
+
+
+def test_a_bind_that_bypasses_the_literal_socket_bind_spelling_is_still_caught(
+    request,
+):
+    """繞過字面寫法照樣被擋 —— 稽核事件看的是行為，不是拼法。
+
+    `getattr(sock, "bind")(...)` 這一行，舊的正規式掃描器一個字都
+    對不上，而它會真的佔住 8792。
+    """
+    def bind_via_getattr(sock, address):
+        getattr(sock, "bind")(address)
+
+    guard = _session_guard(request)
+    # 這個測試**故意**去踩守衛，因此必須把自己製造的那一筆從 session
+    # 的帳上抹掉 —— 否則 session 結束時的總結會把它算成真的違規。
+    before = list(guard.LISTENERS.violations)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(AssertionError) as caught:
+            bind_via_getattr(sock, ("127.0.0.1", 8792))
+    finally:
+        sock.close()
+        guard.LISTENERS.violations[:] = before
+    assert type(caught.value).__name__ == "RealListenerOpened", (
+        f"expected the listener guard to stop this, got {caught.value!r}"
+    )
+    assert 8792 not in guard.listening_ports(), (
+        "the blocked bind must not have left 8792 listening"
+    )
+
+
+def test_flask_test_client_is_not_affected_by_the_listener_guard(env):
+    """`test_client` 走 WSGI，一個 socket 都不碰 —— 必須照常可用。"""
+    guard = _guard_module()
+    before = len(guard.LISTENERS.violations)
+
+    client, _ = env
+    assert client.get("/console").status_code == 200
+
+    assert len(guard.LISTENERS.violations) == before, (
+        "the test client must not register as opening a listener"
+    )
+    assert not guard.LISTENERS.attempts, (
+        "the WSGI test client must not bind any socket at all"
+    )
+
+
+def test_a_declared_temporary_listener_is_permitted_and_leaves_nothing_behind(
+    request,
+):
+    """真的需要 listener 就要明講。宣告過就放行，收掉之後不留痕跡。"""
+    guard = _session_guard(request)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with guard.LISTENERS.allowing(0):
+            # port 0 讓 OS 挑一個空的，宣告過所以放行。
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            opened = sock.getsockname()[1]
+            assert opened != guard.OFFICIAL_UI_PORT, (
+                "a test must never take the official UI port"
+            )
+        sock.close()
+    finally:
+        sock.close()
+
+    assert opened not in guard.listening_ports(), (
+        "the declared listener must be gone once the test closed it"
+    )
+
+
+def test_a_listener_left_open_fails_the_test_that_opened_it(request):
+    """宣告了卻沒收掉 —— `allowing()` 在離開時當場失敗。
+
+    這是「測試通過但留下背景 server」唯一真正抓得到的地方。
+    """
+    guard = _session_guard(request)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with guard.LISTENERS.allowing(0):
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+        port = sock.getsockname()[1]
+
+        # 這一次故意不收，離開時必須被抓到。
+        with pytest.raises(AssertionError) as caught:
+            with guard.LISTENERS.allowing(port):
+                pass
+        assert type(caught.value).__name__ == "RealListenerOpened"
+    finally:
+        sock.close()
+
+
+def test_the_session_never_holds_the_official_ui_port():
+    """測試永遠不得佔用 8790 —— 那是正式 UI 的位置。"""
+    guard = _guard_module()
+    listeners = guard.ListenerTripwire()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(guard.RealListenerOpened):
+            listeners.check_bind(sock, ("127.0.0.1", guard.OFFICIAL_UI_PORT))
+    finally:
+        sock.close()
