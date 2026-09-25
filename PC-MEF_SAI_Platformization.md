@@ -3,12 +3,22 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.6.0  
+**文件版本：** v0.7.0  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
-**日期：** 2026-09-01  
-**上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`  
+**日期：** 2026-09-25  
+**取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
+**上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
+**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，HEAD `eb8ad9c`  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
-**本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。
+**本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
+
+> **章節編號穩定。** 原始碼有 22 處以 `SAI v0.6.0 §N` 形式引用本文件
+> （§3.1、§4.1、§6、§18、§19、§20、§23、§24、§38、§39、ACC-FML-02），
+> 因此 v0.7.0 **不重新編號任何既有章節**。新增內容一律接在 §49 之後
+> 與 Appendix G。引用時可直接寫 `SAI §N`，版本號不影響定位。
+
+> **檔名刻意不帶版本號。** 版本寫在文件內、歷史留在 git。帶版本號的
+> 檔名每改一次就多一份檔案，而那正是這份文件要收掉的問題。
 
 ---
 
@@ -95,6 +105,27 @@
 ### 0.3.12 Formal Run
 
 **Formal Run（正式執行）**：以 Frozen Profile、固定 code/runtime identity 與預先定義 validity rule 執行的正式研究 run。正式結果是否成功由科學結果決定；只有事前定義的 execution-invalid condition 才可標記為 `RUN_INHIBITED`。
+
+---
+
+## 0.4 本文件與實作不一致時的裁決規則
+
+SAI 不是外部草稿，它是**已經被實作進來的規格**：原始碼多處直接引用
+本文件的章節與 `ACC-*` 驗收編號。但文件會落後於實作，因此需要一條
+固定的裁決規則，而不是每次現場判斷。
+
+**判定規則（v0.6.0 → v0.7.0 沿用）：**
+
+1. 本文件與 CURRENT Formal Production Path 衝突 → **一律以 CURRENT 為準**。
+2. 本文件未涵蓋而 CURRENT 已實作 → 文件視為**沉默**，不得當成「可以簡化」。
+3. 本文件有、CURRENT 尚未實作且不衝突 → **優先重用本文件設計**，不另發明。
+
+規則 2 是三條裡最容易被違反的一條。v0.6.0 時期就發生過：文件沒寫
+one-shot claim，於是「照文件重寫一份」會把已經修好的獨佔保護拿掉。
+**沒寫不等於不需要。**
+
+本版已依此規則把 2026-09-02 ~ 2026-09-25 之間的實作收斂回文件，
+逐項對照見 **Appendix G**。
 
 ---
 
@@ -395,6 +426,14 @@ Profile 至少保存：
 ---
 
 # 6. Thesis Profile Golden Regression
+
+> **v0.7.0 更新（原 delta D-06）：** canonical baseline **必須綁定
+> lineage lock hash + runtime identity + code revision**。手寫
+> `{"canonical": true}` 不再被接受 —— 不綁 identity 的 baseline 是
+> 宣稱，不是基準。實作見 `experiments/regression_snapshot.py`；
+> 目前 `regression/provisional/thesis_regression_snapshot.json` 的
+> `canonical=false`，尚有 4 條 canonical_blocker 未解除。
+> 下方 §6.2 的 TGR-01~12 比對項清單本身仍然有效，直接沿用。
 
 ## 6.1 定義
 
@@ -969,6 +1008,31 @@ Frozen Profile 僅顯示 snapshot。
 
 # 18. Formal Run 唯一 production path
 
+> **v0.7.0 更新（原 delta D-01 ~ D-04）：** 本節原本只要求 fail-closed
+> 與 identity mismatch refuse。CURRENT 在其上實作了 **one-shot claim
+> 狀態機**，這一層文件原本是沉默的 —— 而沉默被當成「可以不做」，
+> 會直接讓一次性實驗失去獨佔保護。
+
+**Formal one-shot claim（`pcmef/experiments/run_claim.py`）**
+
+| 狀態 | 意義 |
+|---|---|
+| `RESERVED` | 已取得名額，尚未開始執行 |
+| `RUNNING` | 執行中 |
+| `COMPLETE` | 已完成，該次一次性實驗用掉了 |
+| `INTERRUPTED_RESUMABLE` | 中斷但可續跑 |
+
+- claim 以 `O_EXCL` 建立；狀態推進採單調遞增 `revision` 加上
+  `.RUN_CLAIM.json.rev<N+1>` 的 `O_EXCL` 權杖 CAS。
+- **刻意不用 lock 檔**：孤兒鎖沒有人能釋放。
+- 任何「讀出來改一改寫回去」的 claim / profile 儲存實作都會重新引入
+  read-then-write 競態，**不得如此實作**。
+- identity **只由 claim layer 驗證**；pre-flight 刻意不重複驗一次。
+  兩份實作必然漂移，而較寬鬆的那一份會先跑。
+- claim 生命週期在 `_execute_formal_e2` 之外，該層只有一個 try；
+  卡住的 claim 由 `pcmef formal reclaim` 標回可續跑 —— 卡在 `RUNNING`
+  的 claim 會**同時**擋掉 fresh restart 與 resume。
+
 ```text
 Web UI ─────┐
             │
@@ -1028,6 +1092,14 @@ Formal production entry 必須：
 任何 MUST FAIL：
 
 `START FORMAL RUN` disabled。
+
+---
+
+> **v0.7.0 更新（原 delta D-05）：** 上方列的 pre-flight 項目是
+> **畫面顯示層**。Final E2 的實際進入條件是
+> `pcmef/experiments/final_gate.py` 的 **8 項機器強制前置條件**，
+> 兩者不是同一組，用途也不同。**判定一律以 final_gate 為準**，
+> 本節只作顯示參考。8 項現況見 §51.1。
 
 ---
 
@@ -1151,33 +1223,56 @@ Abort 必須留下 immutable run record。
 
 # 20. 前端導航資訊架構
 
-```text
-PC-MEF Research Platform
+> **v0.7.0 更新（原 delta D-08，本版最關鍵的 UI 變更）：** v0.6.0 列的
+> 13 個頂層項目是「功能清單」；CURRENT 收斂成 **五個入口**，每一項的
+> hint 是一個**問句**。判準因此改變：一個功能該放哪裡，看它回答的是
+> 哪一個問題，而不是它在哪個模組裡實作。
+>
+> `pcmef/console/navigation.py` 的維護契約明文寫著：
+> **「不得為了新功能再加第六個頂層項目。」**
+> 五個入口是刻意的收斂；新功能要歸進其中一個，否則首頁會重新開始
+> 堆疊 —— 那正是要修的問題。
 
-Dashboard
-Profiles
-  ├─ Development
-  ├─ Frozen
-  └─ Thesis Profile
+**第一層：五個主入口**（`NAV_ITEMS`，順序即操作順序）
 
-Scenario Library
-Sensor Library
+| key | 標籤 | 回答的問題 |
+|---|---|---|
+| `run` | 實驗 Run | 我要跑什麼？ |
+| `pipeline` | 流程 Pipeline | 系統怎麼跑？ |
+| `results` | 結果 Results | 跑出了什麼？ |
+| `status` | 研究狀態 Status | 研究目前做到哪裡？ |
+| `llm` | LLM 設定 | provider / model / binding |
 
-Simulation
-Datasets
-Models
-Fusion / PC-MEF
-LLM Agents
+**Project 不是第六個 tab**，而是五個入口**之上**的一層
+（Workspace → Project → 五入口）。麵包屑根節點為 Workspace，
+**不得寫死成 `PC-MEF`** —— 寫死的話，切換 Project 之後麵包屑仍然
+說 PC-MEF。
 
-Experiments
-  ├─ Preview
-  ├─ Pilot
-  └─ Formal Runs
+**第二層：單次 run 的七個分頁**（`RUN_SECTIONS`，順序照資料流）
 
-Results
-Artifacts & Provenance
-System / Admin
-```
+| key | 標籤 | 回答的問題 |
+|---|---|---|
+| `overview` | 總覽 Overview | 這次執行整體發生了什麼？ |
+| `trace` | 流程追蹤 Trace | 每一筆是怎麼被判斷的？ |
+| `inputs` | 輸入 Inputs | 餵進去的是什麼？ |
+| `intermediate` | 中間結果 Intermediate | 中途產生了什麼？ |
+| `outputs` | 輸出 Outputs | 得到什麼結論？ |
+| `cost` | 用量與成本 Cost | 這次花了多少？ |
+| `artifacts` | Artifacts | 檔案落在哪裡？ |
+
+Cost 排在 Outputs 之後、Artifacts 之前：它是那份輸出的代價，屬於結果
+的一部分，不是檔案清單。Artifacts 放最後，它回答的是「檔案在哪」而
+不是「發生了什麼」。
+
+沒有內容的分頁**仍然顯示**，只標成 disabled。藏起來會讓人以為系統
+沒有這個能力，而事實是「這種 run 不產生那一層」—— 差別在畫面上必須
+看得出來。
+
+**術語裁決：** v0.6.0 通篇稱 **Research Profile**，平台化任務書稱
+**Project**，兩者指同一層（版本化的研究設定容器 + namespace 邊界）。
+對外顯示與新程式碼一律用 **Project**，schema 內保留 `profile_state`
+對映欄位，讓 §4.1 狀態機仍可直接引用。
+**不同時維護兩套詞彙** —— 兩套詞彙必然漂移。
 
 ---
 
@@ -1812,60 +1907,39 @@ Exit：
 
 # 39. 建議目錄樹
 
+> **v0.7.0 更新：** 標 **[已建]** 的是 CURRENT 實際存在的落點，
+> 標 **[規劃]** 的尚未實作。v0.6.0 原樹把 `scenarios/`、`sensors/`、
+> `compatibility/`、`artifacts/` 列為平行子套件，那部分仍是 Phase 3
+> 之後的目標；而 `projects/`、`runs/`、`pipeline/`、`lifecycle/` 是
+> 平台化過程中長出來、原樹沒有預期的。
+
 ```text
 pcmef/
-├─ core/
+├─ core/                        [已建] active_lineage 等 stable core
 │
 ├─ platform/
-│  ├─ profiles/
-│  │  ├─ models.py
-│  │  ├─ service.py
-│  │  ├─ freeze.py
-│  │  └─ validation.py
+│  ├─ capabilities.py           [已建] 能力模型（§49.2）
+│  ├─ executors.py              [已建] template → executor 登記處（§49.3）
+│  ├─ projects/                 [已建] Project 抽象、clone、namespace
+│  ├─ profiles/                 [已建] §4.1 狀態機、freeze、validation
+│  ├─ pipeline/                 [已建] 流程定義（非七個硬寫節點）
+│  ├─ runs/                     [已建] 歸屬、邊界、stage events（§49.1/§49.4）
+│  ├─ lifecycle/                [已建] Phase 4 的 PC-MEF adapter
 │  │
-│  ├─ scenarios/
-│  │  ├─ registry.py
-│  │  ├─ contracts.py
-│  │  └─ plugins/
-│  │
-│  ├─ sensors/
-│  │  ├─ registry.py
-│  │  ├─ contracts.py
-│  │  └─ adapters/
-│  │     ├─ rgb.py
-│  │     └─ tof.py
-│  │
-│  ├─ compatibility/
-│  │  └─ service.py
-│  │
-│  ├─ experiments/
-│  │  ├─ service.py
-│  │  ├─ formal_service.py
-│  │  └─ events.py
-│  │
-│  └─ artifacts/
-│     └─ service.py
+│  ├─ scenarios/                [規劃] registry / contracts / plugins
+│  ├─ sensors/                  [規劃] registry / contracts / adapters
+│  ├─ compatibility/            [規劃] Sensor × Scenario 矩陣
+│  └─ artifacts/                [規劃] artifact service
 │
-├─ experiments/
-├─ agents/
-├─ perception/
-├─ stats/
+├─ console/                     [已建] 五入口、run 分頁、SSE
+├─ admin/                       [已建] Flask app 與 templates
+├─ experiments/                 [已建] run_claim / final_gate / formal_service
+├─ agents/ perception/ stats/   [已建] stable scientific core
 └─ ...
-
-web/
-├─ routes/
-├─ templates/
-│  ├─ dashboard/
-│  ├─ profiles/
-│  ├─ scenarios/
-│  ├─ sensors/
-│  ├─ simulation/
-│  ├─ experiments/
-│  └─ results/
-└─ static/
 ```
 
-此為建議邊界，不要求為了符合目錄樹搬動既有 stable module。
+此為建議邊界，**不要求為了符合目錄樹搬動既有 stable module**
+（見 §38 Change Budget）。
 
 ---
 
@@ -2250,6 +2324,365 @@ Web monitor 只讀 run event / registry，不自行推測 formal state。
 **DEC-P08：** 新增 Sand、Infrared、alternate-ToF 都必須在新的 Development Profile 中進行。  
 **DEC-P09：** 平台能力與科學有效性分離；能執行不等於能形成正式 research claim。  
 **DEC-P10：** 優先包裝既有 scientific core，不做與 Thesis E2 無關的大型重寫。
+
+---
+
+# 49. Execution / Action Layer
+
+v0.6.0 定義了「Formal 只有一條 production path」（§18），但沒有定義
+**一次執行在平台上是什麼**。2026-09-06 ~ 09-25 之間的七輪收斂
+（commit `16d6e51`..`eb8ad9c`）補上了這一層。本節是那七輪的規格化結果。
+
+貫穿本節的一條原則：
+
+> **畫面、事件檔與 run.json 是三份會同時存在於磁碟上的紀錄。
+> 它們不一致時，不一致本身就是缺陷 —— 即使每一份單獨看都合理。**
+
+## 49.1 Run Attribution（一次執行屬於誰）
+
+每一次 run 在建立時寫入 `run_identity.json`，記錄它屬於哪一個
+Project 與哪一個 Profile。
+
+- **write-once**：以 `O_EXCL` 建立，不得覆寫。歸屬可以缺，不可以改。
+- **fail-closed**：讀不到歸屬的 run 不得回退成「屬於目前選取的 Project」。
+  回退等於「刪掉歸屬檔就變成碩論的」，那是最不該放寬的時候放寬。
+
+### Attribution Boundary
+
+歸屬機制不是一開始就有的，因此需要一條分界線：
+
+- `.attribution_boundary.json` 在 run root 上**安裝一次，之後只讀**。
+- 邊界**之前**建立的 run 屬於 legacy layout，照常顯示。
+- 邊界**之後**建立的 run 必須自帶 `run_identity.json`；缺了就是
+  **orphaned，不是 legacy**。
+- 讀不到或寫不進去時一律 `AttributionBoundaryError`，
+  **不得改用「現在時間」補一個**。以當下補出來的邊界會把所有既有 run
+  一次推到邊界之前，於是那條繞道又打開了。
+- 時間戳**完整精度不截到秒**：截掉小數就是把邊界往前挪最多一秒，
+  而那一秒內建立的 run 會被誤判成孤兒。
+
+> **撰寫測試時注意：** 邊界是在測試執行當下安裝的。把日期寫死成
+> 某個「未來」的字面值，過了那天就會變成過去，測試會從那天起每天
+> 失敗，而失敗原因與它要守的規則無關。日期一律由邊界推算。
+
+## 49.2 能力模型（Capability Model）
+
+`platform/capabilities.py` 回答「這個 Project **可不可以**啟動某件事」：
+
+| 能力 | 意義 |
+|---|---|
+| `RUN_SIMULATION` | 可跑模擬 |
+| `LLM_SNAPSHOT_READ` | 可讀 LLM snapshot |
+| `LLM_RUNTIME_FREEZE` | 可凍結 LLM runtime |
+| `FORMAL_E2` | 可執行 Formal E2 |
+| `SCIENTIFIC_STATE_READ` | 可讀科學狀態 |
+
+另有 `MINIMUM_STATE`：依 profile 狀態再閘一層。能力由 template 宣告，
+**不得以 project id 判斷** —— 用 id 判斷與用名字判斷只差一層。
+
+## 49.3 Executor Registry（這個 Project 有什麼可以啟動）
+
+能力回答「可不可以」，registry 回答「有什麼」。兩個問題都要有答案，
+缺一個就會出現「空專案按下開始，跑出一份標著它自己名字、內容卻是
+碩論場景的結果」。
+
+`platform/executors.py` 現況（template `pcmef-thesis`）：
+
+| executor | scope | 事件歸戶 | 涵蓋節點 |
+|---|---|---|---|
+| `sim_smoke` | stage | `simulation` | simulation |
+| `surrogate_smoke` | stage | `perception` | perception |
+| `formal_e2` | **pipeline** | `formal_e2` | perception, reliability, routing, arbitration, decision |
+| `llm_snapshot` | action | `llm_snapshot` | （不是流程的一步） |
+| `audit_gates` | action | `audit` | （不是流程的一步） |
+
+三條約束：
+
+1. **不得把 `scope` 與 `stage_ids` 收回成單一 `stage_id`。**
+   Formal E2 涵蓋整條推論鏈；記成一個節點，紀錄就會宣稱它只做了最後一步。
+2. **涵蓋多步的執行用自己的名字歸戶事件**（`formal_e2`），
+   不掛在任何一個研究節點下。掛在 `decision` 上的話，畫面會說
+   「決策這一步完成了」，而實際發生的是整條鏈跑完、其餘六個節點
+   看起來沒動過。
+3. **查詢前必須 `_ensure_registered()`。** 登記是「匯入即註冊」，
+   少了它，在還沒有人匯入 provider 的行程裡這張表是空的 —— 而空表的
+   意思是「沒有任何 executor」，於是碩論自己被拒絕執行。
+   授權結果取決於匯入順序，是這一層最難重現的一種錯。
+
+流程本身是**定義**而非七個硬寫節點；`pcmef-thesis` 的七節點為
+`simulation → paired → perception → reliability → routing →
+arbitration → decision`（`arbitration` 為 optional）。
+
+## 49.4 Stage Events 與終局唯一
+
+`platform/runs/events.py`：append-only JSONL。
+
+- **fail-soft writer**：寫事件失敗不得拖垮執行本體，但必須留下
+  `dropped` 與 `last_error` —— 靜默地少掉幾筆事件，比沒有事件更糟。
+- **終局唯一（terminal-once）**：第一個終局事件勝出，之後的被丟棄。
+  這條規則本身正確，但它會與下一節的問題交互作用。
+
+### 成功事件的位置
+
+終局唯一代表：**成功事件一旦發出，後面再發失敗也沒用**。因此
+
+> `stage_completed()` 與真正的 `return 0` 之間**不得有任何語句**。
+
+中間夾一行、那一行炸掉，事件檔會留下 `completed`（後到的 `failed`
+被丟），而 CLI 以非零結束、`run.json` 說 `failed` —— 兩份紀錄各說
+各話，而它們都在磁碟上。此規則由結構性測試強制
+（walk AST，`stage_completed` 之後必須緊接 `ast.Return`）。
+
+### 但：已完成的科學結果不得被呈現層改判
+
+`run_formal_e2_full()` 回來的那一刻，report 已寫在磁碟上、一次性
+claim 已標成 `COMPLETE`。之後的摘要排版**純粹是講給人看**。
+
+- 排版失敗（缺鍵、格式化錯誤、`| head` 關掉管線造成的
+  `BrokenPipeError`）**一律 fail-soft**：在 stderr 警告，
+  科學結論、claim 狀態、終局事件與 exit code 全部維持成功。
+- 終局事件取值一律 `.get()`，讓它與 `return` 之間連取值都不會炸。
+
+**兩條規則不衝突**：成功事件仍然緊貼 return，只是它前面那一段
+不再有機會拋出例外。把「排版壞掉」記成「實驗失敗」的代價是
+——claim 已經 `COMPLETE`，重跑會被擋住。
+
+## 49.5 UNREAPED：收不掉的子行程
+
+執行結束時若無法確認子行程已終止：
+
+- run 狀態為 `UNREAPED`，並在同目錄寫下 `unreaped_process.json`
+  （pid / command / host / started_at）。
+- 這**不是一般的失敗**。一般失敗代表「跑完了，結果不好」；
+  `UNREAPED` 代表「有一個行程還在，而沒有人在讀它」。
+- `run.json` 與標記檔由不同路徑寫出（前者 `Path.write_text`，
+  後者 `os.open`），**任一邊都可能單獨成功**。因此當紀錄仍寫著
+  `running` 而標記檔已經在了，**以標記檔為準**：
+  `get()` 與 `list_runs()` 在**讀取時**投影成 `UNREAPED`。
+- **只投影不回寫。** `run.json` 寫不成功正是走到這裡的原因之一，
+  再寫一次只會再失敗，而且會蓋掉「當時到底發生什麼」。
+
+---
+
+# 50. 本機執行環境與測試隔離
+
+本節的每一條都是被真的咬過之後才寫下來的。
+
+## 50.1 測試不得污染真實科研樹
+
+三層互補，失敗模式各不相同，**三層都要**：
+
+| 層 | 回答的問題 | 抓得到什麼 |
+|---|---|---|
+| 指紋比對（session 前後） | 跑完之後有沒有變？ | 經由 C 擴充等稽核事件涵蓋不到的路徑寫入 |
+| `WriteTripwire`（稽核事件） | 過程中有沒有碰過？ | **寫了又刪**的那一種（指紋前後相同） |
+| `ListenerTripwire`（見 §50.3） | 有沒有佔住 port？ | 真實 TCP 綁定 |
+
+`PROTECTED_PATHS` = `outputs/perception/e2_final`、`freeze/`、`projects/`。
+
+**WriteTripwire 的三道關卡**（`tests/conftest.py`）：
+
+1. **名字粗篩**：路徑字面含受保護根目錄名稱 → 完整 `resolve()` 判定。
+   比對的是**最後一段名字**而非絕對路徑前綴 —— 用前綴的話，相對路徑
+   （最常見的寫法）一個字都對不上，在 `resolve()` 之前就被放行。
+2. **所在目錄**：解析父目錄（有快取）再判一次。
+   快取的**鍵必須先 `abspath()`** —— `"."` 在 `chdir()` 之後指的是
+   別的地方，沿用舊答案就是一條走得通的繞道。
+3. **最後一段是別名**：父層乾淨不代表落點乾淨。
+   `safe/alias.json -> freeze/.../lock.json` 名字上看不出任何東西，
+   父層 `safe/` 也乾乾淨淨，而 `open()` 會沿著連結寫進去。
+   判定用 **reparse point**，**不得只用 `os.path.islink()`**
+   —— 它對 Windows junction 回傳 `False`，而 `resolve()` 照樣跟著走。
+
+代價控制：第 3 關用一次**不跟著連結走**的 `lstat()`；絕大多數寫入的
+目標還不存在，當場 ENOENT 返回，代價就停在那裡。
+
+> **已知缺口：hardlink。** hardlink 是同一個 inode，沒有 reparse point
+> 也沒有 target，路徑解析看不見它。緩解：`os.link` 本身有稽核事件，
+> **session 內**建立指向受保護路徑的 hardlink 會當場被擋；漏的只有
+> session 開始前就已存在於磁碟上的 hardlink。要真的補需要比對
+> `st_ino`/`st_dev`。
+
+## 50.2 守衛自己也會失效（本平台最重要的一課）
+
+把一個函式拆成入口與本體之後，**三條檢查原始碼的守衛開始看著一個
+只剩 try/except 的殼**。其中 presence 檢查會當場失敗（還好），
+**absence 檢查則變成永遠通過 —— 它不報錯，只是不再守任何東西。**
+
+因此：
+
+- 任何取 `cmd_*` 原始碼的守衛，都必須把**拆出去的本體一起取**。
+- 這條規則本身要有一條測試去掃描強制，否則下一次拆函式會再發生一次。
+- 更一般地：**「通過但什麼都沒守」是這一層的主要失敗模式**，
+  比「失敗」難發現得多。
+
+## 50.3 Port 衛生
+
+> **`http://localhost:8790` 是唯一的正式 localhost UI port。**
+
+- 主機端只綁 loopback（`127.0.0.1:8790 -> 8787/tcp`），容器內側固定
+  8787。內側用哪個 port 對操作者不可見。
+- **不得靠換 port（8791、8792…）規避衝突。** 衝突要解決，不是繞過。
+- 測試**一律走 Flask `test_client`**：它直接講 WSGI，一個 socket
+  都不碰。
+
+**執行期守衛（`ListenerTripwire`）**，掛在 `socket.bind` 稽核事件：
+
+- TCP 綁定預設一律拒絕；真的需要時以
+  `LISTENERS.allowing(port)` **明確宣告**，離開時若沒收掉當場失敗。
+- session 前後比對本機 listening ports，抓子行程留下來的。
+
+這一條先前是用正規式**掃描原始碼**守的，而掃描原始碼守不住任何東西：
+`getattr(sock, "bind")(...)`、包一層 helper、從 library 裡繞出去 ——
+三種寫法都掃不到，三種都會真的佔住一個 port。
+
+> **已知涵蓋範圍：** 稽核事件只到本行程；子行程由 port 盤點兜底，
+> 而 `psutil` 在無管理員權限下列得到的 port 少於 `netstat`，
+> 因此第二層不是 100% 涵蓋。
+
+---
+
+# 51. 目前實作狀態與已知缺口
+
+本節是 v0.7.0 的**現況快照**，會隨實作前進而過期；
+§0.4 的裁決規則在它過期之後仍然適用。
+
+## 51.1 Final E2 Gate：1 / 8
+
+`pcmef formal preflight --mode formal`（唯讀，exit code 2）：
+解析 `freeze/ACTIVE_LINEAGE.json` → `freeze/runs/PFC-001`（10 locks），
+判定由 `pcmef/experiments/final_gate.py` 執行。
+
+| # | 項目 | 狀態 |
+|---|---|---|
+| 1 | `amd007_real_provider_validation` | **PASS**（`READY_FOR_FINAL_E2=YES`, real_calls=8） |
+| 2 | `amd007_frozen` | FAIL — `AMD-007.amendment.json` 不存在 |
+| 3 | `amd008_frozen` | FAIL — 同上 |
+| 4 | `amd009_frozen` | FAIL — 同上 |
+| 5 | `llm_runtime_refrozen` | FAIL — `real_agent_validation.json` 未記錄 `runtime_config_hash` |
+| 6 | `formal_config_matches_current_llm_runtime` | FAIL — 交叉引用一致，但引用的 runtime 尚未通過驗證 |
+| 7 | `canonical_golden_baseline` | FAIL — `canonical=false`，4 條 blocker 未解除 |
+| 8 | `final_partition_manifest` | FAIL — `dataset_manifest.json` 未生成 |
+
+> 第 6 項原名會在第 5 項未過時**假 PASS**，導致 Status 顯示「已重凍」
+> 而其實兩者都沒有。現已改為依賴第 5 項（原 delta D-07）。
+
+## 51.2 遷移安全基準
+
+| 項目 | 值 |
+|---|---|
+| 涵蓋範圍 | `freeze/` `configs/` `registry/` `regression/` `provenance/` `schemas/` |
+| 磁碟檔案數 | **95**（freeze 71 / configs 17 / schemas 3 / provenance 2 / registry 1 / regression 1） |
+| **進版控** | **35** |
+| 未進版控 | 60（freeze 57 / provenance 2 / registry 1） |
+| tracked-only hash | `0e8fb28e3cbf5f15746db837cb5bc1923f91f1e97ae65ce3832fa23db2d10956` |
+| ACTIVE_LINEAGE | `freeze/runs/PFC-001`（status ACTIVE，supersedes `freeze`） |
+
+> **重要且容易誤解：** `freeze/*.lock.json` 共 **45 個 lock 不進版控**，
+> 這是 `.gitignore` 的**明文設計決定**：「lock 記錄這次 run 用了什麼
+> 參數，可以重產；權威一律是 `freeze/` 下的檔案本身，版控留的是產生
+> 它的程式與決策記錄。」進版控的是 amendments / errata /
+> preregistrations / ACTIVE_LINEAGE / corrective_lineage。
+>
+> 連帶結論：**涵蓋全部 95 檔的 manifest hash 不是穩定不變量**，
+> 它會隨本機活動變動，也無法從一份乾淨的 clone 重現。要當作比對基準
+> 請用上表的 tracked-only hash，或在同一台機器上前後比對。
+
+此清單刻意不列舉 families 36–43。其 `dataset_manifest.json` 尚未生成，
+本版亦未讀取該分割。
+
+## 51.3 測試現況
+
+| 範圍 | 結果 |
+|---|---|
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1004 collected、998 passed、6 skipped、**0 failed** |
+| `tests/`（全量） | 3792 — 3754 passed、**13 failed**、25 skipped |
+
+- 13 個 failure 是**歷史既有**、與平台化無關的科學程式碼項目：
+  `test_paired` ×2、`test_calibration_objective` ×5、
+  `test_calibration_plan` ×1、`test_calibration_prereg` ×4、
+  `test_repo_integrity` ×1。**不得為了讓它們變綠而改科學程式碼。**
+- 6 個 skip 全是 symlink 建立權限（Windows 未開 Developer Mode）。
+  §50.1 第 3 關的行為驗證因此在本機以 junction 代跑，
+  並另於 Linux 容器以真 file symlink 端到端驗過。
+
+## 51.4 已知缺口（依優先序）
+
+1. **Final E2 尚有 7 項 blocker**（§51.1），其中 AMD-007/008/009 尚未
+   凍結、Golden Baseline 尚未 canonical。
+2. **hardlink 別名繞得過 WriteTripwire**（§50.1）。
+3. **`allowing(0)` 驗不到收尾**：port 0 由 OS 挑號，離開時無從確認，
+   只能靠 session 結束的整體盤點兜底。
+4. **稽核事件只涵蓋本行程**，子行程的 port 盤點涵蓋率受 `psutil`
+   權限限制（§50.3）。
+5. **Phase 3 尚未開始**：`scenarios/`、`sensors/`、`compatibility/`、
+   `artifacts/` 四個子套件尚未實作（§39），
+   因此 §7 / §8 的 Wizard、§10 的相容矩陣、UAT-01~03 都還不能跑。
+
+---
+
+# Appendix G — v0.6.0 → v0.7.0 變更對照
+
+本附錄併入 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）的全部裁決，
+並補上該稽核之後的 round 2~8（`32cb9cb`..`eb8ad9c`）。
+
+## G.1 原 delta 稽核的八項（CURRENT 已超越 SAI）
+
+| # | 主題 | v0.7.0 處置 |
+|---|---|---|
+| D-01 | Formal one-shot claim | 併入 **§18** |
+| D-02 | claim 狀態推進原子性 | 併入 **§18** |
+| D-03 | resume 與 identity 驗證歸屬 | 併入 **§18** |
+| D-04 | lifecycle exception-safety | 併入 **§18** |
+| D-05 | Final E2 前置條件（8 項機器強制） | **§19.2** 標為顯示層；判定見 **§51.1** |
+| D-06 | Golden Baseline 必須綁 identity | 併入 **§6** |
+| D-07 | `formal_config` gate 假 PASS | 併入 **§51.1** 附註 |
+| D-08 | 頂層導航 13 → 5 | **§20** 整節改寫 |
+
+術語（Research Profile vs Project）與導航（13 vs 5）兩項不一致，
+裁決均為**以 CURRENT 為準**，已寫入 §20。
+
+## G.2 round 2~8 新增（原 delta 稽核未涵蓋）
+
+| 輪次 | 主題 | 落點 |
+|---|---|---|
+| — | Run attribution + boundary | §49.1 |
+| — | 能力模型 | §49.2 |
+| — | Executor registry / scope | §49.3 |
+| — | Stage events / 終局唯一 | §49.4 |
+| r5 | 源碼守衛「通過但什麼都沒守」 | §50.2 |
+| r6 | UNREAPED 與標記檔 | §49.5 |
+| r6 | Port 衛生（8790 唯一） | §50.3 |
+| r7 | tripwire chdir 繞道 | §50.1 第 2 關 |
+| r7 | marker-only unreaped 投影 | §49.5 |
+| r7 | Formal aggregate 事件歸戶 | §49.3 約束 2 |
+| r8 | tripwire 末段別名繞道 | §50.1 第 3 關 |
+| r8 | 科學 COMPLETE 不得被呈現層改判 | §49.4 |
+| r8 | 執行期 listener 守衛 | §50.3 |
+
+## G.3 v0.6.0 原樣沿用、未改動的章節
+
+§0.3 名詞定義、§3.1 七條架構原則、§4.1/§4.2 Profile 狀態機與內容、
+§5 Thesis Profile Protection Contract、§6.2 TGR-01~12 比對項、
+§7/§8 Wizard UX、§9/§10 Evidence Contract 與相容矩陣、
+§11 Basic/Advanced Mode、§23/§24 Immutable 欄位政策與 Clone workflow、
+§28 Plugin Governance、§34 UAT-01~06、§38 Change Budget、
+§40 Frontend Design Rules、Appendix A~F。
+
+其中 **§5 直接作為遷移不變量清單**、**§38 為本階段最重要的約束之一**
+（能用 adapter / registry / wrapper 解決就不動 stable core）。
+
+## G.4 不得因平台化而改變的（§5.2 的執行面重述）
+
+- class order（Empty / Water-filled / Bubbly / Misty）
+- ToF 500×4 semantics
+- selective escalation / routing
+- frozen severity
+- Agent prompts / schemas / evidence contract
+- 現有 E1/E2 科學參數、decision formula、thresholds、model weights
+- Final E2 sample design
+- `ACTIVE_LINEAGE` 解析語意（pointer 是 resolver，不是 identity）
+- **families 36–43：不得生成、讀取、預覽、掃描或執行**
 
 ---
 

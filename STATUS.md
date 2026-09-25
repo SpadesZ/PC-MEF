@@ -587,7 +587,7 @@ $\sum_j a_A(j) > 0$ 與一句「總證據量為 0 時視為無效仲裁輸出，
 **九個 commit，全部是入口、守衛與介面；沒有動任何 threshold、anchor、
 prompt、schema 或 model weight。families 36-43 全程未生成、未讀取。**
 
-依 SAI v0.6.0（`PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`）
+依 SAI v0.6.0（當時版本；該文件已併入 `PC-MEF_SAI_Platformization.md` v0.7.0，章節編號不變）
 的 §18 / §19 / ACC-FML-01~03 與 §46 First Slice。
 
 ### 起因：唯一跑得起來的「Formal E2」正是 lock 禁止的那一條
