@@ -37,10 +37,29 @@ import pytest
 flask = pytest.importorskip("flask")
 
 
+class _NoProcess:
+    """代替真的模擬行程：沒有輸出、立刻以 0 結束。"""
+
+    stdout = iter(())
+    pid = None
+
+    def wait(self, timeout=None):
+        return 0
+
+    def poll(self):
+        return 0
+
+
 @pytest.fixture()
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
     from pcmef.admin.app import create_app
 
+    # 這裡驗的是歸屬與存取，不是模擬本身。先前每一個 `_start()` 都真的
+    # 啟動一次 `pcmef.cli sim smoke`，而測試結束時沒有人 wait 它 —— 渲染
+    # 在測試之後繼續跑（round 9 的子行程帳本實測抓到）。
+    monkeypatch.setattr(
+        "pcmef.console.runner.subprocess.Popen", lambda *a, **k: _NoProcess()
+    )
     runs = tmp_path / "runs"
     app = create_app(
         registry_path=tmp_path / "registry.db",
@@ -80,7 +99,14 @@ def _start(client) -> str:
     response = client.post("/api/console/runs", data={
         "kind": "sim_smoke", "preset": "standard", "csrf_token": _token(client),
     })
-    return re.search(r"/console/runs/([\w.-]+)", response.headers["Location"]).group(1)
+    run_id = re.search(
+        r"/console/runs/([\w.-]+)", response.headers["Location"]
+    ).group(1)
+    # 等背景的輸出執行緒把最後一筆紀錄寫完再回傳。`run.json` 目前不是
+    # 原子寫入，與它同時讀會讀到半份（round 9 已記錄為待修缺口）；
+    # 這裡驗的是歸屬，不必與那個 race 賽跑。
+    client.application.config["PCMEF_CONSOLE_RUNNER"].wait(run_id, timeout=30)
+    return run_id
 
 
 # ---------------------------------------------------------------------------

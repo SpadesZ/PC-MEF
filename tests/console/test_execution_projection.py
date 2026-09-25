@@ -887,7 +887,10 @@ def test_a_declared_temporary_listener_is_permitted_and_leaves_nothing_behind(
             assert opened != guard.OFFICIAL_UI_PORT, (
                 "a test must never take the official UI port"
             )
-        sock.close()
+            # **收在宣告裡面。** 先前這一行在 `with` 之外：宣告已經結束，
+            # listener 還開著。round 9 之前 `allowing(0)` 驗不到這一步，
+            # 所以這條測試一直通過；現在離開時看的是 socket 物件本身。
+            sock.close()
     finally:
         sock.close()
 
@@ -897,23 +900,24 @@ def test_a_declared_temporary_listener_is_permitted_and_leaves_nothing_behind(
 
 
 def test_a_listener_left_open_fails_the_test_that_opened_it(request):
-    """宣告了卻沒收掉 —— `allowing()` 在離開時當場失敗。
+    """宣告了卻沒收掉 —— `allowing()` 在離開時當場失敗，**port 0 也一樣**。
 
-    這是「測試通過但留下背景 server」唯一真正抓得到的地方。
+    這是「測試通過但留下背景 server」唯一真正抓得到的地方。round 9
+    之前 `allowing(0)` 驗不到這一步（實際 port 要綁完才知道），這條
+    測試因此得先記下號碼、再用第二次宣告去撞；現在離開時看的是
+    socket 物件本身。
     """
     guard = _session_guard(request)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        with guard.LISTENERS.allowing(0):
-            sock.bind(("127.0.0.1", 0))
-            sock.listen(1)
-        port = sock.getsockname()[1]
-
         # 這一次故意不收，離開時必須被抓到。
         with pytest.raises(AssertionError) as caught:
-            with guard.LISTENERS.allowing(port):
-                pass
+            with guard.LISTENERS.allowing(0):
+                sock.bind(("127.0.0.1", 0))
+                sock.listen(1)
+                port = sock.getsockname()[1]
         assert type(caught.value).__name__ == "RealListenerOpened"
+        assert str(port) in str(caught.value), "the failure must name the port"
     finally:
         sock.close()
 

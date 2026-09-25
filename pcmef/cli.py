@@ -36,6 +36,10 @@
 #     繞過 freeze，與 UI 繞過 freeze 是同一件事（§52 結語）。
 #   - 不得為 llm connection add 增加接受 API key 明文的參數；命令列參數會
 #     留在 shell history 與 process list。
+#   - formal run-e2：`run_formal_e2_full()` 成功回來之後（科學完成點），
+#     任何例外 —— 含 KeyboardInterrupt 與 SystemExit —— 都不得把終局
+#     事件、exit code 或 run.json 改判成失敗；越界之前則一律照常往外拋
+#     （`_ScienceIsComplete`，SAI §49.4）。
 #   - v0.1.0 新增：version / config show / config check / locks status 四組指令。
 #   - v0.2.0 新增：audit real-data（M0 盤點）。
 #   - v0.3.0 新增：provenance resolve-sigma / audit-timing。
@@ -3345,6 +3349,15 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
     events.run_started(detail=f"mode={args.mode}")
     events.stage_started(detail="pre-flight")
 
+    # 科學完成點。`run_formal_e2_full()` 成功回來時由本體標記；
+    # 標記之後，這次執行的結論只剩成功（見 _ScienceIsComplete）。
+    boundary = _ScienceIsComplete(
+        # 由命令列啟動時，main() 回來之後行程就結束：越界後延後的
+        # Ctrl-C 一路延到結束，最後那幾行才不會又把 exit code 改掉。
+        # 被當成函式呼叫（測試）時，離開這裡就還原。
+        hold_until_exit=bool(getattr(args, "_owns_the_process", False)),
+    )
+
     # **從這裡到最後一個 return 之間的每一條路徑都要留下終局事件。**
     #
     # 這一整段包在 try 裡，是因為 early return 之外還有 exception：
@@ -3360,10 +3373,114 @@ def cmd_formal_run_e2(args: argparse.Namespace) -> int:
                 subprocess=subprocess, uuid=uuid,
                 datetime=datetime, timezone=timezone,
             ),
+            boundary,
         )
     except BaseException as error:  # noqa: BLE001 - 崩潰同樣是一個結局
+        if boundary.crossed:
+            # 科學已經完成，炸開的只可能是呈現或遙測。
+            return _settle_after_the_boundary(events, boundary, error)
+        # 越界之前的一切照常往外拋：科學還在跑的時候，中斷就是中斷。
         events.stage_failed(f"{type(error).__name__}: {error}")
         raise
+    finally:
+        boundary.release()
+
+
+class _ScienceIsComplete:
+    """Formal E2 的科學完成點，以及越過它之後的規矩。
+
+    `run_formal_e2_full()` 成功回來的那一刻，report 已經落盤、一次性
+    claim 已經 COMPLETE。**從那一刻起這次執行的結論只有成功。** 之後的
+    每一行都是講給人看的：摘要排版、終端機輸出、事件檔。它們可以失敗，
+    失敗只能讓畫面少幾行 —— 不得改寫科學結論、claim、終局事件、
+    exit code，或 console 依 exit code 寫下的 run.json。
+
+    round 8 的 fail-soft 只接 `Exception`。`KeyboardInterrupt` 與
+    `SystemExit` 不是 `Exception`：摘要印到一半時按下 Ctrl-C，會一路穿到
+    入口的 catch-all，寫下 stage_failed、以非零結束，console 據此把
+    run.json 記成 failed —— 而磁碟上的 report 與 claim 寫著完成，重跑
+    會被 claim 擋住。
+
+    因此越界之後：
+      - 例外一律 fail-soft，**包含** KeyboardInterrupt 與 SystemExit。
+      - 主執行緒上的 SIGINT 改成**只記錄、不拋出**。摘要印到一半被打斷
+        的代價是少幾行字；把它當成失敗的代價是一次正式實驗被記成失敗
+        而且不能重跑。兩者不對等。
+      - 越界**之前**完全不動：科學還在跑的時候，Ctrl-C 必須照常中斷，
+        由 executor 把 claim 標成可 resume。
+
+    已知的剩餘窗口：executor 回來到 `cross()` 立旗之間的直譯器檢查點。
+    要關掉它只能在越界之前就遮蔽 SIGINT，那會改變科學執行中的中斷語意。
+    """
+
+    def __init__(self, *, hold_until_exit: bool = False) -> None:
+        self.crossed = False
+        self.document: object = None
+        #: 越界之後才落地的中斷與例外。只記錄，不改判。
+        self.late: list[str] = []
+        self._hold = hold_until_exit
+        self._previous: object = None
+        self._deferring = False
+
+    def cross(self, document: object) -> None:
+        # 先立旗再改訊號處理：兩者之間若有中斷落地，入口看得到旗子。
+        self.document = document
+        self.crossed = True
+        try:
+            import signal
+            import threading
+
+            if threading.current_thread() is not threading.main_thread():
+                return
+            self._previous = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._interrupted_after_the_boundary)
+            self._deferring = True
+        except (ValueError, OSError, TypeError, AttributeError):
+            return
+
+    def _interrupted_after_the_boundary(self, signum, frame) -> None:
+        self.late.append("KeyboardInterrupt (SIGINT)")
+
+    def release(self) -> None:
+        """還原 SIGINT。行程由 main() 擁有時不還原：它馬上就要結束。"""
+        if not self._deferring or self._hold:
+            return
+        self._deferring = False
+        try:
+            import signal
+
+            previous = self._previous
+            if previous is None:
+                # 先前的處理器不是從 Python 裝的；退回預設行為。
+                previous = signal.default_int_handler
+            signal.signal(signal.SIGINT, previous)
+        except (ValueError, OSError, TypeError):
+            pass
+
+
+def _settle_after_the_boundary(events, boundary: _ScienceIsComplete,
+                               error: BaseException) -> int:
+    """越過科學完成點之後又有東西往外拋 —— 結論仍然是成功。
+
+    會走到這裡的，是摘要的 fail-soft 自己也沒接住的東西：警告本身印到
+    一半又被打斷、終局事件寫完之後說明「事件掉了」時 stderr 也壞了、
+    或者程式碼自己丟出 SystemExit。它們全都發生在 report 落盤與 claim
+    COMPLETE 之後。
+
+    這裡補齊終局事件（終局唯一：已經寫過就不會再寫第二筆）並以 0 結束。
+    **不得在這裡 raise，也不得回非零。**
+    """
+    boundary.late.append(f"{type(error).__name__}: {error}")
+    _warn_summary_is_unavailable(error, boundary.document)
+    try:
+        document = boundary.document if isinstance(boundary.document, dict) else {}
+        events.stage_completed(
+            detail=f"dry_run={document.get('dry_run')}",
+            artifacts=(str(document.get("report_path", "")),),
+        )
+    except BaseException:  # noqa: BLE001 - 越界之後什麼都不得改判
+        pass
+    return 0
 
 
 def _warn_summary_is_unavailable(error: BaseException, document) -> None:
@@ -3374,12 +3491,14 @@ def _warn_summary_is_unavailable(error: BaseException, document) -> None:
     又一次把成功的實驗改判成失敗，而那正是這個函式存在的原因。
 
     連 `print` 都要包起來 —— 會走到這裡的原因之一就是 stdout 壞了。
+    接的是 `BaseException`：這裡只在科學完成之後才會被呼叫，而在那之後
+    連 KeyboardInterrupt 都不得改判結論。
     """
     try:
         path = ""
         try:
             path = str(document.get("report_path", ""))
-        except Exception:  # noqa: BLE001 - document 形狀不對也不能擋路
+        except BaseException:  # noqa: BLE001 - document 形狀不對也不能擋路
             path = ""
         print(
             "\nwarning: the run completed and the report is written; only the "
@@ -3388,15 +3507,18 @@ def _warn_summary_is_unavailable(error: BaseException, document) -> None:
             + (f"\n  report            {path}" if path else ""),
             file=sys.stderr,
         )
-    except Exception:  # noqa: BLE001 - 連警告都印不出來就安靜收場
+    except BaseException:  # noqa: BLE001 - 連警告都印不出來就安靜收場
         return
 
 
-def _formal_run_e2_body(args, events, deps) -> int:
+def _formal_run_e2_body(args, events, deps, boundary) -> int:
     """`cmd_formal_run_e2` 的本體。終局事件由呼叫端與這裡共同保證。
 
     拆出來是為了讓「每一條 return 之前都發過終局事件」看得出來 ——
     包在一個大 try 裡的話，讀的人分不清哪些 return 已經發過。
+
+    `boundary` 由入口建立：executor 成功回來時在這裡標記，入口據此
+    分辨一個例外是發生在科學完成之前還是之後。
     """
     LLM_MODE_EXECUTE = deps["LLM_MODE_EXECUTE"]
     LLM_MODE_SKIP = deps["LLM_MODE_SKIP"]
@@ -3536,6 +3658,10 @@ def _formal_run_e2_body(args, events, deps) -> int:
     #
     # 因此這一段整個 fail-soft：印不出來就說印不出來，科學結論、
     # claim 狀態、終局事件與 exit code 一律維持成功。
+    #
+    # **從這一行起越過科學完成點。** 之後連 KeyboardInterrupt 與
+    # SystemExit 都不得改判：Ctrl-C 只記錄不拋出，漏網的由入口收尾。
+    boundary.cross(document)
     try:
         print(f"\n  report            {document['report_path']}")
         print(f"  dry_run           {document['dry_run']}")
@@ -3563,9 +3689,18 @@ def _formal_run_e2_body(args, events, deps) -> int:
                      f"{block['macro_f1']:>9.4f}"
             )
         print("\n  worst-condition macro-F1 is the primary robustness endpoint")
-    except Exception as error:  # noqa: BLE001 - 呈現層一律 fail-soft
+        if boundary.late:
+            print(
+                "note: an interrupt arrived after the scientific result was "
+                "complete; it was recorded and did not change the outcome.",
+                file=sys.stderr,
+            )
+    except BaseException as error:  # noqa: BLE001 - 越界之後呈現層一律 fail-soft
         # 報告路徑是這裡唯一真正重要的一句話，所以連警告都要再包一層：
         # stdout 已經壞掉時，連這一句都可能再炸一次。
+        #
+        # 接 BaseException 而不是 Exception：摘要印到一半的 Ctrl-C 或
+        # SystemExit，與 KeyError 一樣只是「這幾行沒印出來」。
         _warn_summary_is_unavailable(error, document)
 
     # **成功事件緊貼真正的成功 return。**
@@ -5126,6 +5261,10 @@ def main(argv: list[str] | None = None) -> int:
     _make_output_encoding_forgiving()
     parser = build_parser()
     args = parser.parse_args(argv)
+    # 從 sys.argv 讀參數代表這一次呼叫就是整個行程（`python -m pcmef.cli`
+    # 或 `pcmef` console script），main() 回來之後行程就結束。Formal E2
+    # 據此決定越過科學完成點之後要不要把延後的 Ctrl-C 一路延到結束。
+    args._owns_the_process = argv is None
     setup_logging(log_file=args.log_file)
     from pcmef.adapters.legacy_csv import LegacyCSVError
     from pcmef.admin.services import AdminServiceError
