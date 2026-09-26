@@ -3,12 +3,12 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.7.2  
+**文件版本：** v0.7.3  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
 **日期：** 2026-09-25  
 **取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
 **上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
-**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，round 10 程式碼 `a08fb53`（round 9 程式碼 `5cbc43b`、round 8 程式碼 `eb8ad9c`）  
+**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，round 11 程式碼 `65959c7`（round 10 `a08fb53`、round 9 `5cbc43b`、round 8 `eb8ad9c`）  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
 **本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
 
@@ -2537,10 +2537,56 @@ round 9 實測到它的寫法本身就是缺陷：`Path.write_text()` **先截�
 | 刪除 | **一律拒絕**，不論 `formal_output.json` 說它是正式、預演或不知道 |
 
 - **「讀不出來」的判準只看結構，不補值**（`parse_record`）：0 byte、
-  非 UTF-8、JSON 斷掉、不是物件、缺 `run_id` / `kind`、`run_id` 與目錄
-  不符、欄位型別不對（`command` 是字串、`params` 是清單、`exit_code` 是
-  bool…）。寬鬆的 `from_json()` 會把字串拆成字元、把成對清單當成 dict
-  —— 在壞紀錄上那就是替它編內容，而那份內容會決定它算不算正式執行。
+  非 UTF-8、JSON 斷掉、不是物件、`run_id` 與目錄不符、欄位型別不對
+  （`command` 是字串、`params` 是清單、`exit_code` 是 bool…）。
+
+### 反序列化不得補欄位（round 11）
+
+round 10 的 `parse_record()` 只要求 `run_id` 與 `kind`，其餘欄位「有才
+檢查」，缺的由 `from_json()` 補上 `params={}`、`command=[]`、
+`status="running"`。於是語法完全正確的
+`{"run_id": …, "kind": "formal_e2", "status": "failed"}` 被當成一筆正常
+紀錄：補出來的 `params` 沒有 mode，`protected` 以 `"dry-run"` 為預設值，
+一筆**可能是一次性 Formal E2 證據**的紀錄變成「已結束的預演」—— 可以刪。
+
+**不變量：** 一筆紀錄只有在「生命週期、刪除、歸屬相關的解讀、Formal
+保護」所需的欄位**真的寫在磁碟上而且合法**時，才參與那些判斷。缺的
+安全相關資訊不得由反序列化發明。
+
+**相容性決定（2026-09-27 查證）：** 沒有 legacy 變體，因此要求完整 schema。
+
+| 證據 | 內容 |
+|---|---|
+| `to_json()` 的歷史 | 自第一版 `2e95b59`（2026-08-27）逐字輸出同樣十個欄位，從未改過 |
+| 各版本的終局寫入 | 每一個 runner 版本寫 succeeded / failed / unreaped 時都同時寫 `exit_code` 與 `finished_at` |
+| kind 的歷史 | `sim_smoke`、`surrogate_smoke`、`audit_gates`（第一版）、`llm_snapshot`、`formal_e2`；全部在 `RUN_KINDS` 內 |
+| formal mode 的歷史 | 自 `formal_e2` 出現（`7b1ab3e`）起，runner 拒絕 `dry-run` / `formal` 以外的值 |
+| 磁碟上的紀錄 | `outputs/console/runs`（本機與正式 UI 共用，compose 掛載 `./outputs`）共 8 筆，最早 2026-08-26：十個欄位全在、型別正確、3 筆 `formal_e2` 都有 `params.mode` |
+
+**規則**（任一不成立即 `RunRecordDamaged`，一律拒絕刪除、另列為損壞證據）：
+
+1. 十個欄位（`RECORD_SCHEMA`）**全部存在**、型別正確；`from_json()` 本身
+   也改為不補任何欄位（缺一個就是 KeyError），繞過 `parse_record()` 也
+   發明不了內容。
+2. `kind` 必須在 `RUN_KINDS` 內；`command` 必須是字串清單。
+3. `status` 必須是 `running` / `succeeded` / `failed` / `unreaped` 之一，
+   而且生命週期前後一致：`running` 沒有 exit code 與結束時間；其餘三者
+   都要有；`succeeded` 必須 exit 0，`failed` 不得是 0。
+4. `formal_e2` 必須**明確**寫著 `params.mode ∈ {dry-run, formal}`。
+
+**縱深防禦：** `RunRecord.protected` 不再以 `"dry-run"` 為預設 ——
+只有明確寫著 `dry-run` 的 `formal_e2` 才不受保護。**寫入端：** 新紀錄
+一律寫下實際傳給 CLI 的 `--mode`（表單沒送時是 `dry-run`），讓讀的人
+不必、也不得替它猜。
+
+**測試夾具的連帶修正：** 10 個測試檔、17 處夾具寫的是 runner 從來寫
+不出來的形狀（`kind: "sim"`、沒有結束時間的終局紀錄、沒有 exit code 的
+failed / unreaped、failed 配 exit 0、`mode: "full"`），一律補成真實形狀。
+其中 6 處若不修會因為**錯的理由**通過 —— 損壞的紀錄同樣 404、同樣拒絕
+刪除，而損壞訊息裡剛好也含有 `one-shot Formal E2`，讓
+`match="one-shot Formal E2"` 無意義地成立。以一個只包住 `parse_record()`
+的稽核 plugin 跑全量，確認修正後只有**刻意製造損壞**的測試會讀到損壞
+紀錄。
 - **正式與否無法確定時當成「可能是正式執行」**：`formal_output.json`
   只有 formal_e2 會寫、與 `run.json` 分開寫，是唯一可能還活著的旁證；
   它不在不代表是預演。Formal workspace 因此列出所有「無法證明不是正式
@@ -2684,7 +2730,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 # 51. 目前實作狀態與已知缺口
 
-本節是 v0.7.2 的**現況快照**，會隨實作前進而過期；
+本節是 v0.7.3 的**現況快照**，會隨實作前進而過期；
 §0.4 的裁決規則在它過期之後仍然適用。
 
 ## 51.1 Final E2 Gate：1 / 8
@@ -2733,17 +2779,17 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 ## 51.3 測試現況
 
-| 範圍 | 結果（round 10，程式碼 `a08fb53`，Windows、py 3.10.11） |
+| 範圍 | 結果（round 11，程式碼 `65959c7`，Windows、py 3.10.11） |
 |---|---|
-| `tests/`（全量） | 3898 collected — 3847 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
-| `tests/console/` + `tests/platform/` + `tests/e2/` | 1100 collected；在上面那一輪全量中 **0 failed** |
-| `test_run_record_persistence.py`（round 10 新增） | 47 passed |
-| Linux 容器（`pcmef-research:local`，repo 唯讀掛載） | 12 個 execution-layer 模組 336 passed、7 skipped、0 failed |
+| `tests/`（全量） | 3939 collected — 3888 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1141 collected；在上面那一輪全量中 **0 failed** |
+| `test_run_record_persistence.py`（round 10 + 11） | 88 passed |
+| Linux 容器（`pcmef-research:local`，repo 唯讀掛載） | 13 個 execution-layer 模組 396 passed、7 skipped、0 failed |
 
-3898 = 3846（round 9）+ 47（`test_run_record_persistence.py`）+ 5
-（`test_repo_integrity.py` 對每一個原始碼檔各跑 5 項檔頭檢查，新檔案因此多 5 項）。
-round 9 記錄的兩次 `run.json` 撕裂讀取（`JSONDecodeError`）是 §49.6 修正前
-的偶發失敗；本輪兩次全量都沒有出現。
+3939 = 3898（round 10）+ 41（round 11 在 `test_run_record_persistence.py`
+新增的測試）。全量是掛著只包住 `parse_record()` 的損壞稽核 plugin 跑的：
+`test_run_record_persistence.py` 以外**沒有任何測試**讀到損壞紀錄；檔案內
+讀到的 18 個測試函式全部是刻意製造損壞的。
 
 - 13 個 failure 是**歷史既有**、與平台化無關的科學程式碼項目：
   `test_paired` ×2、`test_calibration_objective` ×5、
@@ -2806,7 +2852,7 @@ round 9 記錄的兩次 `run.json` 撕裂讀取（`JSONDecodeError`）是 §49.6
 術語（Research Profile vs Project）與導航（13 vs 5）兩項不一致，
 裁決均為**以 CURRENT 為準**，已寫入 §20。
 
-## G.2 round 2~10 新增（原 delta 稽核未涵蓋）
+## G.2 round 2~11 新增（原 delta 稽核未涵蓋）
 
 | 輪次 | 主題 | 落點 |
 |---|---|---|
@@ -2829,6 +2875,7 @@ round 9 記錄的兩次 `run.json` 撕裂讀取（`JSONDecodeError`）是 §49.6
 | r9 | 科學完成點之後連 KeyboardInterrupt / SystemExit 都不改判 | §49.4 |
 | r9 | `run.json` 非原子寫入（發現、未修） | §51.4 第 2 項 |
 | r10 | run.json 原子替換、失敗保留上一份、壞紀錄隔離與刪除拒絕 | §49.6 |
+| r11 | 完整 schema、生命週期一致、formal mode 必須明寫；反序列化不補欄位 | §49.6 |
 
 ## G.3 v0.6.0 原樣沿用、未改動的章節
 
