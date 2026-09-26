@@ -3,12 +3,12 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.7.1  
+**文件版本：** v0.7.2  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
 **日期：** 2026-09-25  
 **取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
 **上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
-**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，round 9 程式碼 `5cbc43b`（父提交 `7f8e67e`；round 8 程式碼 `eb8ad9c`）  
+**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，round 10 程式碼 `a08fb53`（round 9 程式碼 `5cbc43b`、round 8 程式碼 `eb8ad9c`）  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
 **本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
 
@@ -2496,6 +2496,62 @@ catch-all，寫下 `stage_failed`、以非零結束，console 依 exit code 把
 - **只投影不回寫。** `run.json` 寫不成功正是走到這裡的原因之一，
   再寫一次只會再失敗，而且會蓋掉「當時到底發生什麼」。
 
+## 49.6 Run record 的持久化（round 10）
+
+`run.json` 是 Run、Results 與 Formal workspace 三個全域頁面共同的來源。
+round 9 實測到它的寫法本身就是缺陷：`Path.write_text()` **先截斷再寫**。
+同時讀取會讀到半份（tmp 實測 3000 次讀取有 1487 次 `JSONDecodeError`），
+截斷之後寫入失敗（磁碟滿）會留下 0 byte 的紀錄，而 `list_runs()` 沒有
+逐筆容錯 —— 三個全域頁面從此**永久 500**。
+
+**不變量：**
+
+1. **成功的狀態轉換以原子替換落盤**（`runner.write_atomically`）：同目錄
+   以 `O_EXCL` 建暫存檔 → 寫完、`fsync` → `os.replace()`（POSIX rename /
+   Windows MoveFileEx，同 volume 內原子）→ POSIX 上再 `fsync` 目錄。
+   讀者只會看到**上一份完整紀錄或新的完整紀錄**。
+2. **替換之前任何一步失敗，上一份完整紀錄一個 byte 都不動**，暫存檔刪除，
+   例外往外拋；背景的收尾路徑（`_save_or_leave_a_trace`）改寫
+   `run_crash.txt`，記下**想寫成什麼**、`record_write_error` 與
+   `run_json=previous complete run.json left untouched`。
+3. **初始紀錄寫不進去**：不啟動任何行程、不留半份 `run.json`，留下
+   `run_crash.txt`（`run_json=no run.json was written`），並以
+   `RunLaunchError(process_reaped=True)` 拒絕。經由 `console.launch`
+   啟動時，round 1 的「沒起跑的 run 什麼都不留」照舊成立，目錄連同
+   `run_crash.txt` 一起收回 —— 證據是 409 拒絕訊息本身（磁碟滿時連
+   `run_crash.txt` 都未必寫得進去，只有回應一定送得出去）。
+4. **Windows 的讀寫互斥是等待，不是損壞**：讀者開著舊檔時（Python 開檔
+   不帶 `FILE_SHARE_DELETE`）替換會被拒絕，寫入端有上限地重試（40 次、
+   總計約 3.7 秒，逾時照樣拋）；讀取端遇到替換中的短暫 sharing violation
+   也有上限地重試，不把它報成損壞。
+
+**已經壞掉的歷史紀錄只影響它自己：**
+
+| 位置 | 行為 |
+|---|---|
+| `get()` | 丟 `RunRecordDamaged`（`RunnerError` 子類別）：說出哪一筆、壞在哪裡、大小 |
+| `list_runs()` | 跳過它，**不補出一筆看起來正常的 RunRecord** |
+| `damaged_runs()` | 另外回報：編號、原因、大小、有沒有 `run_crash.txt`、`formal_output.json` 說的模式 |
+| `/console`、`/results`、`/formal` | 200；另列「讀不出來的執行紀錄」，不給任何動作 |
+| Run 頁、case 頁、status、stream、figures、delete | 擁有者 409 附診斷；非擁有者 404（與正常紀錄同一條隔離規則） |
+| 刪除 | **一律拒絕**，不論 `formal_output.json` 說它是正式、預演或不知道 |
+
+- **「讀不出來」的判準只看結構，不補值**（`parse_record`）：0 byte、
+  非 UTF-8、JSON 斷掉、不是物件、缺 `run_id` / `kind`、`run_id` 與目錄
+  不符、欄位型別不對（`command` 是字串、`params` 是清單、`exit_code` 是
+  bool…）。寬鬆的 `from_json()` 會把字串拆成字元、把成對清單當成 dict
+  —— 在壞紀錄上那就是替它編內容，而那份內容會決定它算不算正式執行。
+- **正式與否無法確定時當成「可能是正式執行」**：`formal_output.json`
+  只有 formal_e2 會寫、與 `run.json` 分開寫，是唯一可能還活著的旁證；
+  它不在不代表是預演。Formal workspace 因此列出所有「無法證明不是正式
+  執行」的壞紀錄 —— 正式執行紀錄那張表只列得出讀得到的，一筆壞掉的
+  正式紀錄若只是從表上消失，這一頁就少說一次「確實跑過」。
+- **沒有歸屬檔的壞紀錄誰都不擁有**（P1-4），但也不得從畫面上消失：
+  只列編號與原因，不給連結、不給動作；打開它一律 404。
+- 更新失敗而保留下來的上一份紀錄可能還寫著「執行中」：Run 頁在同目錄
+  有 `run_crash.txt` 時顯示「這筆紀錄有一次更新沒有寫成功」，並附上它的
+  內容。**不回寫、不投影成別的狀態**。
+
 ---
 
 # 50. 本機執行環境與測試隔離
@@ -2628,7 +2684,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 # 51. 目前實作狀態與已知缺口
 
-本節是 v0.7.1 的**現況快照**，會隨實作前進而過期；
+本節是 v0.7.2 的**現況快照**，會隨實作前進而過期；
 §0.4 的裁決規則在它過期之後仍然適用。
 
 ## 51.1 Final E2 Gate：1 / 8
@@ -2677,17 +2733,17 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 ## 51.3 測試現況
 
-| 範圍 | 結果（round 9，Windows、py 3.10.11） |
+| 範圍 | 結果（round 10，程式碼 `a08fb53`，Windows、py 3.10.11） |
 |---|---|
-| `tests/`（全量） | 3846 collected — 3795 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
-| `tests/console/` + `tests/platform/` + `tests/e2/` | 1053 collected；在上面那一輪全量中 **0 failed** |
-| 同範圍的另一輪 | 1032 passed、19 skipped、**2 failed** —— 兩個都是 §51.4 第 2 項的 `run.json` 撕裂讀取（`JSONDecodeError`），發生在未修改的 `test_execution_closure` / `test_execution_forensics`；單獨各跑 15 次，round 8 程式碼與本輪都是 0 / 30 |
-| Linux 容器（`pcmef-research:local`，repo 唯讀掛載） | 8 個守衛相關模組 220 passed、7 skipped、0 failed |
+| `tests/`（全量） | 3898 collected — 3847 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1100 collected；在上面那一輪全量中 **0 failed** |
+| `test_run_record_persistence.py`（round 10 新增） | 47 passed |
+| Linux 容器（`pcmef-research:local`，repo 唯讀掛載） | 12 個 execution-layer 模組 336 passed、7 skipped、0 failed |
 
-本輪新增 `test_execution_boundaries.py` 49 項。3846 = 3797 + 49：
-這個工作樹不含新檔時 collect 3797，乾淨 checkout 的 HEAD collect 3792
-（即 round 8 記的數字）—— 差的 5 項是工作樹裡未進版控的檔案帶出的
-參數化案例，不是測試本身的增減。
+3898 = 3846（round 9）+ 47（`test_run_record_persistence.py`）+ 5
+（`test_repo_integrity.py` 對每一個原始碼檔各跑 5 項檔頭檢查，新檔案因此多 5 項）。
+round 9 記錄的兩次 `run.json` 撕裂讀取（`JSONDecodeError`）是 §49.6 修正前
+的偶發失敗；本輪兩次全量都沒有出現。
 
 - 13 個 failure 是**歷史既有**、與平台化無關的科學程式碼項目：
   `test_paired` ×2、`test_calibration_objective` ×5、
@@ -2705,16 +2761,17 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 1. **Final E2 尚有 7 項 blocker**（§51.1），其中 AMD-007/008/009 尚未
    凍結、Golden Baseline 尚未 canonical。
-2. **`run.json` 不是原子寫入**（round 9 新發現，**未修**，不在該輪
-   授權範圍內）：`ConsoleRunner._save()` 以 `Path.write_text()` 先截斷
-   再寫。(a) 同時讀取會讀到半份：tmp 實測併發下 3000 次 `get()` 有
-   1487 次 `JSONDecodeError`，測試套件裡表現為 Run 頁偶發 500；
-   (b) 截斷之後寫入失敗（磁碟滿）會留下 0 byte 的 `run.json`，而
-   `list_runs()` 沒有逐筆容錯，`/console`、`/results`、formal 頁從此
-   **永久 500**，直到有人手動刪檔。修法：暫存檔 + `os.replace()`
-   （Windows 需對讀者造成的 sharing violation 短暫重試）加上
-   `list_runs()` 逐筆容錯。**在它修好之前，Execution / Action Layer
-   不是 hard-lock 候選。**
+2. **Run record 持久化的剩餘邊界**（§49.6；round 9 發現的非原子寫入
+   已於 round 10 修正）：
+   - 收尾更新寫不進去時，保留下來的上一份紀錄可能還寫著「執行中」；
+     Run 頁會說出來，但 SSE 不會因此收線（不把 `run_crash.txt` 投影成
+     終局狀態）。
+   - `run_crash.txt` 與 `unreaped_process.json` 本身仍是 `O_TRUNC`
+     寫入：它們是其他寫入已經失敗時的最後線索，刻意走最少步驟的路徑。
+   - `os.replace()` 的原子性以同一個 volume 為前提；run 目錄被放在
+     不支援原子 rename 的網路檔案系統上時不保證。
+   - Execution / Action Layer 是否可視為 hard-lock，**交由獨立審查判定**；
+     本文件只記錄證據。
 3. **守衛設計上看不到、由指紋比對兜底的**（§50.1、§50.3）：在
    `_guard_dir_fd_opens` 之前就存成別名的 `os.open`；`os.mkfifo` /
    `os.mknod`；C 擴充直接寫檔；已分離且父行程先結束的孫行程；
@@ -2749,7 +2806,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 術語（Research Profile vs Project）與導航（13 vs 5）兩項不一致，
 裁決均為**以 CURRENT 為準**，已寫入 §20。
 
-## G.2 round 2~9 新增（原 delta 稽核未涵蓋）
+## G.2 round 2~10 新增（原 delta 稽核未涵蓋）
 
 | 輪次 | 主題 | 落點 |
 |---|---|---|
@@ -2771,6 +2828,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 | r9 | listener 以擁有權驗收尾（含 port 0）、子行程帳本 | §50.3 |
 | r9 | 科學完成點之後連 KeyboardInterrupt / SystemExit 都不改判 | §49.4 |
 | r9 | `run.json` 非原子寫入（發現、未修） | §51.4 第 2 項 |
+| r10 | run.json 原子替換、失敗保留上一份、壞紀錄隔離與刪除拒絕 | §49.6 |
 
 ## G.3 v0.6.0 原樣沿用、未改動的章節
 
