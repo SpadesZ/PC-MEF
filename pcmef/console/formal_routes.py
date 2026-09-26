@@ -193,6 +193,13 @@ def page():
             r for r in current_app.config["PCMEF_CONSOLE_RUNNER"].list_runs(limit=200)
             if r.kind == "formal_e2" and str(r.params.get("mode")) == "formal"
         ],
+        # 讀不出來、而且**無法證明不是正式執行**的紀錄。上面那張表只收得到
+        # 讀得出來的；一筆壞掉的正式執行紀錄若只是從表上消失，這一頁就會
+        # 少說一次「正式執行確實跑過」—— 而那正是這張表存在的理由。
+        damaged_formal=[
+            d for d in current_app.config["PCMEF_CONSOLE_RUNNER"].damaged_runs()
+            if d.may_be_formal
+        ],
     )
 
 

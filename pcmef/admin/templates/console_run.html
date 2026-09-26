@@ -69,6 +69,21 @@
 </section>
 {% endif %}
 
+{# 這筆紀錄有一次更新沒有寫成功（round 10）。run.json 是原子替換的，
+   所以畫面上是**上一份**完整紀錄 —— 它可能還寫著「執行中」。 #}
+{% if crash_trace %}
+<section class="card" id="record-update-failed">
+  <h2>這筆紀錄有一次更新沒有寫成功<span class="hint">畫面上的狀態可能不是最新的</span></h2>
+  <div class="body">
+    <p class="note">
+      runner 想寫下的內容與失敗原因記在同目錄的 <span class="mono">run_crash.txt</span>。
+      上一份完整的 <span class="mono">run.json</span> 沒有被動過，所以上面顯示的是那一份。
+    </p>
+    <pre class="mono">{{ crash_trace }}</pre>
+  </div>
+</section>
+{% endif %}
+
   {# 第二層分頁。沒有內容的仍然列出但不可點 —— 見檔頭。 #}
 {# 這一筆執行**屬於誰**。放在最上面，因為 Run 頁可以從書籤直接打開，
  # 而版型頂端顯示的是「目前選中的 Project」——兩者不必然相同。

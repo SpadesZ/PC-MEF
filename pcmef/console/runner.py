@@ -4,7 +4,7 @@
 #         狀態寫入同目錄的 run.json；產物落在該 run 的 artifacts 目錄。
 # 檔案路徑: pcmef/console/runner.py
 # 產生時間: 2026-08-27 16:10 +08:00
-# 版本: v0.2.0
+# 版本: v0.3.0
 # 功能說明: 讓網頁按一下就能跑模擬，而且跑的過程像在看終端機一樣逐行出現。
 #           每次執行都存成一筆有編號的紀錄，含當時用的完整參數與完整輸出。
 # 模組定位: Console 的執行層。formal run 自 AMD-008 起可由此觸發，但
@@ -18,6 +18,8 @@
 #   5. ConsoleRunner.tail() 依位元組位移取回新增的行，供 SSE 串流
 #   6. ConsoleRunner.list_runs() / get() 提供歷史紀錄
 #   7. _assert_not_formal() 擋下任何試圖從 UI 啟動 formal 的參數
+#   8. write_atomically() 讓 run.json 的每一次更新都是原子的
+#   9. damaged_runs() / RunRecordDamaged 讓一筆壞掉的紀錄只影響它自己
 # 維護提醒:
 #   - 不得擴大 FORMAL_PARAM_WHITELIST。UI 一旦能傳 severity、門檻或
 #     freeze_dir，它就成了繞過 freeze 的第二條設定通道，而那正是
@@ -30,6 +32,18 @@
 #     仍看得到，也才能在容器重啟後保留證據。
 #   - 不得移除 run.json 裡的完整參數與指令；沒有它就無法回答
 #     「這張圖是用什麼參數跑出來的」。
+#   - **不得改回 `Path.write_text()` 寫 run.json。** 它先截斷再寫：同時
+#     讀取會讀到半份（實測 3000 次讀取有 1487 次），截斷之後寫入失敗
+#     （磁碟滿）會留下 0 byte 的紀錄。一律走 write_atomically()。
+#   - **不得讓 list_runs() 因為一筆壞紀錄整個失敗**，也不得把壞紀錄
+#     補成一筆看起來正常的 RunRecord：補出來的 kind 與 params 會決定
+#     它算不算正式執行、能不能刪 —— 那正是讀不出來的東西。
+#   - 不得刪除讀不出來的紀錄。它是不是一次性 Formal E2、跑完沒有、
+#     行程收掉沒有，全都無從確認。
+#   - v0.3.0 修正：run.json 改為原子替換；壞紀錄以 RunRecordDamaged /
+#     damaged_runs() 呈現，不再讓 Run、Results、Formal 整頁 500；
+#     初始紀錄寫不進去時留下 run_crash.txt 並以 RunLaunchError 拒絕啟動。
+#     對應 Execution Layer Closure round 10。
 #   - v0.1.0 新增：首版執行器，決策見 NOTE-025。
 #   - v0.2.0 新增：formal_e2 run kind 與參數白名單（AMD-008、NOTE-059）。
 # 驗證方式:
@@ -44,6 +58,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,8 +76,11 @@ __all__ = [
     "PRESETS",
     "RunSpec",
     "RunRecord",
+    "RunRecordDamaged",
+    "DamagedRun",
     "ConsoleRunner",
     "DEFAULT_RUN_ROOT",
+    "write_atomically",
 ]
 
 DEFAULT_RUN_ROOT = Path("outputs/console/runs")
@@ -150,8 +168,136 @@ class RunLaunchError(RunnerError):
         super().__init__(message)
 
 
+class RunRecordDamaged(RunnerError):
+    """run.json 存在，但讀不出一筆可信的紀錄。
+
+    與「找不到」分開：找不到的 run 可以當作不存在；讀不出來的 run
+    **確實存在過**，只是說不出它是什麼。它是不是一次性 Formal E2、
+    跑完沒有、行程收掉沒有 —— 全都無從確認，因此任何依賴這些答案的
+    動作（刪除、歸為 legacy、當成預演）一律不做。
+
+    繼承 RunnerError，讓沒有特別處理的呼叫端至少不會變成 500；
+    會把它畫給人看的端點則必須先接住它，說出是哪一筆、壞在哪裡。
+    """
+
+    def __init__(self, run_id: str, problem: str, *, path: Path | None = None,
+                 size: int | None = None, action: str = "") -> None:
+        self.run_id = run_id
+        self.problem = problem
+        self.path = path
+        self.size = size
+        where = f" ({path.as_posix()})" if path is not None else ""
+        message = f"run {run_id!r} has a damaged record{where}: {problem}."
+        if action:
+            message += f" {action}"
+        super().__init__(message)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# 原子寫入
+# ---------------------------------------------------------------------------
+
+#: Windows 上讀者正開著舊檔時，替換最多重試幾次。
+#:
+#: Python 在 Windows 開檔不帶 FILE_SHARE_DELETE，於是只要有人正在讀
+#: run.json，`os.replace` 就會 PermissionError。讀取只花幾毫秒，所以
+#: 短暫重試就夠；次數有上限，逾時照樣往外拋 —— 卡在這裡的是背景的
+#: 輸出執行緒，不得無限期等下去。
+_REPLACE_ATTEMPTS = 40
+
+#: 第一次重試前的等待，之後倍增，上限 0.1 秒。總共最多約 3.7 秒。
+_REPLACE_FIRST_PAUSE = 0.005
+_REPLACE_MAX_PAUSE = 0.1
+
+#: 讀取端在 Windows 上遇到 sharing violation 時的重試次數與間隔。
+#:
+#: 替換進行中的那一瞬間，讀者的開檔可能被拒絕（PermissionError）。
+#: 那是「正在換」，不是「壞了」；不重試的話，一次再正常不過的狀態
+#: 更新會讓畫面把一筆完好的紀錄報成損壞。
+_READ_ATTEMPTS = 20
+_READ_PAUSE = 0.01
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    """把 source 換成 target。獨立成一個函式，測試才能在「換上去之前」
+    那一刻插入同步點或失敗。"""
+    os.replace(source, target)
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """POSIX 上讓目錄項目的改名本身也落盤。Windows 開不了目錄，略過。"""
+    if os.name == "nt":
+        return
+    try:
+        handle = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)
+
+
+def write_atomically(target: Path, payload: bytes) -> None:
+    """把 payload 原子地寫成 target。**讀者只會看到舊的完整內容或新的完整內容。**
+
+    先前 run.json 用 `Path.write_text()` 寫：它先把檔案截成 0 byte 再寫。
+    同時讀取的人會讀到半份 JSON；而截斷之後寫入失敗（磁碟滿）的話，
+    留下來的是一個 0 byte 的檔 —— 上一份完整的紀錄已經被自己抹掉了。
+
+    這裡的順序：
+
+      1. 在**同一個目錄**以 `O_EXCL` 建一個只屬於這次寫入的暫存檔，
+         寫完、`fsync`。同目錄才能保證第 2 步是同一個 volume 內的改名。
+      2. `os.replace()` 換上去。POSIX 的 rename 與 Windows 的
+         MoveFileEx(REPLACE_EXISTING) 都是原子的。
+      3. **任何一步失敗：刪掉暫存檔，原檔一個 byte 都不動**，例外照常
+         往外拋，由呼叫端決定要不要留下 run_crash.txt。
+    """
+    directory = target.parent
+    temp = directory / f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
+    handle = os.open(
+        temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        0o644,
+    )
+    try:
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(handle, view)
+                view = view[written:]
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+        pause = _REPLACE_FIRST_PAUSE
+        for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+            try:
+                _replace_file(temp, target)
+                break
+            except PermissionError:
+                # 只有 Windows 的「有人正開著舊檔」值得等；POSIX 上的
+                # PermissionError 是真的沒有權限，等也不會變。
+                if os.name != "nt" or attempt == _REPLACE_ATTEMPTS:
+                    raise
+                _pause(pause)
+                pause = min(pause * 2, _REPLACE_MAX_PAUSE)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+    _fsync_directory(directory)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +468,99 @@ class RunRecord:
             finished_at=data.get("finished_at"), exit_code=data.get("exit_code"),
             note=data.get("note", ""),
         )
+
+    def to_bytes(self) -> bytes:
+        """落盤用的位元組。一律 UTF-8、LF —— 不隨平台改換行。"""
+        return json.dumps(
+            self.to_json(), ensure_ascii=False, indent=2, sort_keys=True
+        ).encode("utf-8")
+
+
+#: 每個欄位允許的型別。**只驗形狀，不補值。**
+#:
+#: `from_json()` 自己很寬鬆：`list("abc")` 會把字串拆成字元、`dict()` 會
+#: 接受成對的清單。寬鬆在讀取正常紀錄時無害，在讀取壞紀錄時就是在
+#: 替它編內容 —— 而那份內容會決定它算不算正式執行、能不能刪。
+_RECORD_FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "label": (str,),
+    "params": (dict,),
+    "command": (list,),
+    "status": (str,),
+    "started_at": (str,),
+    "finished_at": (str, type(None)),
+    "exit_code": (int, type(None)),
+    "note": (str,),
+}
+
+
+def parse_record(raw: bytes, run_id: str) -> tuple[RunRecord | None, str]:
+    """把 run.json 的位元組解讀成一筆紀錄。讀不出來就回 (None, 原因)。
+
+    原因要說得出「壞在哪裡」：0 byte、不是 UTF-8、JSON 斷在第幾行、
+    不是物件、缺哪個欄位、欄位型別不對、或者記的是**另一筆** run。
+    """
+    if not raw:
+        return None, "run.json is empty (0 bytes)"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        return None, f"run.json is not UTF-8 ({error.reason} at byte {error.start})"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as error:
+        return None, (
+            f"run.json is not valid JSON ({error.msg}: line {error.lineno}, "
+            f"column {error.colno}; {len(raw)} bytes)"
+        )
+    if not isinstance(data, dict):
+        return None, f"run.json holds a JSON {type(data).__name__}, not a record"
+    for key in ("run_id", "kind"):
+        if not isinstance(data.get(key), str) or not data.get(key):
+            return None, f"run.json has no usable {key!r}"
+    if data["run_id"] != run_id:
+        # 目錄與紀錄各說一個身分。以哪一個為準都是猜，而歸屬、刪除
+        # 與正式執行的判定全都以 run_id 為鍵。
+        return None, (
+            f"run.json describes run {data['run_id']!r}, but it sits in the "
+            f"directory of run {run_id!r}"
+        )
+    for key, allowed in _RECORD_FIELD_TYPES.items():
+        if key in data and not isinstance(data[key], allowed):
+            return None, (
+                f"run.json field {key!r} is a {type(data[key]).__name__}, "
+                f"expected {' or '.join(t.__name__ for t in allowed)}"
+            )
+    if isinstance(data.get("exit_code"), bool):
+        return None, "run.json field 'exit_code' is a bool, expected int or None"
+    return RunRecord.from_json(data), ""
+
+
+@dataclass(frozen=True)
+class DamagedRun:
+    """一筆讀不出來的執行紀錄，以及關於它**還能確定**的事。
+
+    刻意不是 RunRecord：它沒有 kind、沒有 params、沒有 status ——
+    任何需要那些欄位的判斷（正式與否、能不能刪、跑完沒有）都不得
+    對它做出來。畫面只拿它來說「哪一筆、壞在哪裡、別碰它」。
+    """
+
+    run_id: str
+    problem: str
+    #: run.json 的大小。None 代表它根本不在（只剩 run_crash.txt）。
+    record_bytes: int | None
+    #: 同目錄有沒有 run_crash.txt —— runner 自己記下「寫入失敗」的證據。
+    crash_trace: bool
+    #: 由 formal_output.json 得知的模式："formal"、"dry-run"，或 None（不知道）。
+    #:
+    #: 那份指標只有 formal_e2 會寫，而且與 run.json 分開寫，所以它是唯一
+    #: 可能還活著的旁證。它不在的時候**不代表不是正式執行** —— 可能是
+    #: 別種 run，也可能是指標自己也沒寫成。
+    formal_mode: str | None
+
+    @property
+    def may_be_formal(self) -> bool:
+        """除非旁證明說它是預演，否則都當成「可能是正式執行」。"""
+        return self.formal_mode != "dry-run"
 
 
 # ---------------------------------------------------------------------------
@@ -614,9 +853,13 @@ class ConsoleRunner:
             ),
         }
         self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
-        (self.run_dir(run_id) / FORMAL_POINTER).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
+        # 與 run.json 同一套原子寫入：run.json 讀不出來時，這份指標是
+        # 「它是不是正式執行」唯一可能還活著的旁證，不得是半份。
+        write_atomically(
+            self.run_dir(run_id) / FORMAL_POINTER,
+            json.dumps(
+                payload, ensure_ascii=False, indent=2, sort_keys=True
+            ).encode("utf-8"),
         )
 
     # -- 執行 -------------------------------------------------------------
@@ -657,7 +900,26 @@ class ConsoleRunner:
             ).get("label", spec.kind),
             params=dict(spec.params), command=command,
         )
-        self._save(record)
+        try:
+            self._save(record)
+        except Exception as error:
+            # **初始紀錄寫不進去：不啟動任何行程，也不留下半份 run.json。**
+            #
+            # 原子寫入保證 run.json 要嘛不存在、要嘛是完整的一份；這裡再
+            # 留下 run_crash.txt，說出這一次為什麼沒有紀錄。拋出的是
+            # RunLaunchError（process_reaped=True）：行程根本還沒有，
+            # 經由 console.launch 啟動時整筆 run 依 round 1 的規則收回，
+            # 而拒絕訊息本身就是給操作者的證據 —— 磁碟滿的時候，連
+            # run_crash.txt 都未必寫得進去，只有回應一定送得出去。
+            self._leave_a_trace(record, None, save_error=error)
+            raise RunLaunchError(
+                f"run {run_id!r} could not write its initial record "
+                f"({type(error).__name__}: {error}); no process was started "
+                f"and no partial run.json was left. {RUN_CRASH_FILENAME} in "
+                "the run directory records the attempt when it could be written.",
+                process_reaped=True, command=command,
+                started_at=record.started_at,
+            ) from error
         self.log_path(run_id).write_text("", encoding="utf-8")
         if spec.kind == "formal_e2":
             self._write_formal_pointer(run_id, str(spec.params.get("mode", "dry-run")))
@@ -909,21 +1171,45 @@ class ConsoleRunner:
         退而求其次的順序是刻意的：run.json → crash 檔 → stderr。
         每一層都比上一層更不可能失敗，而最後一層至少會出現在
         伺服器的輸出裡。**這個函式在任何情況下都不得往外拋。**
+
+        run.json 是原子替換的：這裡走到 crash 檔時，上一份完整的
+        run.json（若有）一個 byte 都沒有被動過。
         """
         try:
             self._save(record)
             return
         except BaseException as save_error:  # noqa: BLE001
-            cause = cause or save_error
+            self._leave_a_trace(record, cause, save_error=save_error)
 
+    def _leave_a_trace(self, record: RunRecord, cause: object, *,
+                       save_error: BaseException | None = None) -> None:
+        """寫下 run_crash.txt：這筆紀錄**想要**寫成什麼、為什麼沒寫成。
+
+        內容是這次沒能落盤的那一份紀錄的摘要，加上原因與 run.json 的
+        現況。**這個函式在任何情況下都不得往外拋。**
+        """
+        try:
+            kept = (
+                "previous complete run.json left untouched"
+                if self.record_path(record.run_id).exists()
+                else "no run.json was written"
+            )
+        except BaseException:  # noqa: BLE001
+            kept = "unknown"
         detail = (
             f"run_id={record.run_id}\n"
             f"kind={record.kind}\n"
             f"status={record.status}\n"
             f"exit_code={record.exit_code}\n"
             f"note={record.note}\n"
-            f"cause={type(cause).__name__}: {cause}\n"
         )
+        if cause:
+            detail += f"cause={type(cause).__name__}: {cause}\n"
+        if save_error is not None:
+            detail += (
+                f"record_write_error={type(save_error).__name__}: {save_error}\n"
+            )
+        detail += f"run_json={kept}\n"
         try:
             # os.open + write：不經過 Path.open 與 write_text，因為
             # 走到這裡通常正是它們壞掉的時候。
@@ -967,10 +1253,8 @@ class ConsoleRunner:
         return chunk.decode("utf-8", errors="replace"), len(data)
 
     def _save(self, record: RunRecord) -> None:
-        self.record_path(record.run_id).write_text(
-            json.dumps(record.to_json(), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        """原子地寫下 run.json。讀者只會看到上一份或這一份，不會是半份。"""
+        write_atomically(self.record_path(record.run_id), record.to_bytes())
 
     def _project_unreaped(self, run_id: str, record: RunRecord) -> RunRecord:
         """紀錄還說 running，但標記檔已經在了 —— **以標記檔為準。**
@@ -1001,13 +1285,90 @@ class ConsoleRunner:
             )
         return record
 
-    def get(self, run_id: str) -> RunRecord:
+    def _load(self, run_id: str) -> RunRecord:
+        """讀出一筆紀錄。找不到丟 RunnerError，讀不出來丟 RunRecordDamaged。
+
+        **讀不出來就是讀不出來。** 不補欄位、不猜 kind、不把 0 byte 當成
+        「還沒寫完」：原子寫入之後，canonical 的 run.json 不會再有中間
+        狀態，所以任何讀不出來的 run.json 都是真的壞了。
+        """
         path = self.record_path(run_id)
-        if not path.exists():
-            raise RunnerError(f"run {run_id!r} not found")
-        return self._project_unreaped(
-            run_id,
-            RunRecord.from_json(json.loads(path.read_text(encoding="utf-8"))),
+        try:
+            raw = self._read_record_bytes(path)
+        except FileNotFoundError:
+            if (self.run_dir(run_id) / RUN_CRASH_FILENAME).exists():
+                # runner 自己留下了「寫不成功」的證據。這筆 run 存在過，
+                # 不得當成「沒有這筆」。
+                raise RunRecordDamaged(
+                    run_id,
+                    f"run.json is missing and {RUN_CRASH_FILENAME} records that "
+                    "writing it failed",
+                    path=path, size=None,
+                ) from None
+            raise RunnerError(f"run {run_id!r} not found") from None
+        except OSError as error:
+            raise RunRecordDamaged(
+                run_id,
+                f"run.json could not be read ({type(error).__name__}: {error})",
+                path=path, size=None,
+            ) from None
+        record, problem = parse_record(raw, run_id)
+        if record is None:
+            raise RunRecordDamaged(run_id, problem, path=path, size=len(raw))
+        return record
+
+    @staticmethod
+    def _read_record_bytes(path: Path) -> bytes:
+        """讀 run.json 的原始位元組。Windows 上替換中的短暫拒絕會重試。"""
+        for attempt in range(1, _READ_ATTEMPTS + 1):
+            try:
+                return path.read_bytes()
+            except PermissionError:
+                if os.name != "nt" or attempt == _READ_ATTEMPTS:
+                    raise
+                _pause(_READ_PAUSE)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def get(self, run_id: str) -> RunRecord:
+        return self._project_unreaped(run_id, self._load(run_id))
+
+    def damaged_runs(self) -> list[DamagedRun]:
+        """讀不出來的執行紀錄，新到舊（以目錄名排序 —— 那是唯一還可信的時間）。
+
+        與 list_runs() 分開回報，而不是混在同一個清單裡：清單上的每一筆
+        都會被問「是不是正式執行」「能不能刪」「跑完沒有」，而這些問題
+        對一筆讀不出來的紀錄都沒有答案。
+        """
+        found: list[DamagedRun] = []
+        for folder in sorted(self.run_root.iterdir(), key=lambda p: p.name,
+                             reverse=True):
+            if not folder.is_dir():
+                continue
+            if not (folder / "run.json").exists() \
+                    and not (folder / RUN_CRASH_FILENAME).exists():
+                # 剛配好 id、還沒寫初始紀錄的目錄 —— 啟動中，不是損壞。
+                continue
+            try:
+                self._load(folder.name)
+            except RunRecordDamaged as damage:
+                found.append(self.describe_damage(damage))
+            except RunnerError:
+                continue
+        return found
+
+    def describe_damage(self, damage: RunRecordDamaged) -> DamagedRun:
+        """把一個 RunRecordDamaged 攤成畫面要說的事。旁證只讀，不寫。"""
+        pointer = self.formal_pointer(damage.run_id)
+        mode = None
+        if isinstance(pointer, dict) and pointer.get("kind") == "formal_e2":
+            if pointer.get("mode") in ("formal", "dry-run"):
+                mode = pointer["mode"]
+        return DamagedRun(
+            run_id=damage.run_id,
+            problem=damage.problem,
+            record_bytes=damage.size,
+            crash_trace=(self.run_dir(damage.run_id) / RUN_CRASH_FILENAME).exists(),
+            formal_mode=mode,
         )
 
     def list_runs(self, limit: int = 30, query: str = "") -> list[RunRecord]:
@@ -1021,13 +1382,17 @@ class ConsoleRunner:
         for folder in self.run_root.iterdir():
             path = folder / "run.json"
             if path.exists():
+                try:
+                    record = self._load(folder.name)
+                except RunnerError:
+                    # **一筆壞紀錄只影響它自己。** 先前這裡的 json.loads
+                    # 直接往外拋，於是一個 0 byte 的 run.json 讓 Run、
+                    # Results 與 Formal 整頁 500。讀不出來的由
+                    # damaged_runs() 另外回報，不在這個清單上被當成
+                    # 一筆正常的紀錄。
+                    continue
                 # 清單與單筆必須說同一句話，所以這裡也要投影。
-                records.append(self._project_unreaped(
-                    folder.name,
-                    RunRecord.from_json(
-                        json.loads(path.read_text(encoding="utf-8"))
-                    ),
-                ))
+                records.append(self._project_unreaped(folder.name, record))
         # 以 started_at 排序，不以目錄名。run_id 只有**秒**級解析度
         # （`%Y%m%dT%H%M%S-` + 6 個十六進位字元），因此同一秒內建立的幾筆
         # 在目錄名上只差那 6 個隨機字元 —— 排序於是退化成 uuid 的字典序，
@@ -1058,7 +1423,21 @@ class ConsoleRunner:
         audit trail 的另一半，而那一半沒有第二份。dry run 不在此限：預演
         可以重跑，紀錄也就可以丟。
         """
-        record = self.get(run_id)
+        try:
+            record = self.get(run_id)
+        except RunRecordDamaged as damage:
+            # **讀不出來的紀錄一律不刪。** 它是不是一次性 Formal E2 的唯一
+            # 逐行證據、跑完沒有、子行程收掉沒有 —— 三個刪除前必須回答
+            # 的問題，這筆紀錄一個都答不出來。
+            raise RunRecordDamaged(
+                run_id, damage.problem, path=damage.path, size=damage.size,
+                action=(
+                    "Deletion is refused: whether this is the record of a "
+                    "one-shot Formal E2, whether it finished, and whether its "
+                    "process was reaped cannot be established from a damaged "
+                    f"record. Inspect {self.run_dir(run_id).as_posix()} by hand."
+                ),
+            ) from None
         if not record.finished:
             raise RunnerError(
                 f"run {run_id!r} is still running; wait for it to finish before "

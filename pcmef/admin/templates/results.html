@@ -23,6 +23,7 @@
  #   - py -3.10 -m pytest tests/console/test_navigation.py -v
  # ------------------------------------------------------------ #}
 {% extends "_layout.html" %}
+{% from "_damaged_runs.html" import damaged_table %}
 {% block title %}結果 Results{% endblock %}
 
 {% block content %}
@@ -203,4 +204,17 @@
     {% endif %}
   </div>
 </section>
+
+{# 讀不出來的執行紀錄（round 10）。它們不在上面的清單裡 —— 清單上的
+   每一筆都可以被問「能不能刪」—— 但也不得無聲消失。 #}
+{% if damaged %}
+<section class="card" id="damaged-runs">
+  <h2>讀不出來的執行紀錄
+    <span class="hint">{{ damaged|length }} 筆；不影響其他紀錄，也不能刪除</span>
+  </h2>
+  <div class="body">
+    {{ damaged_table(damaged) }}
+  </div>
+</section>
+{% endif %}
 {% endblock %}

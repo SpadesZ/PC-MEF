@@ -27,6 +27,7 @@
  #   - py -3.10 -m pytest tests/console/test_formal_routes.py -v
  # ------------------------------------------------------------ #}
 {% extends "_layout.html" %}
+{% from "_damaged_runs.html" import damaged_table %}
 {% block title %}正式實驗 Formal{% endblock %}
 
 {% block content %}
@@ -141,6 +142,14 @@
         </tbody>
       </table>
       <p class="note">正式執行的紀錄不可刪除：它是「這一次確實跑過、跑的是哪一條路徑」唯一的逐行證據。</p>
+      {% endif %}
+      {% if damaged_formal %}
+      <div class="flash warn" id="damaged-formal-records">
+        <strong>{{ damaged_formal|length }} 筆執行紀錄讀不出來，而且無法證明它們不是正式執行。</strong>
+        上面的表只列得出讀得到的紀錄；這幾筆可能正是某一次正式執行的逐行證據，
+        也可能是一次仍在進行中的執行。
+      </div>
+      {{ damaged_table(damaged_formal) }}
       {% endif %}
       <p class="note">
         Agent artifact cache：

@@ -40,7 +40,7 @@ from typing import Any
 from flask import Blueprint, current_app, render_template
 
 from pcmef.console.navigation import breadcrumb, nav_context
-from pcmef.console.routes import RECENT_RUN_COUNT
+from pcmef.console.routes import RECENT_RUN_COUNT, visible_damaged_runs
 
 __all__ = ["status_blueprint", "results_blueprint", "pipeline_blueprint"]
 
@@ -250,6 +250,9 @@ def page():
             ("結果 Results", None), project_name=context.display_name
         ),
         runs=_owned_runs(runner, context, query),
+        # 讀不出來的紀錄另列一區：它們不在上面的清單裡（清單上的每一筆
+        # 都可以被問「能不能刪」），但也不得無聲消失。
+        damaged=visible_damaged_runs(runner, context.project_id),
         query=query,
         recent_count=RECENT_RUN_COUNT,
         csrf_token=token,

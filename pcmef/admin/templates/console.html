@@ -57,6 +57,16 @@
   {# 進行中的執行。routes.py 一直有算 active，但先前沒有任何地方用它 ——
      於是「高品質」preset 跑好幾分鐘時，離開頁面再回來就完全看不出還在跑，
      只能自己去歷史表格裡認狀態徽章。 #}
+  {# 讀不出來的紀錄說不出自己跑完沒有，所以上面的「進行中」判斷
+     在它們存在時並不完整（round 10）。 #}
+  {% if damaged %}
+  <div class="flash warn" id="damaged-runs-notice">
+    有 {{ damaged|length }} 筆執行紀錄讀不出來（例如
+    <span class="mono">{{ damaged[0].run.run_id }}</span>）。它們不會出現在「進行中」的判斷裡，
+    也不能刪除 —— 詳見 <a href="{{ url_for('results.page') }}#damaged-runs">結果 Results</a>。
+  </div>
+  {% endif %}
+
   {% if active %}
   <div class="flash warn">
     有一個執行進行中：

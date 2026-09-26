@@ -3,7 +3,7 @@
 #         做對抗性測試。全部在 tmp_path，不觸發任何真正的科研寫入。
 # 檔案路徑: tests/console/test_execution_resilience.py
 # 產生時間: 2026-09-07 14:30 +08:00
-# 版本: v0.1.0
+# 版本: v0.1.1
 # 功能說明: 動作層閉合第四輪 —— telemetry 壞掉不得拖垮實驗、行程真的
 #           要死透、收尾失敗不得靜默逃走、測試碰過就算污染、Blank
 #           Project 不得跑碩論的 executor，以及其餘三支的事件接線。
@@ -23,6 +23,9 @@
 #     manifest、lock、report 不可以。兩者的差別是本檔每一條的前提。
 #   - 不得把「收不掉行程」當成可以忽略的情況。刪掉 run 目錄之後，
 #     那個行程就沒有任何紀錄指向它了。
+#   - v0.1.1 修正：run.json 改走 write_atomically 之後，「寫不進去」的
+#     注入點跟著移到那裡；只擋 Path.write_text 的話，前提根本沒發生。
+#     對應 round 10。
 #   - v0.1.0 新增：首版，對應 Execution Layer Closure round 4。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_execution_resilience.py -v
@@ -423,6 +426,12 @@ def test_a_pump_whose_save_also_fails_leaves_a_diagnosable_trace(tmp_path,
 
     monkeypatch.setattr(Path, "open", refuse_everything)
     monkeypatch.setattr(Path, "write_text", refuse_write_text)
+    # round 10 起 run.json 走原子寫入，不再經過 Path.write_text。
+    # 注入點必須跟著實際的寫入路徑走 —— 否則這條測試的前提（run.json
+    # 寫不進去）根本沒有發生，而它仍然會「通過」或誤判。
+    monkeypatch.setattr(
+        "pcmef.console.runner.write_atomically", refuse_write_text
+    )
 
     # 直接呼叫 _pump：它就是那個背景執行緒的本體。
     runner._pump(record, process)
@@ -432,6 +441,11 @@ def test_a_pump_whose_save_also_fails_leaves_a_diagnosable_trace(tmp_path,
     assert any("crash" in name for name in survivors), (
         f"nothing explains what happened; only {survivors} survived"
     )
+    # 原子寫入的另一半保證：寫不進去的時候，上一份完整紀錄還在。
+    import json as _json
+
+    kept = _json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert kept["run_id"] == record.run_id and kept["status"] == "running"
 
 
 def test_the_pump_never_raises_even_when_everything_fails(tmp_path, monkeypatch):
@@ -456,6 +470,12 @@ def test_the_pump_never_raises_even_when_everything_fails(tmp_path, monkeypatch)
     monkeypatch.setattr(
         Path, "mkdir",
         lambda self, **k: (_ for _ in ()).throw(OSError("gone")),
+    )
+    # round 10：run.json 不再經過 Path.write_text。「全部失敗」必須也包含
+    # 它實際的寫入路徑，否則這條測試守的只剩一部分。
+    monkeypatch.setattr(
+        "pcmef.console.runner.write_atomically",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("gone")),
     )
 
     runner._pump(record, process)  # 不得拋

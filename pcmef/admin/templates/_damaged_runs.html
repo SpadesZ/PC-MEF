@@ -1,0 +1,70 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 results.html、formal.html 與 run_damaged.html 匯入；
+ #         資料來自 ConsoleRunner.damaged_runs() / describe_damage()。
+ #         不讀任何檔案。
+ # 檔案路徑: pcmef/admin/templates/_damaged_runs.html
+ # 產生時間: 2026-09-26 00:40 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 讀不出來的執行紀錄，用同一張表說出「哪一筆、壞在哪裡、
+ #           它是不是正式執行（或無法確定）、別碰它」。
+ # 模組定位: Execution Layer Closure round 10。一筆壞掉的 run.json 先前
+ #           會讓 Run、Results、Formal 整頁 500；現在只影響它自己，
+ #           而且不得因此從畫面上無聲消失。
+ # 主要責任:
+ #   1. damaged_table()：一列一筆，Results / Formal / 說明頁共用
+ # 維護提醒:
+ #   - **不得在這張表加刪除按鈕。** 讀不出來的紀錄說不出自己是不是
+ #     一次性 Formal E2 的證據，runner 也一律拒絕刪除它。
+ #   - 不得把「無法確定」顯示成「不是正式執行」。指標檔不在不代表
+ #     它是預演 —— 可能是指標自己也沒寫成。
+ #   - 歸屬無法確定的那幾筆不給連結：打開也只會得到 404。
+ #   - v0.1.0 新增：首版，對應 round 10。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_run_record_persistence.py -v
+ # ------------------------------------------------------------ #}
+{% macro damaged_table(items) %}
+<table>
+  <thead>
+    <tr><th>編號</th><th>壞在哪裡</th><th>run.json</th><th>正式執行？</th><th>歸屬</th></tr>
+  </thead>
+  <tbody>
+  {% for item in items %}
+    {% set d = item.run if item.run is defined else item %}
+    {% set owner_known = item.owner_known if item.owner_known is defined else none %}
+    <tr>
+      <td class="mono">
+        {% if owner_known is not sameas false %}
+          <a href="{{ url_for('console.run_page', run_id=d.run_id) }}">{{ d.run_id }}</a>
+        {% else %}
+          {{ d.run_id }}
+        {% endif %}
+      </td>
+      <td class="note">
+        {{ d.problem }}
+        {% if d.crash_trace %}<br>同目錄有 <span class="mono">run_crash.txt</span>：runner 記下了寫入失敗。{% endif %}
+      </td>
+      <td class="mono">{{ '不存在' if d.record_bytes is none else (d.record_bytes ~ ' bytes') }}</td>
+      <td>
+        {% if d.formal_mode == 'formal' %}
+          <span class="badge bad">正式 Formal E2</span>
+        {% elif d.formal_mode == 'dry-run' %}
+          <span class="badge">預演</span>
+        {% else %}
+          <span class="badge warn">無法確定</span>
+        {% endif %}
+      </td>
+      <td class="note">
+        {% if owner_known is sameas true %}本 Project
+        {% elif owner_known is sameas false %}無法確定（沒有可讀的 run_identity.json）
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">
+  這些紀錄<strong>讀不出來</strong>，所以系統不替它們做任何判斷：不列進一般清單、
+  不當成預演或 legacy、<strong>不允許刪除</strong>。
+  它們是不是一次性 Formal E2 的逐行證據，只能到伺服器上打開該目錄人工確認。
+</p>
+{% endmacro %}

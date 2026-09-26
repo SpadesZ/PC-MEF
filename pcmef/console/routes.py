@@ -45,7 +45,9 @@ from pcmef.platform.capabilities import (
     RUN_SIMULATION,
 )
 from pcmef.console.results import bar_chart_svg, line_chart_svg, load_results
-from pcmef.console.runner import PRESETS, FormalRunRefused, RunnerError, RunSpec
+from pcmef.console.runner import (
+    PRESETS, FormalRunRefused, RunnerError, RunRecordDamaged, RunSpec,
+)
 
 #: agent cache 的預設根目錄。與 agents.cache.DEFAULT_CACHE_ROOT 同源 ——
 #: 在這裡另寫一個字面路徑，改了那邊之後瀏覽器會安靜地看向空目錄。
@@ -78,6 +80,74 @@ def _unreaped_marker(run_dir):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return {"note": f"{path.as_posix()} 存在但讀不出來。"}
+
+
+def _crash_trace(run_dir) -> str | None:
+    """run_crash.txt 的內容：這筆紀錄有一次更新沒有寫成功。沒有就是 None。
+
+    run.json 是原子替換的，所以更新失敗時畫面上看到的是**上一份**完整
+    紀錄 —— 它可能還寫著「執行中」。不說出來的話，一筆其實已經結束、
+    只是結局沒寫進去的 run，看起來就只是跑得特別久。
+    """
+    from pcmef.console.runner import RUN_CRASH_FILENAME
+
+    path = Path(run_dir) / RUN_CRASH_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[:4000]
+    except OSError:
+        return f"{path.as_posix()} 存在但讀不出來。"
+
+
+def visible_damaged_runs(runner, project_id: str) -> list[dict]:
+    """目前 Project 看得到的損壞紀錄。**Run、Results 與 Formal 共用這一份判準。**
+
+    - 有歸屬檔的照歸屬判定：別的專案的壞紀錄不列，與正常紀錄是同一條
+      隔離規則（audit P0-2）。
+    - **沒有歸屬檔的誰都不擁有**（P1-4），但也不得因此從畫面上消失 ——
+      那等於讓損壞無聲無息。它的內容讀不出來、歸屬無從確定，所以只列
+      編號與壞在哪裡，不給連結、不給任何動作。
+    """
+    from pcmef.platform.projects.resolver import LEGACY_THESIS_PROJECT_ID
+    from pcmef.platform.runs import owned_by, read_attribution
+
+    shown = []
+    for damage in runner.damaged_runs():
+        attribution = read_attribution(runner.run_dir(damage.run_id))
+        if attribution is None:
+            shown.append({"run": damage, "owner_known": False})
+        elif owned_by(attribution, project_id,
+                      legacy_project_id=LEGACY_THESIS_PROJECT_ID):
+            shown.append({"run": damage, "owner_known": True})
+    return shown
+
+
+def _damaged_page(run_id: str, damage: RunRecordDamaged):
+    """一筆讀不出來的紀錄的說明頁。**歸屬先於內容**，與正常紀錄相同。
+
+    409：它確實存在（不是 404），請求沒有錯（不是 400），伺服器也
+    沒有壞（不是 500）—— 壞的是那一個檔。
+    """
+    from flask import render_template
+
+    attribution, owned = _require_run_ownership(run_id)
+    if not owned:
+        return _not_found(
+            f"執行紀錄 {run_id} 不屬於目前的 Project。"
+            "切換到它所屬的 Project 才能檢視。"
+        ), 404
+    return render_template(
+        "run_damaged.html",
+        **nav_context("results"),
+        breadcrumb=breadcrumb(
+            ("結果 Results", url_for("results.page")),
+            (run_id, None),
+            project_name=_project_name(),
+        ),
+        damage=_runner().describe_damage(damage),
+        attribution=attribution,
+    ), 409
 
 
 def _describe_execution(project, kind: str, stage_ids) -> dict:
@@ -433,6 +503,15 @@ def _runner_error(error: RunnerError):
     return jsonify({"error": str(error)}), 400
 
 
+@blueprint.errorhandler(RunRecordDamaged)
+def _damaged_record(error: RunRecordDamaged):
+    """讀不出來的紀錄：409，而且說出是哪一筆、壞在哪裡。"""
+    return jsonify({
+        "error": str(error), "run_id": error.run_id,
+        "problem": error.problem, "damaged": True,
+    }), 409
+
+
 @blueprint.errorhandler(AdminSecurityError)
 def _security(error: AdminSecurityError):
     return jsonify({"error": str(error)}), 403
@@ -457,6 +536,14 @@ def page():
     # 執行紀錄與搜尋已移到 Results（P2-2）：Run 首頁只回答「我要跑什麼」。
     # active 仍留在這裡 —— 「有東西正在跑」是決定要不要再按一次的必要資訊。
     active = next((r for r in _runner().list_runs() if not r.finished), None)
+    # 讀不出來的紀錄不在 active 的判斷裡（它說不出自己跑完沒有），
+    # 所以首頁要另外說一聲：「有東西正在跑」這一句此時不完整。
+    try:
+        from pcmef.console.project_routes import request_context as _context
+
+        damaged = visible_damaged_runs(_runner(), _context().project_id)
+    except Exception:  # noqa: BLE001 - Run 首頁不得因此 500
+        damaged = []
 
     # 畫面上的按鈕是**能力的投影**，不是能力本身。守衛仍在端點那一側；
     # 這裡只是讓看得到的與按得動的一致 —— 一顆按下去永遠 403 的按鈕，
@@ -491,6 +578,7 @@ def page():
             if may_simulate else []
         ),
         active=active,
+        damaged=damaged,
         may_simulate=may_simulate,
         executors=describe(template),
         may_read_llm_snapshot=(
@@ -538,6 +626,9 @@ def run_page(run_id: str, section: str = "overview"):
     runner = _runner()
     try:
         record = runner.get(run_id)
+    except RunRecordDamaged as damage:
+        # 讀不出來不是找不到：它存在過，而且可能是一次正式執行。
+        return _damaged_page(run_id, damage)
     except RunnerError:
         # 打錯網址、或紀錄被刪掉之後回到書籤，都是**正常情境**。先前這裡讓
         # RunnerError 冒到 errorhandler，於是瀏覽器上出現一段 400 JSON ——
@@ -619,6 +710,7 @@ def run_page(run_id: str, section: str = "overview"):
     # 只顯示一個 unreaped 徽章，等於告訴使用者「你有麻煩了」而不告訴他
     # 麻煩在哪裡 —— 而這份標記檔裡有 pid、指令與主機名。
     context["unreaped"] = _unreaped_marker(run_dir)
+    context["crash_trace"] = _crash_trace(run_dir)
 
     label = next(s.label for s in RUN_SECTIONS if s.key == section)
     return render_template(
@@ -652,6 +744,8 @@ def case_page(run_id: str, case_id: str):
     runner = _runner()
     try:
         record = runner.get(run_id)
+    except RunRecordDamaged as damage:
+        return _damaged_page(run_id, damage)
     except RunnerError:
         return _not_found(f"執行紀錄 {run_id} 不存在。"), 404
 
@@ -869,6 +963,8 @@ def export_figures(run_id: str):  # noqa: D401
     runner = _runner()
     try:
         record = runner.get(run_id)
+    except RunRecordDamaged:
+        raise  # 交給 errorhandler：409，說出壞在哪裡
     except RunnerError:
         return jsonify({"error": f"run {run_id!r} not found"}), 404
 
@@ -984,7 +1080,18 @@ def stream(run_id: str):
             if chunk:
                 for line in chunk.splitlines():
                     yield f"data: {json.dumps({'line': line})}\n\n"
-            record = runner.get(run_id)
+            try:
+                record = runner.get(run_id)
+            except RunRecordDamaged as damage:
+                # 串流開始之後紀錄才壞掉。收線並說出原因，而不是讓產生器
+                # 在半路拋出、連線無聲斷掉。
+                yield (
+                    "event: done\ndata: "
+                    + json.dumps({"status": "damaged", "exit_code": None,
+                                  "problem": damage.problem})
+                    + "\n\n"
+                )
+                return
             if record.finished:
                 # 結束前再抓一次，避免最後幾行落在旗標翻轉與讀取之間。
                 trailing, offset = runner.tail(run_id, offset)

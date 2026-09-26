@@ -1,0 +1,60 @@
+{# PC-MEF Research System source maintenance contract
+ # 上下游: 由 pcmef/console/routes.py 的 run_page / case_page 在
+ #         runner.get() 丟出 RunRecordDamaged、且目前 Project 擁有這筆
+ #         run 時繪製（HTTP 409）。extends _layout.html，不讀任何檔案。
+ # 檔案路徑: pcmef/admin/templates/run_damaged.html
+ # 產生時間: 2026-09-26 00:45 +08:00
+ # 版本: v0.1.0
+ # 功能說明: 一筆讀不出來的執行紀錄：哪一筆、壞在哪裡、還能確定什麼、
+ #           系統因此**不做**哪些事。
+ # 模組定位: Execution Layer Closure round 10。先前這種紀錄讓 Run 頁
+ #           500，或被當成「找不到」—— 兩者都說錯了：它存在，而且可能
+ #           是一次正式執行。
+ # 主要責任:
+ #   1. 說出損壞的具體原因與旁證（run_crash.txt、formal_output.json）
+ #   2. 說明為什麼不能刪、不能當成預演
+ # 維護提醒:
+ #   - 不得在本頁放任何動作按鈕（刪除、重跑、修復）。修復必須在伺服器上
+ #     人工確認之後進行。
+ #   - 不得把它併進 not_found.html：那一頁只講「找不到」。
+ #   - v0.1.0 新增：首版，對應 round 10。
+ # 驗證方式:
+ #   - py -3.10 -m pytest tests/console/test_run_record_persistence.py -v
+ # ------------------------------------------------------------ #}
+{% extends "_layout.html" %}
+{% from "_damaged_runs.html" import damaged_table %}
+{% block title %}紀錄損壞{% endblock %}
+
+{% block content %}
+<header class="masthead">
+  <h1>執行 <span class="mono">{{ damage.run_id }}</span> 的紀錄讀不出來</h1>
+  <p><span class="badge bad">409</span> {{ damage.problem }}</p>
+</header>
+
+<section class="card">
+  <h2>還能確定的事</h2>
+  <div class="body">
+    {{ damaged_table([damage]) }}
+    {% if attribution %}
+    <p class="note">歸屬（<span class="mono">run_identity.json</span>）仍可讀：
+      Project <span class="mono">{{ attribution.project_id }}</span>。</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>系統因此不做的事</h2>
+  <div class="body">
+    <ul class="note">
+      <li>不顯示任何狀態、參數或指令 —— 那些都寫在讀不出來的那一份檔案裡。</li>
+      <li>不把它當成預演、legacy 或一般探索紀錄。</li>
+      <li><strong>不允許刪除。</strong>它可能是一次性 Formal E2 唯一的逐行證據，
+        也可能還有子行程沒收掉；兩件事都無從確認。</li>
+    </ul>
+    <p class="note">要修復，請在伺服器上打開這筆 run 的目錄人工確認
+      （<span class="mono">log.txt</span>、<span class="mono">run_crash.txt</span>、
+      <span class="mono">formal_output.json</span>）。其他執行紀錄不受影響。</p>
+    <p><a class="btn" href="{{ url_for('results.page') }}">回到結果 Results</a></p>
+  </div>
+</section>
+{% endblock %}
