@@ -1,0 +1,33 @@
+{
+  "contract": "pcmef.sensor_adapter/v1",
+  "id": "acme.tof-vl53l1x",
+  "version": "1.0.0",
+  "author": "test fixture",
+  "display_name": "Time-of-Flight (VL53L1X variant)",
+  "family": "time_of_flight",
+  "device_model": "VL53L1X",
+  "parameters": {
+    "fov_deg": {"type": "number", "unit": "deg", "required": true, "minimum": 15, "maximum": 27}
+  },
+  "capabilities": {"simulate": false, "ingest": true},
+  "implementations": {"simulate": null, "ingest": "acme_tof.reader:read_recording"},
+  "observation": {
+    "schema_id": "acme.tof.recording",
+    "version": "1.0.0",
+    "layout": "sequence",
+    "shape": [null, 4],
+    "channels": [
+      {"name": "distance_mm", "unit": "mm"},
+      {"name": "signal_rate_mcps", "unit": "Mcps"},
+      {"name": "ambient_rate_mcps", "unit": "Mcps"},
+      {"name": "sigma_mm", "unit": "mm", "description": "device-reported sigma"}
+    ],
+    "sampling_interval_s": 0.0333,
+    "timing_note": ""
+  },
+  "quality_signals": [
+    {"name": "range_status", "unit": "1", "description": "device range status code"}
+  ],
+  "dependencies": [],
+  "known_limitations": ["test fixture: no simulator; ingest implementation is not shipped"]
+}

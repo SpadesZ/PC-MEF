@@ -1,0 +1,24 @@
+{
+  "contract": "pcmef.sensor_adapter/v1",
+  "id": "acme.ir-camera",
+  "version": "1.0.0",
+  "author": "test fixture",
+  "display_name": "Infrared Camera",
+  "family": "infrared_camera",
+  "device_model": "generic LWIR",
+  "parameters": {},
+  "capabilities": {"simulate": false, "ingest": true},
+  "implementations": {"simulate": null, "ingest": "acme_ir.reader:read_frame"},
+  "observation": {
+    "schema_id": "acme.ir.frame",
+    "version": "1.0.0",
+    "layout": "image",
+    "shape": [null, null, 1],
+    "channels": [{"name": "intensity", "unit": "relative_irradiance"}],
+    "sampling_interval_s": null,
+    "timing_note": "one frame per acquisition"
+  },
+  "quality_signals": [],
+  "dependencies": [],
+  "known_limitations": ["test fixture: ingest implementation is not shipped"]
+}

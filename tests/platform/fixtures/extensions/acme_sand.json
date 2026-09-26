@@ -1,0 +1,21 @@
+{
+  "contract": "pcmef.scenario_plugin/v1",
+  "id": "acme.sand",
+  "version": "0.1.0",
+  "author": "test fixture",
+  "display_name": "Sand",
+  "category": "granular_material",
+  "description": "Granular sand-filled state; a definition without physics.",
+  "label_role": {"classification_label": "Sand", "environment_state": false},
+  "physics": {
+    "template_id": null,
+    "implementation": null,
+    "parameters": {
+      "fill_level": {"type": "number", "unit": "1", "required": true, "minimum": 0, "maximum": 1},
+      "particle_size_mm": {"type": "number", "unit": "mm", "required": false, "minimum": 0.05, "maximum": 2}
+    }
+  },
+  "declared_sensor_families": ["rgb_camera", "time_of_flight"],
+  "dependencies": [],
+  "known_limitations": ["no granular physics template exists; plugin required before simulation"]
+}
