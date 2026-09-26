@@ -250,6 +250,8 @@ def _finished(runner, run_id, mode):
     record = RunRecord(
         run_id=run_id, kind="formal_e2", label="", params={"mode": mode},
         command=[], status="succeeded", exit_code=0,
+        # 結束的紀錄一定有結束時間 —— runner 從來沒有寫出過沒有的（round 11）。
+        finished_at="2026-01-01T00:01:00+00:00",
     )
     runner.run_dir(run_id).mkdir(parents=True, exist_ok=True)
     runner._save(record)
@@ -289,6 +291,10 @@ def test_a_failed_formal_record_is_also_protected(runner):
     record = RunRecord(
         run_id="formal-failed", kind="formal_e2", label="",
         params={"mode": "formal"}, command=[], status="failed", exit_code=2,
+        # 結束的紀錄一定有結束時間。少了它，round 11 起這筆會被判為損壞 ——
+        # 而損壞的拒絕訊息同樣含有 "one-shot Formal E2"，下面的 match 會因為
+        # 錯的理由成立。
+        finished_at="2026-01-01T00:01:00+00:00",
     )
     runner.run_dir("formal-failed").mkdir(parents=True, exist_ok=True)
     runner._save(record)

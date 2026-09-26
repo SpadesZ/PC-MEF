@@ -207,6 +207,10 @@ def test_delete_refuses_an_unreaped_record_even_without_the_marker(tmp_path,
     # 手動造出「狀態是 unreaped，但 marker 不存在」的情況。
     record.status = UNREAPED
     record.finished_at = "2026-09-07T00:00:00+00:00"
+    # runner 寫 unreaped 時一律同時寫 exit_code = -1。少了它，round 11 起
+    # 這筆會被判為損壞而拒絕刪除 —— 測試就會因為錯的理由通過；這裡要守的
+    # 是「unreaped 狀態本身」那一道。
+    record.exit_code = -1
     runner._save(record)
     marker = runner.run_dir(record.run_id) / "unreaped_process.json"
     if marker.exists():
@@ -233,6 +237,9 @@ def test_delete_still_refuses_when_only_the_marker_survives(tmp_path,
 
     record.status = "failed"
     record.finished_at = "2026-09-07T00:00:00+00:00"
+    # 紀錄本身必須完整：round 11 起缺 exit code 的紀錄會被判為損壞而拒絕
+    # 刪除 —— 這條測試就會因為錯的理由通過。要守的是 marker 那一道。
+    record.exit_code = 1
     runner._save(record)
     (runner.run_dir(record.run_id) / "unreaped_process.json").write_text(
         "{}", encoding="utf-8"
@@ -258,6 +265,9 @@ def test_a_clean_failure_is_still_deletable(tmp_path, monkeypatch):
 
     record.status = "failed"
     record.finished_at = "2026-09-07T00:00:00+00:00"
+    # runner 的每一條 failed 路徑都同時寫 exit code；少了它的紀錄說不出
+    # 自己跑完沒有，round 11 起會被判為損壞而拒絕刪除。
+    record.exit_code = 1
     runner._save(record)
     marker = runner.run_dir(record.run_id) / "unreaped_process.json"
     if marker.exists():

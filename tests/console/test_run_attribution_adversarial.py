@@ -244,7 +244,7 @@ def test_a_legacy_run_without_attribution_belongs_to_the_thesis(app_and_runs):
     legacy = runs / "legacy-run"
     legacy.mkdir(parents=True)
     (legacy / "run.json").write_text(json.dumps({
-        "run_id": "legacy-run", "kind": "sim", "label": "legacy", "params": {},
+        "run_id": "legacy-run", "kind": "sim_smoke", "label": "legacy", "params": {},
         "command": ["x"], "status": "succeeded",
         "started_at": before_boundary, "finished_at": before_boundary,
         "exit_code": 0, "note": "",
@@ -266,7 +266,7 @@ def test_a_run_whose_start_time_is_unreadable_is_an_orphan(app_and_runs):
     broken = runs / "no-time"
     broken.mkdir(parents=True)
     (broken / "run.json").write_text(json.dumps({
-        "run_id": "no-time", "kind": "sim", "label": "broken", "params": {},
+        "run_id": "no-time", "kind": "sim_smoke", "label": "broken", "params": {},
         "command": ["x"], "status": "succeeded", "started_at": "t",
         "finished_at": "t", "exit_code": 0, "note": "",
     }), encoding="utf-8")

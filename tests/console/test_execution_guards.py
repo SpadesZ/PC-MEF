@@ -314,7 +314,10 @@ def _plant(runs, run_id, started_at):
     directory = runs / run_id
     directory.mkdir(parents=True)
     (directory / "run.json").write_text(json.dumps({
-        "run_id": run_id, "kind": "sim", "label": run_id, "params": {},
+        # kind 必須是 console 真的跑過的種類；"sim" 從來不存在，round 11
+        # 起會被判為損壞 —— 而損壞的紀錄同樣會 404，測試就會因為錯的理由
+        # 而通過。
+        "run_id": run_id, "kind": "sim_smoke", "label": run_id, "params": {},
         "command": ["x"], "status": "succeeded", "started_at": started_at,
         "finished_at": started_at, "exit_code": 0, "note": "",
     }), encoding="utf-8")

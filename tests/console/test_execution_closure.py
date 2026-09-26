@@ -331,7 +331,7 @@ def test_a_run_created_just_before_the_boundary_is_legacy(env):
     directory = runs / "just-before"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "run.json").write_text(json.dumps({
-        "run_id": "just-before", "kind": "sim", "label": "x", "params": {},
+        "run_id": "just-before", "kind": "sim_smoke", "label": "x", "params": {},
         "command": ["x"], "status": "succeeded", "started_at": just_before,
         "finished_at": just_before, "exit_code": 0, "note": "",
     }), encoding="utf-8")
@@ -349,7 +349,7 @@ def test_a_corrupt_boundary_denies_an_unattributed_run(env):
     legacy = runs / "old-legacy"
     legacy.mkdir(parents=True, exist_ok=True)
     (legacy / "run.json").write_text(json.dumps({
-        "run_id": "old-legacy", "kind": "sim", "label": "legacy", "params": {},
+        "run_id": "old-legacy", "kind": "sim_smoke", "label": "legacy", "params": {},
         "command": ["x"], "status": "succeeded",
         "started_at": "2026-01-01T10:00:00+08:00",
         "finished_at": "2026-01-01T10:00:00+08:00", "exit_code": 0, "note": "",

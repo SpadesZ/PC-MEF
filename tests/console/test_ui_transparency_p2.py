@@ -122,6 +122,8 @@ def client(tmp_path):
     record = RunRecord(
         run_id="r1", kind="formal_e2", label="", params={"mode": "dry-run"},
         command=[], status="succeeded", exit_code=0,
+        # 結束的紀錄一定有結束時間 —— runner 從來沒有寫出過沒有的（round 11）。
+        finished_at="2026-01-01T00:01:00+00:00",
     )
     (run_root / "r1" / "run.json").write_text(
         json.dumps(record.to_json()), encoding="utf-8"
@@ -172,6 +174,7 @@ def test_an_executed_case_still_shows_its_result(client, tmp_path):
         json.dumps(RunRecord(
             run_id="r2", kind="formal_e2", label="", params={"mode": "dry-run"},
             command=[], status="succeeded", exit_code=0,
+            finished_at="2026-01-01T00:01:00+00:00",
         ).to_json()),
         encoding="utf-8",
     )
@@ -267,6 +270,7 @@ def test_the_case_page_renders_the_channels(client, tmp_path):
         json.dumps(RunRecord(
             run_id="r3", kind="formal_e2", label="", params={"mode": "dry-run"},
             command=[], status="succeeded", exit_code=0,
+            finished_at="2026-01-01T00:01:00+00:00",
         ).to_json()),
         encoding="utf-8",
     )

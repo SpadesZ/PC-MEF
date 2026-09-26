@@ -327,7 +327,9 @@ def client(tmp_path):
     (run / "artifacts" / "trace" / "cases").mkdir(parents=True)
     record = RunRecord(
         run_id=run.name, kind="formal_e2", label="Formal E2",
-        params={"mode": "full"}, command=["pcmef", "formal", "run-e2"],
+        # mode 只可能是 dry-run 或 formal：runner 自有 formal_e2 起就拒絕
+        # 其他值，"full" 從來不可能被寫進一筆真的紀錄（round 11）。
+        params={"mode": "formal"}, command=["pcmef", "formal", "run-e2"],
         status="succeeded", started_at="2026-01-01T00:00:00+00:00",
         finished_at="2026-01-01T00:01:00+00:00", exit_code=0,
     )

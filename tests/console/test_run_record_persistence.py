@@ -3,7 +3,7 @@
 #         失敗與歷史損壞三種情況下都只影響它自己。全部在 tmp_path。
 # 檔案路徑: tests/console/test_run_record_persistence.py
 # 產生時間: 2026-09-26 01:10 +08:00
-# 版本: v0.1.0
+# 版本: v0.1.1
 # 功能說明: 動作層閉合第十輪 —— run.json 的原子替換、寫入失敗時保留上一份
 #           完整紀錄、初始紀錄失敗留下證據，以及一筆壞紀錄不得讓 Run、
 #           Results、Formal 整頁 500，也不得被當成可刪的一般紀錄。
@@ -16,11 +16,15 @@
 #   3. 初始紀錄寫不進去：不啟動行程、不留半份 run.json、留下證據
 #   4. 各種歷史損壞：單筆 409、清單照常、另列損壞區
 #   5. 壞紀錄不得削弱 Formal E2 的刪除與稽核語意
+#   6. 反序列化不得補欄位：缺的、矛盾的、說不出 mode 的一律損壞
 # 維護提醒:
 #   - **不得把同步點測試改成 sleep。** 「讀者在替換之前的那一刻讀」必須
 #     是一個被安排好的時刻，而不是碰運氣；壓力測試只是補充證據。
 #   - 每一條失敗注入測試都要比對 run.json 的**位元組**，不是只看有沒有
 #     丟例外。
+#   - v0.1.1 新增：第 7 節 —— 語法正確但不完整的紀錄（缺欄位、未知 kind、
+#     生命週期矛盾、formal mode 不明）一律損壞、不可刪；真實歷史形狀與
+#     runner 自己寫出的每一種狀態作為相容性對照。對應 round 11。
 #   - v0.1.0 新增：首版，對應 Execution Layer Closure round 10。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/console/test_run_record_persistence.py -v
@@ -62,7 +66,10 @@ def _record(run_id: str, status: str = "running", note: str = "") -> RunRecord:
         run_id=run_id, kind="sim_smoke", label="x", params={"preset": "standard"},
         command=["python", "-m", "pcmef.cli", "sim", "smoke"], status=status,
         started_at="2026-09-26T00:00:00+00:00", note=note,
-        exit_code=None if status == "running" else 0,
+        # runner 真的會寫的 exit code：succeeded 是 0、failed 不是 0、
+        # unreaped 是 -1。寫錯的話 round 11 起這筆會被判為損壞，而用它當
+        # 對照組的測試就會因為錯的理由通過。
+        exit_code={"running": None, "succeeded": 0, "failed": 1}.get(status, -1),
         finished_at=None if status == "running" else "2026-09-26T00:01:00+00:00",
     )
 
@@ -714,3 +721,261 @@ def test_a_damaged_record_never_appears_as_a_listed_record(env):
             % run_id.encode(), pointer_mode="formal")
     runner = client.application.config["PCMEF_CONSOLE_RUNNER"]
     assert run_id not in [r.run_id for r in runner.list_runs(limit=500)]
+
+
+# ---------------------------------------------------------------------------
+# 7 語法正確、但說不完整的紀錄（round 11）
+# ---------------------------------------------------------------------------
+
+from pcmef.console.runner import FORMAL_CONFIRM_PHRASE, RECORD_SCHEMA  # noqa: E402
+
+#: 真實歷史紀錄的形狀（2026-09-27 普查 outputs/console/runs 的 8 筆，逐欄照抄
+#: 結構、換掉值）。它們是相容性對照組：嚴格化之後必須照樣讀得出來。
+HISTORICAL_SHAPES = {
+    "sim_smoke_2026_08": {
+        "kind": "sim_smoke", "label": "標準",
+        "params": {"classes": ["Empty"], "preset": "standard"},
+        "command": ["python", "-u", "-m", "pcmef.cli", "sim", "smoke"],
+        "status": "succeeded", "started_at": "2026-08-26T09:44:35+00:00",
+        "finished_at": "2026-08-26T09:46:01+00:00", "exit_code": 0, "note": "",
+    },
+    "sim_smoke_seed_offset": {
+        "kind": "sim_smoke", "label": "快速預覽",
+        "params": {"classes": ["Empty"], "preset": "preview", "seed_offset": 3},
+        "command": ["python", "-u", "-m", "pcmef.cli", "sim", "smoke"],
+        "status": "succeeded", "started_at": "2026-09-07T05:39:32+00:00",
+        "finished_at": "2026-09-07T05:40:02+00:00", "exit_code": 0, "note": "",
+    },
+    "llm_snapshot": {
+        "kind": "llm_snapshot", "label": "檢查（不寫入）", "params": {"freeze": False},
+        "command": ["python", "-u", "-m", "pcmef.cli", "llm", "snapshot"],
+        "status": "succeeded", "started_at": "2026-08-31T16:11:02+00:00",
+        "finished_at": "2026-08-31T16:11:09+00:00", "exit_code": 0, "note": "",
+    },
+    "formal_e2_dry_run": {
+        "kind": "formal_e2", "label": "formal_e2", "params": {"mode": "dry-run"},
+        "command": ["python", "-u", "-m", "pcmef.cli", "formal", "run-e2",
+                    "--mode", "dry-run"],
+        "status": "succeeded", "started_at": "2026-09-04T03:15:21+00:00",
+        "finished_at": "2026-09-04T03:20:44+00:00", "exit_code": 0, "note": "",
+    },
+}
+
+
+def _complete(run_id: str, **overrides) -> dict:
+    """一筆完整、合法的 formal_e2 終局紀錄，再套上 overrides。"""
+    data = {
+        "run_id": run_id, "kind": "formal_e2", "label": "formal_e2",
+        "params": {"mode": "formal", "confirm": FORMAL_CONFIRM_PHRASE},
+        "command": ["python", "-m", "pcmef.cli", "formal", "run-e2"],
+        "status": "failed", "started_at": "2026-09-26T00:00:00+00:00",
+        "finished_at": "2026-09-26T00:10:00+00:00", "exit_code": 2, "note": "",
+    }
+    data.update(overrides)
+    return data
+
+
+def _write(runner, run_id: str, data) -> None:
+    runner.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+    runner.record_path(run_id).write_bytes(
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    )
+
+
+def test_the_reviewers_example_is_damaged_not_a_dry_run(runner):
+    """`{"run_id", "kind": "formal_e2", "status": "failed"}` —— 審查點名的那一筆。
+
+    先前：缺的 params 被補成 {}，`protected` 把缺少的 mode 讀成 "dry-run"，
+    status 是終局 —— 於是它是一筆「已結束的預演」，可以刪。
+    """
+    _write(runner, "bad", {"run_id": "bad", "kind": "formal_e2", "status": "failed"})
+
+    with pytest.raises(RunRecordDamaged) as caught:
+        runner.get("bad")
+    for key in ("params", "command", "finished_at", "exit_code"):
+        assert repr(key) in caught.value.problem, caught.value.problem
+    assert "not filled in" in caught.value.problem
+
+    assert "bad" not in [r.run_id for r in runner.list_runs()]
+    (damaged,) = [d for d in runner.damaged_runs() if d.run_id == "bad"]
+    assert damaged.may_be_formal and damaged.formal_mode is None
+    with pytest.raises(RunRecordDamaged, match="Deletion is refused"):
+        runner.delete("bad")
+    assert runner.record_path("bad").exists()
+
+
+def test_the_reviewers_example_stays_visible_and_undeletable_end_to_end(env):
+    """同一筆，經由真的頁面：看得到、刪不掉、Formal 的稽核表不會少它。"""
+    client, runs = env
+    run_id = _start(client)
+    runs.joinpath(run_id, "run.json").write_bytes(json.dumps(
+        {"run_id": run_id, "kind": "formal_e2", "status": "failed"}
+    ).encode("utf-8"))
+
+    results = client.get("/results").get_data(as_text=True)
+    assert run_id in results.partition('id="damaged-runs"')[2]
+    formal = client.get("/formal").get_data(as_text=True)
+    section = formal.partition('id="damaged-formal-records"')[2]
+    assert run_id in section and "無法確定" in section
+    assert client.get(f"/console/runs/{run_id}").status_code == 409
+    response = client.post(f"/api/console/runs/{run_id}/delete",
+                           data={"csrf_token": _token(client)})
+    assert response.status_code == 409
+    assert (runs / run_id / "run.json").exists()
+
+
+@pytest.mark.parametrize("missing", RECORD_SCHEMA)
+def test_every_field_is_required_and_none_is_invented(runner, missing):
+    """十個欄位逐一拿掉一個：每一種都是損壞，而且原因點名缺的那一個。"""
+    data = _complete("bad")
+    del data[missing]
+    record, problem = parse_record(json.dumps(data).encode("utf-8"), "bad")
+    assert record is None
+    assert repr(missing) in problem
+
+
+INVALID = {
+    "formal_without_mode": _complete("bad", params={}),
+    "formal_mode_is_null": _complete("bad", params={"mode": None}),
+    "formal_mode_is_unknown": _complete("bad", params={"mode": "full"}),
+    "params_is_null": _complete("bad", params=None),
+    "unknown_kind": _complete("bad", kind="experiment_e2", params={}),
+    "unknown_status": _complete("bad", status="done"),
+    "running_but_finished": _complete("bad", status="running"),
+    "succeeded_with_nonzero_exit": _complete("bad", status="succeeded", exit_code=1),
+    "failed_with_exit_zero": _complete("bad", status="failed", exit_code=0),
+    "terminal_without_finish_time": _complete("bad", finished_at=None),
+    "terminal_without_exit_code": _complete("bad", exit_code=None),
+    "unreaped_without_exit_code": _complete("bad", status="unreaped", exit_code=None),
+    "command_holds_numbers": _complete("bad", command=[1, 2]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(INVALID))
+def test_an_invalid_but_well_formed_record_fails_closed(runner, name):
+    """語法完全正確的 JSON，但說不出安全判斷需要的事 —— 一律損壞、不可刪。"""
+    _write(runner, "bad", INVALID[name])
+    with pytest.raises(RunRecordDamaged):
+        runner.get("bad")
+    assert "bad" not in [r.run_id for r in runner.list_runs()]
+    with pytest.raises(RunRecordDamaged, match="Deletion is refused"):
+        runner.delete("bad")
+    assert runner.record_path("bad").exists()
+
+
+def test_deserialisation_itself_invents_nothing():
+    """最後一道：就算繞過 parse_record，from_json 也不補欄位。"""
+    with pytest.raises(KeyError):
+        RunRecord.from_json({"run_id": "x", "kind": "formal_e2", "status": "failed"})
+
+
+@pytest.mark.parametrize("params, protected", [
+    ({"mode": "formal"}, True),
+    ({"mode": "dry-run"}, False),
+    ({}, True),
+    ({"mode": None}, True),
+    ({"mode": "full"}, True),
+])
+def test_protection_does_not_default_a_missing_mode_to_dry_run(params, protected):
+    """只有**明確**寫著 dry-run 的 formal_e2 才不受保護。"""
+    record = RunRecord(run_id="x", kind="formal_e2", label="", params=params,
+                       command=[], status="failed", exit_code=1,
+                       finished_at="2026-09-26T00:00:00+00:00")
+    assert record.protected is protected
+
+
+def test_a_non_formal_kind_is_still_not_protected():
+    record = RunRecord(run_id="x", kind="sim_smoke", label="", params={},
+                       command=[], status="failed", exit_code=1,
+                       finished_at="2026-09-26T00:00:00+00:00")
+    assert record.protected is False
+
+
+@pytest.mark.parametrize("params, stored", [
+    ({}, "dry-run"),
+    ({"mode": "dry-run"}, "dry-run"),
+    ({"mode": "formal", "confirm": FORMAL_CONFIRM_PHRASE}, "formal"),
+])
+def test_a_new_formal_record_states_the_mode_it_actually_ran(tmp_path, monkeypatch,
+                                                            params, stored):
+    """寫入端：紀錄上的 mode 就是傳給 CLI 的 --mode。讀的人不必、也不得猜。"""
+    monkeypatch.setattr("pcmef.console.runner.subprocess.Popen",
+                        lambda *a, **k: _NoProcess())
+    runner = ConsoleRunner(tmp_path / "runs", formal_out=tmp_path / "formal_out",
+                           dry_run_base=tmp_path / "dry")
+    record = runner.start(RunSpec(kind="formal_e2", params=params))
+    runner.wait(record.run_id, timeout=30)
+
+    on_disk = json.loads(runner.record_path(record.run_id).read_text(encoding="utf-8"))
+    assert on_disk["params"]["mode"] == stored
+    assert on_disk["command"][on_disk["command"].index("--mode") + 1] == stored
+    assert runner.formal_pointer(record.run_id)["mode"] == stored
+    assert runner.get(record.run_id).protected is (stored == "formal")
+
+
+@pytest.mark.parametrize("name", sorted(HISTORICAL_SHAPES))
+def test_historical_record_shapes_still_read_normally(runner, name):
+    """相容性對照組：真實存在過的紀錄形狀，嚴格化之後照樣是正常紀錄。"""
+    data = dict(HISTORICAL_SHAPES[name], run_id="hist")
+    _write(runner, "hist", data)
+    record = runner.get("hist")
+    assert record.kind == data["kind"] and record.status == "succeeded"
+    assert "hist" in [r.run_id for r in runner.list_runs()]
+    assert not [d for d in runner.damaged_runs() if d.run_id == "hist"]
+
+
+def test_historical_deletion_rules_are_unchanged(runner):
+    """對照組：真實形狀的預演與探索紀錄照樣可刪；正式紀錄照樣不可刪。"""
+    for name in ("sim_smoke_2026_08", "formal_e2_dry_run"):
+        _write(runner, name.replace("_", "-"),
+               dict(HISTORICAL_SHAPES[name], run_id=name.replace("_", "-")))
+        runner.delete(name.replace("_", "-"))
+        assert not runner.run_dir(name.replace("_", "-")).exists()
+    formal = dict(HISTORICAL_SHAPES["formal_e2_dry_run"], run_id="formal-real",
+                  params={"mode": "formal", "confirm": FORMAL_CONFIRM_PHRASE})
+    _write(runner, "formal-real", formal)
+    with pytest.raises(RunnerError, match="one-shot Formal E2"):
+        runner.delete("formal-real")
+
+
+def test_every_state_the_runner_writes_reads_back_as_a_normal_record(tmp_path,
+                                                                    monkeypatch):
+    """相容性對照組：runner 自己寫得出來的每一種狀態，嚴格化之後都讀得回來。
+
+    running（啟動時）、succeeded / failed（輸出執行緒收尾）、unreaped
+    （收不掉的子行程）—— 走真的程式路徑，不手寫。
+    """
+    class _Exits:
+        def __init__(self, code):
+            self.stdout, self.code, self.pid = iter(()), code, None
+
+        def wait(self, timeout=None):
+            return self.code
+
+        def poll(self):
+            return self.code
+
+    runner = ConsoleRunner(tmp_path / "runs")
+    seen = {}
+    for code in (0, 3):
+        monkeypatch.setattr("pcmef.console.runner.subprocess.Popen",
+                            lambda *a, _c=code, **k: _Exits(_c))
+        record = runner.start(RunSpec(kind="sim_smoke", params={}))
+        runner.wait(record.run_id, timeout=30)
+        seen[runner.get(record.run_id).status] = record.run_id
+
+    import threading
+
+    monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+    running = runner.start(RunSpec(kind="sim_smoke", params={}))
+    monkeypatch.undo()
+    seen[runner.get(running.run_id).status] = running.run_id
+
+    unreaped = runner.get(running.run_id)
+    unreaped.status, unreaped.exit_code = "unreaped", -1
+    unreaped.finished_at = "2026-09-26T00:00:00+00:00"
+    runner._save(unreaped)
+    seen[runner.get(running.run_id).status] = running.run_id
+
+    assert set(seen) == {"succeeded", "failed", "running", "unreaped"}
+    assert runner.damaged_runs() == []

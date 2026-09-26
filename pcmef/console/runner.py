@@ -4,7 +4,7 @@
 #         狀態寫入同目錄的 run.json；產物落在該 run 的 artifacts 目錄。
 # 檔案路徑: pcmef/console/runner.py
 # 產生時間: 2026-08-27 16:10 +08:00
-# 版本: v0.3.0
+# 版本: v0.3.1
 # 功能說明: 讓網頁按一下就能跑模擬，而且跑的過程像在看終端機一樣逐行出現。
 #           每次執行都存成一筆有編號的紀錄，含當時用的完整參數與完整輸出。
 # 模組定位: Console 的執行層。formal run 自 AMD-008 起可由此觸發，但
@@ -40,6 +40,13 @@
 #     它算不算正式執行、能不能刪 —— 那正是讀不出來的東西。
 #   - 不得刪除讀不出來的紀錄。它是不是一次性 Formal E2、跑完沒有、
 #     行程收掉沒有，全都無從確認。
+#   - **不得讓反序列化補欄位。** `from_json()` 只接受完整的十個欄位；
+#     缺一個就是損壞。`{"run_id", "kind": "formal_e2", "status": "failed"}`
+#     若被補成 `params={}`，`protected` 就把它讀成預演，一筆可能是
+#     一次性 Formal E2 證據的紀錄於是變成可以刪。
+#   - v0.3.1 修正：run.json 必須帶完整 schema、已知 kind、合法且前後一致
+#     的生命週期，formal_e2 必須明確帶 mode；`protected` 不再把缺少的
+#     mode 當成預演；新紀錄一律寫下實際傳給 CLI 的 mode。對應 round 11。
 #   - v0.3.0 修正：run.json 改為原子替換；壞紀錄以 RunRecordDamaged /
 #     damaged_runs() 呈現，不再讓 Run、Results、Formal 整頁 500；
 #     初始紀錄寫不進去時留下 run_crash.txt 並以 RunLaunchError 拒絕啟動。
@@ -430,10 +437,15 @@ class RunRecord:
         能直接問這筆紀錄 —— 樣板拿不到 runner，而在樣板裡重寫一次
         `kind == 'formal_e2' and params.mode == 'formal'` 就會出現第二份
         判準，且畫面上那一份出錯時看起來完全正常（只是按鈕能按了）。
+
+        **說不出是預演，就當成正式。** 先前的判準是
+        `params.get("mode", "dry-run") == "formal"`：mode 不在的時候預設成
+        預演，於是一筆缺了 params 的 formal_e2 紀錄變成可以刪。只有**明確**
+        寫著 `"dry-run"` 的才不受保護。
         """
         return (
             self.kind == "formal_e2"
-            and str(self.params.get("mode", "dry-run")) == "formal"
+            and self.params.get("mode") != "dry-run"
         )
 
     def matches(self, query: str) -> bool:
@@ -461,12 +473,19 @@ class RunRecord:
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> RunRecord:
+        """**只接受完整的紀錄。** 缺任何一個欄位就是 KeyError，不補預設值。
+
+        先前這裡替缺的欄位補上 `params={}`、`command=[]`、`status="running"`
+        —— 補出來的值會直接參與「是不是正式執行」「跑完沒有」「能不能刪」
+        的判斷。驗證在 `parse_record()`；這裡是最後一道：就算有人繞過它，
+        反序列化本身也不會發明內容。
+        """
         return cls(
-            run_id=data["run_id"], kind=data["kind"], label=data.get("label", ""),
-            params=dict(data.get("params", {})), command=list(data.get("command", [])),
-            status=data.get("status", "running"), started_at=data.get("started_at", ""),
-            finished_at=data.get("finished_at"), exit_code=data.get("exit_code"),
-            note=data.get("note", ""),
+            run_id=data["run_id"], kind=data["kind"], label=data["label"],
+            params=dict(data["params"]), command=list(data["command"]),
+            status=data["status"], started_at=data["started_at"],
+            finished_at=data["finished_at"], exit_code=data["exit_code"],
+            note=data["note"],
         )
 
     def to_bytes(self) -> bytes:
@@ -482,6 +501,8 @@ class RunRecord:
 #: 接受成對的清單。寬鬆在讀取正常紀錄時無害，在讀取壞紀錄時就是在
 #: 替它編內容 —— 而那份內容會決定它算不算正式執行、能不能刪。
 _RECORD_FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "run_id": (str,),
+    "kind": (str,),
     "label": (str,),
     "params": (dict,),
     "command": (list,),
@@ -491,6 +512,49 @@ _RECORD_FIELD_TYPES: dict[str, tuple[type, ...]] = {
     "exit_code": (int, type(None)),
     "note": (str,),
 }
+
+#: run.json 的完整 schema。**十個欄位一個都不能少。**
+#:
+#: 相容性依據（2026-09-27 查證）：`to_json()` 自第一版 2e95b59
+#: （2026-08-27）起逐字輸出這十個欄位，至今沒有改過；runner 的每一個
+#: 歷史版本寫終局狀態時都同時寫 `exit_code` 與 `finished_at`；磁碟上
+#: 既有的每一筆紀錄（本機與正式 UI 共用的 outputs/console/runs，共 8 筆，
+#: 最早 2026-08-26）都是這十個欄位。**沒有任何 legacy 變體**，所以沒有
+#: 任何欄位可以「舊版沒有、補預設值」。將來真的出現舊格式時，必須在
+#: 這裡明確列出它並說明處置，不得回到逐欄補預設值。
+RECORD_SCHEMA: tuple[str, ...] = tuple(_RECORD_FIELD_TYPES)
+
+#: 歷史上寫過的狀態。與 TERMINAL_STATUSES 加上 "running" 相同。
+_RECORD_STATUSES: frozenset[str] = TERMINAL_STATUSES | {"running"}
+
+#: formal_e2 的 mode 只能是這兩個之一，而且必須**寫在紀錄上**。
+FORMAL_MODES: tuple[str, ...] = ("dry-run", "formal")
+
+
+def _lifecycle_problem(data: Mapping[str, Any]) -> str:
+    """狀態與 exit_code / finished_at 是否前後一致。一致就回空字串。
+
+    依據是 runner 每一個歷史版本的寫法：running 兩者皆為 None；結束時
+    兩者同時寫入；succeeded 一定是 exit 0，failed 一定不是。前後矛盾的
+    紀錄說不出自己跑完沒有 —— 而「跑完沒有」決定能不能刪。
+    """
+    status, code, finished = data["status"], data["exit_code"], data["finished_at"]
+    if status == "running":
+        if code is not None or finished is not None:
+            return (
+                "run.json says 'running' but also records an exit code or a "
+                "finish time"
+            )
+        return ""
+    if not finished:
+        return f"run.json says {status!r} but records no finish time"
+    if code is None:
+        return f"run.json says {status!r} but records no exit code"
+    if status == "succeeded" and code != 0:
+        return f"run.json says 'succeeded' with exit code {code}"
+    if status == "failed" and code == 0:
+        return "run.json says 'failed' with exit code 0"
+    return ""
 
 
 def parse_record(raw: bytes, run_id: str) -> tuple[RunRecord | None, str]:
@@ -514,6 +578,15 @@ def parse_record(raw: bytes, run_id: str) -> tuple[RunRecord | None, str]:
         )
     if not isinstance(data, dict):
         return None, f"run.json holds a JSON {type(data).__name__}, not a record"
+    missing = [key for key in RECORD_SCHEMA if key not in data]
+    if missing:
+        # **缺的欄位不補。** 補出來的 params={} 會讓 protected 把一筆
+        # formal_e2 讀成預演，補出來的 status="running" 會讓它看起來還在跑。
+        return None, (
+            f"run.json is missing {', '.join(repr(k) for k in missing)}; every "
+            "record this runner has ever written carries all "
+            f"{len(RECORD_SCHEMA)} fields, and a missing one is not filled in"
+        )
     for key in ("run_id", "kind"):
         if not isinstance(data.get(key), str) or not data.get(key):
             return None, f"run.json has no usable {key!r}"
@@ -525,13 +598,33 @@ def parse_record(raw: bytes, run_id: str) -> tuple[RunRecord | None, str]:
             f"directory of run {run_id!r}"
         )
     for key, allowed in _RECORD_FIELD_TYPES.items():
-        if key in data and not isinstance(data[key], allowed):
+        if not isinstance(data[key], allowed):
             return None, (
                 f"run.json field {key!r} is a {type(data[key]).__name__}, "
                 f"expected {' or '.join(t.__name__ for t in allowed)}"
             )
-    if isinstance(data.get("exit_code"), bool):
+    if isinstance(data["exit_code"], bool):
         return None, "run.json field 'exit_code' is a bool, expected int or None"
+    if data["kind"] not in RUN_KINDS:
+        return None, (
+            f"run.json has kind {data['kind']!r}, which this console has never "
+            "run; what it is, and whether it is protected, cannot be established"
+        )
+    if not all(isinstance(part, str) for part in data["command"]):
+        return None, "run.json field 'command' holds something other than strings"
+    if data["status"] not in _RECORD_STATUSES:
+        return None, f"run.json has status {data['status']!r}, which is not a state"
+    lifecycle = _lifecycle_problem(data)
+    if lifecycle:
+        return None, lifecycle
+    if data["kind"] == "formal_e2" and data["params"].get("mode") not in FORMAL_MODES:
+        # 一次性 Formal E2 與可以重跑的預演，差別只在這一個欄位。
+        # 它不在、或不是兩者之一，就說不出這筆紀錄受不受保護。
+        return None, (
+            "run.json is a formal_e2 record whose params do not state its mode "
+            f"({data['params'].get('mode')!r}); whether it was the one-shot "
+            "Formal E2 cannot be established"
+        )
     return RunRecord.from_json(data), ""
 
 
@@ -864,6 +957,19 @@ class ConsoleRunner:
 
     # -- 執行 -------------------------------------------------------------
 
+    @staticmethod
+    def _recorded_params(spec: RunSpec) -> dict[str, Any]:
+        """要寫進 run.json 的參數。formal_e2 一律**明確**寫下 mode。
+
+        子行程拿到的 `--mode` 是 `_command()` 算出來的；表單沒送 mode 時
+        它是預演。把那個實際傳下去的值寫進紀錄，讀的人就不必 —— 也
+        不得 —— 替它猜。這不是補值：這是當下真的傳給 CLI 的參數。
+        """
+        params = dict(spec.params)
+        if spec.kind == "formal_e2":
+            params["mode"] = str(spec.params.get("mode", "dry-run"))
+        return params
+
     def allocate_run_id(self) -> str:
         """先取得 run id 與目錄，**尚未啟動任何行程**。
 
@@ -898,7 +1004,7 @@ class ConsoleRunner:
             label=spec.label or PRESETS.get(
                 spec.params.get("preset", ""), {}
             ).get("label", spec.kind),
-            params=dict(spec.params), command=command,
+            params=self._recorded_params(spec), command=command,
         )
         try:
             self._save(record)
@@ -922,7 +1028,7 @@ class ConsoleRunner:
             ) from error
         self.log_path(run_id).write_text("", encoding="utf-8")
         if spec.kind == "formal_e2":
-            self._write_formal_pointer(run_id, str(spec.params.get("mode", "dry-run")))
+            self._write_formal_pointer(run_id, record.params["mode"])
 
         try:
             process = subprocess.Popen(
