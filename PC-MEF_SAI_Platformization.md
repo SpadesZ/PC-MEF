@@ -3,12 +3,12 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.7.3  
+**文件版本：** v0.8.0  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
 **日期：** 2026-09-25  
 **取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
 **上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
-**對應實作：** branch `audit/execution-alias-and-ports-round8-20260925`，round 11 程式碼 `65959c7`（round 10 `a08fb53`、round 9 `5cbc43b`、round 8 `eb8ad9c`）  
+**對應實作：** branch `feat/phase3-extensibility-registry-20260927`，Phase 3 第一片 `d1cf266`；Execution / Action Layer 已 hard-lock 於 `65959c7`（文件 `463e52e`）  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
 **本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
 
@@ -1926,8 +1926,10 @@ pcmef/
 │  ├─ runs/                     [已建] 歸屬、邊界、stage events（§49.1/§49.4）
 │  ├─ lifecycle/                [已建] Phase 4 的 PC-MEF adapter
 │  │
-│  ├─ scenarios/                [規劃] registry / contracts / plugins
-│  ├─ sensors/                  [規劃] registry / contracts / adapters
+│  ├─ components.py             [已建] 元件身分、契約基礎、registry（§52）
+│  ├─ scenarios.py              [已建] Scenario Plugin 契約 v1（§52；將來可成套件）
+│  ├─ sensors.py                [已建] Sensor Adapter 契約 v1（§52；將來可成套件）
+│  ├─ catalog.py                [已建] 內建元件與 manifest 探索（§52）
 │  ├─ compatibility/            [規劃] Sensor × Scenario 矩陣
 │  └─ artifacts/                [規劃] artifact service
 │
@@ -2730,7 +2732,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 # 51. 目前實作狀態與已知缺口
 
-本節是 v0.7.3 的**現況快照**，會隨實作前進而過期；
+本節是 v0.8.0 的**現況快照**，會隨實作前進而過期；
 §0.4 的裁決規則在它過期之後仍然適用。
 
 ## 51.1 Final E2 Gate：1 / 8
@@ -2779,17 +2781,18 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 ## 51.3 測試現況
 
-| 範圍 | 結果（round 11，程式碼 `65959c7`，Windows、py 3.10.11） |
+| 範圍 | 結果（Phase 3 第一片，程式碼 `d1cf266`，Windows、py 3.10.11） |
 |---|---|
-| `tests/`（全量） | 3939 collected — 3888 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
-| `tests/console/` + `tests/platform/` + `tests/e2/` | 1141 collected；在上面那一輪全量中 **0 failed** |
-| `test_run_record_persistence.py`（round 10 + 11） | 88 passed |
-| Linux 容器（`pcmef-research:local`，repo 唯讀掛載） | 13 個 execution-layer 模組 396 passed、7 skipped、0 failed |
+| `tests/`（全量） | 4022 collected — 3971 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1199 collected；在上面那一輪全量中 **0 failed**（含 execution-layer 迴歸） |
+| `tests/platform/test_extension_registry.py`（§52） | 58 passed |
+| `tests/platform/`，Linux 容器（repo 唯讀掛載） | 284 passed |
+| `pcmef regression verify`（拒絕一切寫入的環境） | **IDENTICAL** |
 
-3939 = 3898（round 10）+ 41（round 11 在 `test_run_record_persistence.py`
-新增的測試）。全量是掛著只包住 `parse_record()` 的損壞稽核 plugin 跑的：
-`test_run_record_persistence.py` 以外**沒有任何測試**讀到損壞紀錄；檔案內
-讀到的 18 個測試函式全部是刻意製造損壞的。
+4022 = 3939（round 11）+ 58（`test_extension_registry.py`）+ 25
+（`test_repo_integrity.py` 對 5 個新檔各跑 5 項檔頭檢查）。
+round 11 的全量曾掛著只包住 `parse_record()` 的損壞稽核 plugin 跑過：
+`test_run_record_persistence.py` 以外沒有任何測試讀到損壞紀錄。
 
 - 13 個 failure 是**歷史既有**、與平台化無關的科學程式碼項目：
   `test_paired` ×2、`test_calibration_objective` ×5、
@@ -2825,9 +2828,141 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 4. **科學完成點的剩餘窗口**（§49.4）：executor 回來到立旗之間的
    直譯器檢查點；executor 內部 `mark_complete` 之後的 progress
    callback；無法攔截的行程終止（SIGTERM / TerminateProcess）。
-5. **Phase 3 尚未開始**：`scenarios/`、`sensors/`、`compatibility/`、
-   `artifacts/` 四個子套件尚未實作（§39），
-   因此 §7 / §8 的 Wizard、§10 的相容矩陣、UAT-01~03 都還不能跑。
+5. **Phase 3 只完成第一片**（§52）：Scenario Plugin / Sensor Adapter 的
+   registry 與契約已建；`compatibility/` 與 `artifacts/` 尚未實作，
+   §7 / §8 的 Wizard、§10 的相容矩陣、UAT-01~03 仍不能跑（§52.7）。
+
+> **Execution / Action Layer 的狀態：** 獨立審查已判定 hard-lock
+> （實作 `65959c7`、文件 `463e52e`）。第 2~4 項為接受的限制。
+
+---
+
+# 52. Phase 3 第一片：Scenario Plugin / Sensor Adapter 的 registry 與契約（v0.8.0）
+
+Phase 3（§37）的第一片只做**地基**：讓「情境」與「感測器」成為平台上
+具名、有版本、可驗證、可探索的元件，而不是畫面上寫死的選項。
+compatibility matrix（§10）、Wizard（§7.2 / §8.2）與 IR / 另一顆 ToF 的
+正式 adapter 之後都讀這一層，而不是由它們定義這一層。
+
+> **起點：** Execution / Action Layer 已由獨立審查判定 hard-lock
+> （實作 `65959c7`、文件 `463e52e`）。§51.4 列的執行層邊界為接受的限制；
+> 除非出現新的、可重現的 P0 / P1，本里程碑不再動執行層。
+
+## 52.1 落點與範圍
+
+| 模組 | 內容 |
+|---|---|
+| `pcmef/platform/components.py` | 元件身分與版本、參數規格、嚴格欄位讀取、錯誤型別、`ComponentRegistry` |
+| `pcmef/platform/scenarios.py` | Scenario Plugin 契約 `pcmef.scenario_plugin/v1` 與碩論四類的描述 |
+| `pcmef/platform/sensors.py` | Sensor Adapter 契約 `pcmef.sensor_adapter/v1` 與碩論 RGB / ToF 的描述 |
+| `pcmef/platform/catalog.py` | 內建元件、manifest 探索、拒絕清單、實作驗證 |
+
+**沒有修改任何既有模組**（包含 UI、console、scientific core）。依 §38.3，
+四個模組只是包裝層；§39 建議的 `scenarios/`、`sensors/` 子套件以模組
+起步，匯入路徑將來改成套件時不變。
+
+## 52.2 身分與契約
+
+- **唯一鍵是 kind + id + version。** id 必須小寫且有命名空間
+  （`acme.ir-camera`），版本必須是嚴格的 `MAJOR.MINOR.PATCH`。
+- **`pcmef.` 是保留命名空間**，只有碩論的內建元件能用；manifest 用了
+  一律拒絕 —— 否則一份檔案就能以碩論元件的名字（甚至更高的版本）出現。
+- §28 Plugin Governance 的欄位在 v1 中為**必填**：id、version、author、
+  參數規格（數值型必須有單位，無因次寫 `"1"`）、dependencies、
+  known_limitations；provenance 由平台計算（來源與內容 sha256）。
+- **未知欄位一律拒絕**（`capabilites` 這種拼錯不會被默默忽略）；JSON 內
+  重複的鍵、`NaN`、非 UTF-8 也拒絕。
+
+**Scenario Plugin v1**（Appendix B 的子集）：`display_name`、`category`
+（§7.2 Step 1 的封閉列舉）、`description`、`label_role`（分類標籤**或**
+環境狀態，恰好一種）、`physics`（`template_id` / `implementation` /
+`parameters`）、`declared_sensor_families`。物理支援由定義**推導**：
+
+| 定義 | `physics.support` | 意義（§7.3） |
+|---|---|---|
+| 有已知模板 | `template_backed` | 現有模擬器能表示 |
+| 有實作 | `plugin_implemented` | 有自己的 physics 實作 |
+| 兩者皆無 | `plugin_required` | 只是定義，不能模擬 |
+
+已知模板由 `MediumPreset` 推導（`pcmef.medium.empty / water / bubbly /
+misty`）；未知模板一律拒絕，**不退回預設 medium**。manifest 不得以碩論的
+類別名稱當 `classification_label`（ACC-SCN-04）。
+
+**Sensor Adapter v1**（§8.3、Appendix C 的子集）：`family`（§8.2 的封閉
+列舉）、`device_model`、`parameters`、`capabilities`（`simulate` /
+`ingest`，至少一個為真）、`implementations`（**宣告為真就必須指到
+`module:attribute`，宣告為假就不得有**）、`observation`（schema id 與
+版本、版面、形狀、每個通道的單位、取樣間隔或說明）、`quality_signals`
+（不得與預測輸出或觀測通道同名）。§8.3 的 `visualize()`、
+`summarize_evidence()`、`perception_interface()` 不在 v1 —— 它們隨
+Evidence Contract（§9）那一片加入。
+
+## 52.3 探索
+
+- 來源只有兩種：**碩論的內建元件**，與呼叫端**明確指定**的 manifest
+  資料夾（只讀 `.json`）。沒有任何隱含的搜尋路徑。
+- **不匯入任何 plugin 程式碼。** 探索只讀資料；確認宣告的實作真的存在
+  是另一個明確步驟（`verify_implementations()`），而且「找得到」也不代表
+  科學上正確。
+- **決定性：** 同一組檔案不論資料夾順序、檔案列舉順序，結果逐字相同。
+  兩份 manifest 宣告同一個 kind + id + version，或兩個情境搶同一個
+  classification_label —— **每一方都拒絕**，不由檔名排序決定誰贏。
+- 同一個 id 的不同版本可以並存；查詢時若有多個版本而未指定，丟
+  `AmbiguousVersion`，**registry 從不替呼叫端挑版本**。
+- 找不到就是 `UnknownComponent`，**永遠不退回碩論的預設元件**。
+- 資料夾不存在、裡面有非 `.json` 檔，一律列入拒絕清單，不默默略過；
+  `raise_for_rejections()` 提供嚴格模式。
+- 沒有模組層級的 registry。「匯入即註冊」讓結果取決於匯入順序
+  （§49.3 已被咬過一次）；這裡每次都由 `discover()` 明確組出、凍結。
+
+## 52.4 「存在」與「相容」是兩件事
+
+- 每個元件的 `describe()` 都帶 `compatibility: {assessed: false}` 與說明：
+  註冊只斷言契約形狀正確。
+- `declared_sensor_families` 是作者的**宣告**；註冊一個 IR adapter 不會
+  讓任何情境「支援 IR」，一個宣告支援 ToF 的 `plugin_required` 情境
+  也依然不能模擬。
+- 相容性由下一片的 compatibility matrix（§10 的六值 status）判定。
+
+## 52.5 碩論的描述（zero-drift）
+
+- 四個情境 `pcmef.scenario.{empty,water-filled,bubbly,misty}` 由
+  `CLASS_ORDER` 與 `MediumPreset.for_class()` 推導，`thesis_scenarios()`
+  的順序即 `CLASS_ORDER`。**registry 的列舉順序依 id，不是類別順序**
+  （Appendix A 第 4 條）。
+- **不複製任何物理參數**：參數屬於凍結的 `ScenarioConfig` 與校準
+  （Appendix A 第 2 條），內建情境的 `parameters` 為空並在
+  known_limitations 說明。
+- `pcmef.sensor.tof-vl53l0x`：通道順序與形狀由 `TOF_SCHEMA` /
+  `TOF_RECORDING_SHAPE` 推導；`sigma_like` 標明是 surrogate 自建的
+  不確定度（mm），**不是** VL53L0X 內部 Sigma 暫存器（NOTE-010）；取樣
+  間隔不寫死（各來源不一致，見 `pcmef provenance audit-timing`）。
+  simulate → `pcmef.simulation.paired:generate_paired_sample`，ingest →
+  `pcmef.adapters.edge_impulse:EdgeImpulseAdapter`（目前唯一符合
+  (500, 4) 的真實資料來源）。
+- `pcmef.sensor.rgb-camera`：simulate → 同一個成對生成器；**沒有 ingest**
+  （不存在 RGB 的真實資料讀取路徑，因此不宣告）。
+- 驗證：建立 registry 前後常數不變；`pcmef regression verify` =
+  **IDENTICAL**（在拒絕一切寫入的環境下執行）；受保護樹雜湊不變。
+
+## 52.6 給下一片的 metadata
+
+`catalog.discover(dirs).describe()` 產出可 JSON 序列化的結構：情境的
+分類、標籤角色、物理支援、宣告的感測家族；感測器的家族、能力、實作指向、
+觀測 schema（通道與單位、形狀、時間軸）、quality signals；每個元件的
+provenance（來源與內容 sha256）與「未評估相容性」。
+`sensors.compare_observations(a, b)` 列出兩個 adapter 在 schema、版面、
+形狀、通道、單位與取樣間隔上的差異 —— UAT-03 要求的「同為 ToF 不等於
+等價」。
+
+## 52.7 尚未做（依 Phase 3 的順序）
+
+1. Compatibility matrix（§10）：讀本層 metadata，給出六值 status。
+2. IR / 另一顆 ToF 的正式 adapter 與 Evidence Contract（§9）。
+   本片只有 `tests/platform/fixtures/extensions/` 裡的測試範例，
+   其實作刻意不存在。
+3. Wizard 與相容性畫面（§7.2 / §8.2）。
+4. §22 的 SQLite 登錄、§28 Formal Profile 前的 governance 步驟 2~6。
 
 ---
 
@@ -2852,7 +2987,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 術語（Research Profile vs Project）與導航（13 vs 5）兩項不一致，
 裁決均為**以 CURRENT 為準**，已寫入 §20。
 
-## G.2 round 2~11 新增（原 delta 稽核未涵蓋）
+## G.2 round 2~11 與 Phase 3 新增（原 delta 稽核未涵蓋）
 
 | 輪次 | 主題 | 落點 |
 |---|---|---|
@@ -2876,6 +3011,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 | r9 | `run.json` 非原子寫入（發現、未修） | §51.4 第 2 項 |
 | r10 | run.json 原子替換、失敗保留上一份、壞紀錄隔離與刪除拒絕 | §49.6 |
 | r11 | 完整 schema、生命週期一致、formal mode 必須明寫；反序列化不補欄位 | §49.6 |
+| P3-1 | Scenario Plugin / Sensor Adapter 的 registry、契約 v1 與探索 | §52 |
 
 ## G.3 v0.6.0 原樣沿用、未改動的章節
 
