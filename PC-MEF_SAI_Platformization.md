@@ -3,12 +3,12 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.8.0  
+**文件版本：** v0.9.0  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
-**日期：** 2026-09-25  
+**日期：** 2026-09-27  
 **取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
 **上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
-**對應實作：** branch `feat/phase3-extensibility-registry-20260927`，Phase 3 第一片 `d1cf266`；Execution / Action Layer 已 hard-lock 於 `65959c7`（文件 `463e52e`）  
+**對應實作：** branch `feat/phase3-extensibility-registry-20260927`，Phase 3 第二片 `fd75d28`（第一片 `d1cf266`）；Execution / Action Layer 已 hard-lock 於 `65959c7`（文件 `463e52e`）  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
 **本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
 
@@ -765,6 +765,13 @@ Status enum：
 - BLOCKED
 
 使用者選到不相容組合時，不到執行才報錯，而是在 Profile Builder 立即顯示。
+
+> **v0.9.0：** 判斷層已實作（`pcmef/platform/compatibility.py`），規則見
+> **§53**；Profile Builder 的即時顯示尚未接上。上表是 v0.6.0 的**示意**，
+> 不是規格：矩陣沒有 `Pending` 這個值；IR / Thermal 那兩欄的實際狀態取決於
+> 有沒有註冊該家族的 adapter、實作驗證是否通過（§53.4）；表中的 Sand 假設
+> 它有 RGB 可用的模板，而測試 fixture 的 Sand 沒有任何模板，因此模擬用途
+> 一律是 `PLUGIN_REQUIRED`（§53.7）。
 
 ---
 
@@ -1930,7 +1937,7 @@ pcmef/
 │  ├─ scenarios.py              [已建] Scenario Plugin 契約 v1（§52；將來可成套件）
 │  ├─ sensors.py                [已建] Sensor Adapter 契約 v1（§52；將來可成套件）
 │  ├─ catalog.py                [已建] 內建元件與 manifest 探索（§52）
-│  ├─ compatibility/            [規劃] Sensor × Scenario 矩陣
+│  ├─ compatibility.py          [已建] Sensor × Scenario 矩陣（§53；將來可成套件）
 │  └─ artifacts/                [規劃] artifact service
 │
 ├─ console/                     [已建] 五入口、run 分頁、SSE
@@ -2732,7 +2739,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 # 51. 目前實作狀態與已知缺口
 
-本節是 v0.8.0 的**現況快照**，會隨實作前進而過期；
+本節是 v0.9.0 的**現況快照**，會隨實作前進而過期；
 §0.4 的裁決規則在它過期之後仍然適用。
 
 ## 51.1 Final E2 Gate：1 / 8
@@ -2781,16 +2788,19 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 ## 51.3 測試現況
 
-| 範圍 | 結果（Phase 3 第一片，程式碼 `d1cf266`，Windows、py 3.10.11） |
+| 範圍 | 結果（Phase 3 第二片，程式碼 `fd75d28`，Windows、py 3.10.11） |
 |---|---|
-| `tests/`（全量） | 4022 collected — 3971 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
-| `tests/console/` + `tests/platform/` + `tests/e2/` | 1199 collected；在上面那一輪全量中 **0 failed**（含 execution-layer 迴歸） |
-| `tests/platform/test_extension_registry.py`（§52） | 58 passed |
-| `tests/platform/`，Linux 容器（repo 唯讀掛載） | 284 passed |
+| `tests/`（全量） | 4098 collected — 4047 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1265 collected；在上面那一輪全量中 **0 failed**（含 execution-layer 迴歸） |
+| `tests/platform/test_compatibility_matrix.py`（§53） | 55 passed |
+| `tests/platform/test_extension_registry.py`（§52、§53.8） | 69 passed |
+| `tests/platform/`，Windows / Linux 容器（repo 唯讀掛載） | 350 passed / 350 passed |
 | `pcmef regression verify`（拒絕一切寫入的環境） | **IDENTICAL** |
 
-4022 = 3939（round 11）+ 58（`test_extension_registry.py`）+ 25
-（`test_repo_integrity.py` 對 5 個新檔各跑 5 項檔頭檢查）。
+4098 = 4022（Phase 3 第一片）+ 55（`test_compatibility_matrix.py`）+
+11（`test_extension_registry.py` v0.1.1）+ 10（`test_repo_integrity.py`
+對 2 個新檔各跑 5 項檔頭檢查）。第一片（`d1cf266`）為 4022 collected、
+3971 passed，失敗清單相同。
 round 11 的全量曾掛著只包住 `parse_record()` 的損壞稽核 plugin 跑過：
 `test_run_record_persistence.py` 以外沒有任何測試讀到損壞紀錄。
 
@@ -2828,9 +2838,12 @@ round 11 的全量曾掛著只包住 `parse_record()` 的損壞稽核 plugin 跑
 4. **科學完成點的剩餘窗口**（§49.4）：executor 回來到立旗之間的
    直譯器檢查點；executor 內部 `mark_complete` 之後的 progress
    callback；無法攔截的行程終止（SIGTERM / TerminateProcess）。
-5. **Phase 3 只完成第一片**（§52）：Scenario Plugin / Sensor Adapter 的
-   registry 與契約已建；`compatibility/` 與 `artifacts/` 尚未實作，
-   §7 / §8 的 Wizard、§10 的相容矩陣、UAT-01~03 仍不能跑（§52.7）。
+5. **Phase 3 完成前兩片**（§52、§53）：Scenario Plugin / Sensor Adapter
+   的 registry 與契約、Sensor × Scenario 相容矩陣的判斷層已建；
+   `artifacts/`、Evidence Contract（§9）、IR / 另一顆 ToF 的正式 adapter
+   尚未實作。§7 / §8 的 Wizard 與相容性畫面尚未做，因此 UAT-01~03 仍不能
+   從前端走完；矩陣層面的判斷（UAT-01 第 5 步、UAT-02 第 3 步、UAT-03 的
+   差異與「不自動等價」）已有測試（§53.9）。
 
 > **Execution / Action Layer 的狀態：** 獨立審查已判定 hard-lock
 > （實作 `65959c7`、文件 `463e52e`）。第 2~4 項為接受的限制。
@@ -2922,7 +2935,8 @@ Evidence Contract（§9）那一片加入。
 - `declared_sensor_families` 是作者的**宣告**；註冊一個 IR adapter 不會
   讓任何情境「支援 IR」，一個宣告支援 ToF 的 `plugin_required` 情境
   也依然不能模擬。
-- 相容性由下一片的 compatibility matrix（§10 的六值 status）判定。
+- 相容性由下一片的 compatibility matrix（§10 的六值 status）判定
+  （v0.9.0 已實作，見 §53）。
 
 ## 52.5 碩論的描述（zero-drift）
 
@@ -2957,12 +2971,180 @@ provenance（來源與內容 sha256）與「未評估相容性」。
 
 ## 52.7 尚未做（依 Phase 3 的順序）
 
-1. Compatibility matrix（§10）：讀本層 metadata，給出六值 status。
+1. ~~Compatibility matrix（§10）：讀本層 metadata，給出六值 status。~~
+   v0.9.0 已完成，見 §53。
 2. IR / 另一顆 ToF 的正式 adapter 與 Evidence Contract（§9）。
    本片只有 `tests/platform/fixtures/extensions/` 裡的測試範例，
    其實作刻意不存在。
 3. Wizard 與相容性畫面（§7.2 / §8.2）。
 4. §22 的 SQLite 登錄、§28 Formal Profile 前的 governance 步驟 2~6。
+
+---
+
+# 53. Phase 3 第二片：Sensor × Scenario Compatibility Matrix（v0.9.0）
+
+§10 的相容矩陣，只做**判斷層**：給一份凍結的 registry，對每一個情境 ×
+每一個感測器 × 一種用途說出六種狀態之一，並附上涉及的身分與版本、以及
+一條一條的理由與證據，讓之後的 Profile Builder 與 Wizard 說得出「為什麼」。
+矩陣**消費** §52 的 metadata：不取代 registry、不複製碩論的科學常數，
+也不因為元件存在或家族相同就推論相容。
+
+## 53.1 落點與範圍
+
+| 檔案 | 變更 |
+|---|---|
+| `pcmef/platform/compatibility.py`（新） | 狀態、驗證紀錄、實作驗證報告、判斷規則、可 JSON 序列化的描述 |
+| `pcmef/platform/catalog.py` v0.1.1 | 新增 `verify_reference()`：一次驗一個實作指向，讓矩陣分得出 simulate 與 ingest；`verify_implementations()` 的輸出不變 |
+| `pcmef/platform/sensors.py` v0.1.1 | 觀測 schema 的維度一致、通道維度必須寫明、取樣間隔必須有限（§53.8） |
+| `pcmef/platform/components.py` v0.1.1 | 參數的 minimum / maximum 必須有限（§53.8） |
+
+沒有修改任何 stable module、UI 或 console；矩陣不被任何既有模組匯入，
+**尚未接到前端**。依 §38.3 以模組起步，將來改成 `compatibility/` 套件時
+匯入路徑不變。
+
+## 53.2 三樣輸入，全部由呼叫端明確給出
+
+1. **凍結的 registry**（`catalog.discover()`）。未凍結即拒絕。矩陣只讀，
+   建矩陣前後 `registry.describe()` 逐字相同。
+2. **`ImplementationReport`**：`verify(registry)` 明確匯入每一個宣告的
+   實作；`not_performed()` 明確不做。**只能由這兩個工廠產生** —— 手寫一份
+   「已驗證」會 `TypeError`，因為那等於沒有驗證。結果以「身分 + 能力」
+   為鍵並記下當時驗證的實作指向；同一個身分換了指向，舊結果不算數。
+   不要求驗證，矩陣就不匯入任何程式碼。
+3. **驗證紀錄 `ValidationRecord`**：用途 × 情境 (id, version) × 感測器
+   (id, version) × 驗證時的觀測 schema (id, version) × evidence × source。
+   建矩陣時逐筆檢查，**壞紀錄是拋出，不是略過**：
+   - 版本必須寫明 —— 沒寫就讓 registry 挑一個，等於紀錄自動跟著升版；
+   - 參照不到的身分 → `UnknownComponent`；
+   - 觀測 schema 與該感測器現在產生的不同、感測器根本沒有該用途需要的
+     能力、同一個配對重複、未知用途 → `ContractViolation`。
+
+碩論的 12 筆紀錄（§53.6）只是其中一份輸入，**不是預設**：呼叫端不傳，
+矩陣就不知道有它們。
+
+## 53.3 用途與狀態
+
+兩種用途：`simulation`（需要感測器的 simulate）與 `measurement`（需要
+ingest，讀真實資料）。同一個配對在兩種用途下可以不同 —— 碩論的 RGB 能
+模擬，但不存在真實資料的讀取路徑。
+
+| 狀態（由寬到嚴） | 在一格裡的意思 |
+|---|---|
+| `READY` | 確切版本的配對有驗證紀錄，本次評估的實作驗證通過，沒有任何保留理由 |
+| `TEMPLATE_SUPPORTED` | 模擬用途：情境由既有模板表示、實作已驗，但這個配對沒有驗證紀錄 |
+| `NEEDS_VALIDATION` | 路走得通但缺驗證：沒有紀錄、沒做實作驗證、情境沒宣告這個家族，或觀測與已驗證的同家族參考不同 |
+| `PLUGIN_REQUIRED` | 缺一個 plugin：情境沒有 physics（模擬用途）；或情境宣告的家族沒有任何 adapter（`unserved_families`） |
+| `UNSUPPORTED` | 這條路不存在：感測器沒有這個用途需要的能力 |
+| `BLOCKED` | 宣告了但壞了：宣告的實作匯入失敗或不可呼叫 |
+
+每一條規則產生一條理由（`code`、`limit`、`detail`、`evidence`），`limit`
+是它允許這一格最多到達的狀態。**一格的狀態取所有理由中最嚴的那一個，
+全部理由都保留。** `BLOCKED` 排在 `UNSUPPORTED` 之前（壞掉的宣告要先修），
+`UNSUPPORTED` 排在 `PLUGIN_REQUIRED` 之前（不能模擬的感測器，補了情境的
+physics plugin 也還是不能模擬）。
+
+## 53.4 判斷規則
+
+「不限」指該條理由的 `limit` 是 `READY`，也就是這一條不扣分。
+
+| # | 檢查 | 模擬 | 量測 |
+|---|---|---|---|
+| 1 | 感測器的能力 | 沒有 simulate → `UNSUPPORTED` | 沒有 ingest → `UNSUPPORTED` |
+| 2 | 該能力的實作 | 驗證失敗 → `BLOCKED`；未驗證 → `NEEDS_VALIDATION`；通過 → 不限 | 同左 |
+| 3 | 情境的 physics | `template_backed` → 不限；`plugin_implemented` → 對情境實作套用第 2 列；`plugin_required` → `PLUGIN_REQUIRED` | 不使用；仍記一條理由，證據是 physics support |
+| 4 | 家族宣告 | 情境宣告了 → 不限（只是證據）；沒宣告 → `NEEDS_VALIDATION` | 同左 |
+| 5 | 驗證紀錄 | 有確切紀錄 → 不限；沒有：`template_backed` → `TEMPLATE_SUPPORTED`，其他 → `NEEDS_VALIDATION` | 有 → 不限；沒有 → `NEEDS_VALIDATION` |
+| 6 | 同家族參考（僅在沒有紀錄時） | 與同情境、同用途、同家族的已驗證 adapter 以 `compare_observations()` 比對：有差異 → `NEEDS_VALIDATION`，差異逐項列為證據；完全相同 → 記一條理由，但不升級 | 同左 |
+
+因此 **`READY` 只有一條路**：確切版本的驗證紀錄 + 本次實作驗證通過 +
+情境宣告了這個家族 + physics 可用（模擬）。第 4 列只能降級、不能升級：
+一個驗證過、但情境沒宣告家族的配對仍是 `NEEDS_VALIDATION`，要把宣告寫進
+情境的新版本。
+
+## 53.5 邊界 → 規則 → 測試
+
+| 工作單的邊界 | 由誰守 | 測試（`tests/platform/test_compatibility_matrix.py`） |
+|---|---|---|
+| 註冊 ≠ 實作存在 | 第 2 列；fixtures 的實作刻意不存在 | `test_fixture_adapters_with_missing_code_are_blocked`、`test_a_validation_record_cannot_rescue_missing_code` |
+| 實作存在 ≠ 科學相容 | 第 5 列 | `test_the_tof_family_alone_is_not_enough`、`test_without_a_validation_record_nothing_is_ready` |
+| 同家族 ≠ 可互換 | 第 6 列；觀測完全相同也不升級 | `test_alt_tof_shows_its_differences_even_while_blocked`、`test_an_identical_observation_is_still_not_a_validated_pairing` |
+| `declared_sensor_families` 是證據不是判決 | 第 4 列只能降級 | `test_an_undeclared_family_needs_validation`；Sand 宣告了 ToF 仍是 `PLUGIN_REQUIRED` |
+| `plugin_required` 不因相容感測器而可模擬 | 第 3 列；連驗證紀錄都給了也一樣 | `test_sand_cannot_simulate_while_plugin_required` |
+| 身分不明一律失敗、不退回碩論預設 | `registry.get()` 的語意；紀錄必須寫版本 | `test_unknown_identities_never_fall_back_to_the_thesis`、`test_an_ambiguous_identity_must_name_its_version`、`test_a_bad_validation_record_is_refused_not_skipped` |
+| 實作驗證要明確 | 報告只能由兩個工廠產生；未驗證時沒有 `READY`；不要求就不匯入 | `test_without_implementation_verification_nothing_is_ready`、`test_a_hand_written_report_is_refused`、`test_the_matrix_imports_no_code_unless_asked`、`test_a_stale_report_does_not_verify_a_changed_reference` |
+| 驗證不隨升版繼承（Appendix A 第 7 條） | 紀錄綁確切版本 | `test_a_validation_does_not_carry_over_to_a_new_version` |
+
+這些測試另以 24 個 mutation 檢查過（把規則逐條弄壞，以及嚴格順序中每一對
+相鄰的狀態對調），每一個都至少讓一條測試失敗。
+
+## 53.6 碩論的迴歸錨點
+
+`thesis_validations()`：4 類 × {RGB 模擬、ToF 模擬、ToF 量測} = **12 筆**，
+身分全部是 `1.0.0`，情境 id 與 `thesis_scenarios()` 同樣由 `CLASS_ORDER`
+推導。沒有 RGB 量測的紀錄。紀錄只有身分與出處（E2 成對 benchmark；E1
+物理校準以真實 VL53L0X 為參考），**不含任何科學數值**。紀錄裡的觀測 schema
+id 若與內建 adapter 漂移，建矩陣時就會拋出，而不是默默失效。
+
+實作驗證通過並傳入這 12 筆時：
+
+| 碩論情境 × | 模擬 | 量測 |
+|---|---|---|
+| `pcmef.sensor.rgb-camera` | `READY` | `UNSUPPORTED`（沒有 ingest） |
+| `pcmef.sensor.tof-vl53l0x` | `READY` | `READY` |
+
+不做實作驗證 → 上表的 `READY` 全部變成 `NEEDS_VALIDATION`；
+不傳紀錄 → 模擬是 `TEMPLATE_SUPPORTED`、ToF 量測是 `NEEDS_VALIDATION`。
+
+## 53.7 Fixture 的結果
+
+`tests/platform/fixtures/extensions/` 的三個範例，實作刻意不存在。
+實作驗證通過、傳入碩論的 12 筆紀錄時：
+
+| 配對 | 模擬 | 量測 |
+|---|---|---|
+| 碩論情境 × `acme.ir-camera` | `UNSUPPORTED`（只能 ingest） | `BLOCKED`（`acme_ir` 不存在；另記「情境未宣告 infrared_camera」） |
+| 碩論情境 × `acme.tof-vl53l1x` | `UNSUPPORTED` | `BLOCKED`；與碩論 ToF 的差異（schema、shape、通道、取樣間隔）列為證據 |
+| 同上，但 ingest 指向解析得到的程式碼（測試變體） | — | `NEEDS_VALIDATION`：家族宣告了、程式碼也在，仍待驗證 |
+| 同上，給了驗證紀錄、程式碼不存在 | — | 仍是 `BLOCKED` |
+| `acme.sand` × RGB / ToF | `PLUGIN_REQUIRED`（連驗證紀錄都給了也一樣） | RGB `UNSUPPORTED`；ToF `NEEDS_VALIDATION` |
+| `acme.sand` × IR / alt-ToF | `UNSUPPORTED` | `BLOCKED` |
+| Sand 帶解析得到的 physics 實作（測試變體）× ToF | 無紀錄 `NEEDS_VALIDATION`；有紀錄 `READY`；physics 實作不存在 `BLOCKED` | — |
+
+情境宣告了、但沒有任何 adapter 的家族（例如 `thermal_camera`）列在
+`unserved_families`，狀態 `PLUGIN_REQUIRED`；標準 fixtures 下這份清單是空的。
+
+## 53.8 v1 觀測 schema 的收緊
+
+矩陣依觀測 metadata 判斷兩個 adapter 是否一致，因此先把 v1 契約裡明顯的
+自相矛盾補上（範圍刻意窄）：
+
+- **layout 與 shape 的維度數一致**：`image` 3 維、`sequence` 2 維、
+  `vector` 1 維，最後一維一律是通道數。
+- **通道維度不得是 `null`**：原本只擋「寫了但與通道數不符」，現在
+  「沒寫」也拒絕。
+- **`sampling_interval_s` 與參數的 `minimum` / `maximum` 必須是有限值。**
+  JSON 的 `1e999` 是合法的數字字面值，Python 讀成 `inf`，繞過既有的
+  `NaN` / `Infinity` 拒絕；直接呼叫 `parse_*` 傳入 `nan` 時，原本的
+  `<= 0` 與 `min > max` 比較永遠是 False。
+
+碩論兩個 adapter 與三個 fixture 在收緊後仍合契約，內建描述沒有改。
+對抗測試 11 條（`test_extension_registry.py` v0.1.1），其中 10 條在收緊前
+失敗；第 11 條確認所有出貨的觀測都寫明了通道數。
+
+## 53.9 對 UAT 的意義與尚未做
+
+矩陣層面已有測試的：UAT-01 第 5 步（Sand 的每一格與理由）、UAT-02 第 3 步
+（沒有 adapter 的家族明確是 `PLUGIN_REQUIRED`；註冊了但實作不存在的是
+`BLOCKED`）、UAT-03（差異逐項列出，同為 ToF 不自動等價）。**這些 UAT 仍
+不能從前端走完。**
+
+尚未做：
+
+1. Profile Builder 的即時顯示、§7.2 / §8.2 的 Wizard 與相容性畫面。
+2. IR / 另一顆 ToF 的正式 adapter 與 Evidence Contract（§9）。
+3. **驗證紀錄的持久化與審核**：目前由呼叫端傳入；誰可以新增一筆、evidence
+   如何綁到實際的 run，屬於 §22 的 SQLite 登錄與 §28 governance 步驟 2~6。
+4. `artifacts/`。
 
 ---
 
@@ -3012,12 +3194,14 @@ provenance（來源與內容 sha256）與「未評估相容性」。
 | r10 | run.json 原子替換、失敗保留上一份、壞紀錄隔離與刪除拒絕 | §49.6 |
 | r11 | 完整 schema、生命週期一致、formal mode 必須明寫；反序列化不補欄位 | §49.6 |
 | P3-1 | Scenario Plugin / Sensor Adapter 的 registry、契約 v1 與探索 | §52 |
+| P3-2 | Sensor × Scenario 相容矩陣；v1 觀測 schema 的維度一致與有限數值 | §53 |
 
 ## G.3 v0.6.0 原樣沿用、未改動的章節
 
 §0.3 名詞定義、§3.1 七條架構原則、§4.1/§4.2 Profile 狀態機與內容、
 §5 Thesis Profile Protection Contract、§6.2 TGR-01~12 比對項、
-§7/§8 Wizard UX、§9/§10 Evidence Contract 與相容矩陣、
+§7/§8 Wizard UX、§9 Evidence Contract、§10 相容矩陣（v0.9.0 只在節末
+加註實作落點）、
 §11 Basic/Advanced Mode、§23/§24 Immutable 欄位政策與 Clone workflow、
 §28 Plugin Governance、§34 UAT-01~06、§38 Change Budget、
 §40 Frontend Design Rules、Appendix A~F。
