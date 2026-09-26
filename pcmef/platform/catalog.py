@@ -4,7 +4,7 @@
 #         被拒絕的清單。**不寫任何檔案，也不匯入任何 plugin 程式碼。**
 # 檔案路徑: pcmef/platform/catalog.py
 # 產生時間: 2026-09-27 10:25 +08:00
-# 版本: v0.1.0
+# 版本: v0.1.1
 # 功能說明: Scenario Plugin 與 Sensor Adapter 的探索：內建的碩論元件，加上
 #           明確指定的 manifest 資料夾；任何不合契約、身分衝突、標籤衝突的
 #           manifest 都被拒絕並說出原因 —— 不忽略、不退回預設。
@@ -26,6 +26,9 @@
 #   - 不得忽略資料夾裡的非 .json 檔或讀不到的資料夾：它們一律列為拒絕。
 #     默默略過一個 `.yaml` manifest，作者會以為它已經註冊了。
 #   - 不得在這裡加入任何「找不到就用 PC-MEF 預設」的路徑。
+#   - v0.1.1 新增：verify_reference()，一次驗證一個實作指向，供
+#     compatibility matrix 分別知道 simulate 與 ingest 是否可用；
+#     verify_implementations() 的行為不變。對應 Phase 3 第二片。
 #   - v0.1.0 新增：首版，對應 SAI Phase 3 第一片。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_extension_registry.py -v
@@ -55,6 +58,7 @@ __all__ = [
     "discover",
     "read_manifest",
     "verify_implementations",
+    "verify_reference",
 ]
 
 _PARSERS = {
@@ -283,11 +287,18 @@ def verify_implementations(component: Any) -> tuple[str, ...]:
     for name, reference in sorted(references.items()):
         if reference is None:
             continue
-        try:
-            target = resolve_entrypoint(reference)
-        except Exception as error:  # noqa: BLE001 - 任何匯入失敗都是一個問題
-            problems.append(f"{name} {reference}: {type(error).__name__}: {error}")
-            continue
-        if not callable(target):
-            problems.append(f"{name} {reference} is not callable")
+        problem = verify_reference(reference)
+        if problem:
+            problems.append(f"{name} {problem}")
     return tuple(problems)
+
+
+def verify_reference(reference: str) -> str:
+    """**明確地**匯入一個 `module:attribute`。空字串代表找得到而且可呼叫。"""
+    try:
+        target = resolve_entrypoint(reference)
+    except Exception as error:  # noqa: BLE001 - 任何匯入失敗都是一個問題
+        return f"{reference}: {type(error).__name__}: {error}"
+    if not callable(target):
+        return f"{reference} is not callable"
+    return ""

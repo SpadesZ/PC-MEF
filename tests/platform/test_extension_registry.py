@@ -4,7 +4,7 @@
 #         其餘一律寫在 tmp_path。不寫入任何 repo 路徑。
 # 檔案路徑: tests/platform/test_extension_registry.py
 # 產生時間: 2026-09-27 10:50 +08:00
-# 版本: v0.1.0
+# 版本: v0.1.1
 # 功能說明: SAI Phase 3 第一片的驗收：Scenario Plugin 與 Sensor Adapter 能
 #           註冊並被決定性地探索；重複與衝突一律拒絕；不合契約即失敗而不
 #           退回預設；碩論的行為與常數不變；registry 提供下一片
@@ -21,6 +21,9 @@
 #     要斷言原因裡點到那個問題 —— 否則一條因為別的錯而被拒絕的 manifest
 #     會讓測試通過，而它要守的那一條規則其實沒人在守。
 #   - 不得把 fixtures 目錄裡的範例當成正式 plugin；它們的實作刻意不存在。
+#   - v0.1.1 新增：觀測 schema 的維度一致性（layout 與 shape 的維度數、
+#     通道維度必須寫明）與非有限數值（JSON 的 1e999、直接傳入的 inf / nan）
+#     的對抗測試。對應 Phase 3 第二片。
 #   - v0.1.0 新增：首版，對應 SAI Phase 3 第一片。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_extension_registry.py -v
@@ -386,6 +389,16 @@ MALFORMED = {
                            "timing_note must say why"),
     "negative_interval": (TOF, _set(["observation", "sampling_interval_s"], -1),
                           "must be positive"),
+    "image_shape_missing_a_dimension": (SENSOR, _set(["observation", "shape"], [None, 1]),
+                                        "'image' needs a 3-dimensional shape"),
+    "sequence_shape_with_an_extra_dimension": (
+        TOF, _set(["observation", "shape"], [None, None, 4]),
+        "'sequence' needs a 2-dimensional shape"),
+    "vector_layout_with_a_sequence_shape": (
+        TOF, _set(["observation", "layout"], "vector"),
+        "'vector' needs a 1-dimensional shape"),
+    "free_channel_dimension": (TOF, _set(["observation", "shape"], [None, None]),
+                               "leaves the channel dimension free"),
     "bool_as_number": (TOF, _set(["parameters", "fov_deg", "minimum"], True),
                        "is a bool"),
     "duplicate_channels": (TOF, lambda d: d["observation"]["channels"][1].update(
@@ -442,6 +455,58 @@ def test_a_manifest_that_is_not_utf8_is_refused(tmp_path):
     (directory / "latin1.json").write_bytes(b'{"id": "acme.caf\xe9"}')
     (rejection,) = catalog.discover([directory]).rejections
     assert "not UTF-8" in rejection.reasons[0]
+
+
+#: JSON 沒有 inf，但 `1e999` 是合法的數字字面值，Python 讀成 inf —— 它繞過
+#: NaN / Infinity 常數的拒絕，所以要在契約裡另外擋。
+OVERFLOW = {
+    "interval": (TOF, '"sampling_interval_s": 0.0333', '"sampling_interval_s": 1e999',
+                 "observation.sampling_interval_s must be a finite number"),
+    "maximum": (TOF, '"maximum": 27', '"maximum": 1e999',
+                "parameters.fov_deg.maximum must be a finite number"),
+    "minimum": (SCENARIO, '"minimum": 0.05', '"minimum": -1e999',
+                "physics.parameters.particle_size_mm.minimum must be a finite number"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OVERFLOW))
+def test_an_overflowing_json_number_is_refused(tmp_path, name):
+    base, before, after, reason = OVERFLOW[name]
+    text = json.dumps(_fixture(base), ensure_ascii=False)
+    assert text.count(before) == 1, "the fixture no longer contains the value to replace"
+    _write(tmp_path / "p", f"{name}.json", text.replace(before, after))
+
+    (rejection,) = catalog.discover([tmp_path / "p"]).rejections
+    assert reason in " ".join(rejection.reasons), rejection.reasons
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_non_finite_values_are_refused_even_without_json(value):
+    """直接呼叫 parse_*：nan 比較永遠是 False，舊的「<= 0」與「min > max」都擋不住。"""
+    tof = _fixture(TOF)
+    tof["observation"]["sampling_interval_s"] = value
+    with pytest.raises(ContractViolation, match="sampling_interval_s must be a finite"):
+        sensors.parse_sensor(tof, source="manifest", location="direct")
+
+    tof = _fixture(TOF)
+    tof["parameters"]["fov_deg"]["minimum"] = value
+    with pytest.raises(ContractViolation, match="fov_deg.minimum must be a finite"):
+        sensors.parse_sensor(tof, source="manifest", location="direct")
+
+    sand = _fixture(SCENARIO)
+    sand["physics"]["parameters"]["fill_level"]["maximum"] = value
+    with pytest.raises(ContractViolation, match="fill_level.maximum must be a finite"):
+        scenarios.parse_scenario(sand, source="manifest", location="direct")
+
+
+def test_every_shipped_observation_states_its_channel_count():
+    """收緊之後，碩論的兩個 adapter 與 fixtures 仍然合契約，而且維度一致。"""
+    registry = catalog.discover([FIXTURES]).registry
+    ranks = {"image": 3, "sequence": 2, "vector": 1}
+    for sensor in registry.components(KIND_SENSOR):
+        observation = sensor.observation
+        assert len(observation.shape) == ranks[observation.layout], sensor.identity
+        assert observation.shape[-1] == len(observation.channels), sensor.identity
 
 
 def test_unknown_lookups_never_fall_back_to_a_default():

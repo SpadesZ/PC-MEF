@@ -4,7 +4,7 @@
 #         ToF。**不寫任何東西，也不被任何 stable module 匯入。**
 # 檔案路徑: pcmef/platform/sensors.py
 # 產生時間: 2026-09-27 09:45 +08:00
-# 版本: v0.1.0
+# 版本: v0.1.1
 # 功能說明: Sensor Adapter 的契約（SAI §8.3、Appendix C）：身分、能力、實作
 #           指向、參數、版本化且單位明確的觀測 schema、quality signal；以及
 #           碩論 RGB 與 ToF 兩個內建 adapter 的描述。
@@ -26,6 +26,11 @@
 #   - 不得讓 quality signal 與預測機率同名或與觀測通道同名：§8.3 要求兩者
 #     分開，混在一起之後下游分不出哪個是品質、哪個是判斷。
 #   - 不得因為 family 相同就把兩個 adapter 當成等價；比較一律看觀測 schema。
+#   - **不得放寬觀測 schema 的維度一致性。** image 是 H×W×C、sequence 是
+#     T×C、vector 是 C，最後一維一律是寫明的通道數；compatibility matrix
+#     依這份 metadata 判斷兩個 adapter 的觀測是否一致。
+#   - v0.1.1 修正：layout 與 shape 的維度數必須一致、通道維度必須寫明、
+#     sampling_interval_s 必須是有限值。對應 Phase 3 第二片。
 #   - v0.1.0 新增：首版，對應 SAI Phase 3 第一片。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_extension_registry.py -v
@@ -33,6 +38,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -75,6 +81,9 @@ SENSOR_FAMILIES: tuple[str, ...] = (
 
 #: 觀測的版面。image：H×W×C；sequence：T×C；vector：C。
 LAYOUTS: tuple[str, ...] = ("image", "sequence", "vector")
+
+#: 每一種版面的維度數。**最後一維一律是通道數。**
+_LAYOUT_RANK: dict[str, int] = {"image": 3, "sequence": 2, "vector": 1}
 
 #: 預測輸出的名字。quality signal 不得用它們（§8.3：品質訊號必須與
 #: predictive probability 分開）。
@@ -211,12 +220,27 @@ def _parse_observation(data: Any, problems: list[str]) -> ObservationSchema | No
     names = [c.name for c in channels]
     if len(set(names)) != len(names):
         problems.append(f"observation.channels repeat a name: {names}")
+    if layout in _LAYOUT_RANK and shape and len(shape) != _LAYOUT_RANK[layout]:
+        problems.append(
+            f"observation.layout {layout!r} needs a {_LAYOUT_RANK[layout]}-dimensional "
+            f"shape (the last dimension is the channel count), got {len(shape)}"
+        )
+    if shape and shape[-1] is None:
+        # 通道數是這份 schema 自己知道的事；寫成 null 等於說「不知道有幾個
+        # 通道」，而 channels 清單明明列出來了。
+        problems.append(
+            "observation.shape leaves the channel dimension free; the last "
+            "dimension must state the channel count"
+        )
     if shape and isinstance(shape[-1], int) and shape[-1] != len(channels):
         problems.append(
             f"observation.shape ends in {shape[-1]} but {len(channels)} channel(s) "
             "are declared; the schema contradicts itself"
         )
-    if interval is not None and interval <= 0:
+    if interval is not None and not math.isfinite(interval):
+        # JSON 的 1e999 會被讀成 inf，不經過 NaN / Infinity 的檢查。
+        problems.append("observation.sampling_interval_s must be a finite number")
+    elif interval is not None and interval <= 0:
         problems.append("observation.sampling_interval_s must be positive or null")
     if interval is None and not timing_note:
         problems.append(

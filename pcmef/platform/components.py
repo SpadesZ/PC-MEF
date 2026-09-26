@@ -4,7 +4,7 @@
 #         匯入 —— 它是新加的包裝層，不是 scientific core 的一部分。
 # 檔案路徑: pcmef/platform/components.py
 # 產生時間: 2026-09-27 09:30 +08:00
-# 版本: v0.1.0
+# 版本: v0.1.1
 # 功能說明: Scenario Plugin 與 Sensor Adapter 共用的地基：元件身分與版本、
 #           參數規格、嚴格讀取 manifest 欄位、錯誤型別，以及一個決定性、
 #           可凍結、重複即拒絕的 registry。
@@ -29,6 +29,8 @@
 #   - 不得讓 register() 覆蓋既有的鍵。同一個 kind + id + version 只能有一份。
 #   - 不得把「註冊成功」寫成「科學上相容」。registry 只斷言契約形狀正確；
 #     相容性是 §10 compatibility matrix 另外的判斷（describe() 會明說）。
+#   - v0.1.1 修正：參數的 minimum / maximum 必須是有限值（JSON 的 1e999
+#     會被讀成 inf）。對應 Phase 3 第二片。
 #   - v0.1.0 新增：首版，對應 SAI Phase 3 第一片（registry / contract 基礎）。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_extension_registry.py -v
@@ -37,6 +39,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
@@ -334,6 +337,9 @@ def parse_parameters(data: Any, where: str,
             )
         if not numeric and (minimum is not None or maximum is not None):
             problems.append(f"{at}: minimum / maximum only apply to numeric parameters")
+        for bound, value in (("minimum", minimum), ("maximum", maximum)):
+            if _is_number(value) and not math.isfinite(value):
+                problems.append(f"{at}.{bound} must be a finite number")
         if _is_number(minimum) and _is_number(maximum) and minimum > maximum:
             problems.append(f"{at}: minimum {minimum} exceeds maximum {maximum}")
         specs.append(ParameterSpec(name, kind, unit, required, minimum, maximum,
