@@ -3,12 +3,12 @@
 ## Extensible Research Workbench / Platformization Specification
 ### PC-MEF 可擴充多模態研究工作台—平台化、前端互動、研究設定檔與正式實驗隔離規格
 
-**文件版本：** v0.9.0  
+**文件版本：** v0.9.1  
 **文件性質：** Platformization / Extensibility / User Experience / Formal-Isolation SAI  
-**日期：** 2026-09-27  
+**日期：** 2026-09-29  
 **取代：** `PC-MEF_SAI_v0.6.0_Extensible-Research-Workbench_Platformization.md`（2026-09-01）與 `docs/SAI_v0.6.0_TO_CURRENT_DELTA.md`（2026-09-06）。兩者內容已併入本文件，原檔移除。  
 **上位相容文件：** `PC-MEF_SAI_v0.5.0_LLM-Setup_Task-Binding-Integrated`（原始碼與 NOTES 中代號 `SRC-SAI`，與本文件**不是同一份**）  
-**對應實作：** branch `feat/phase3-extensibility-registry-20260927`，Phase 3 第二片 `fd75d28`（第一片 `d1cf266`）；Execution / Action Layer 已 hard-lock 於 `65959c7`（文件 `463e52e`）  
+**對應實作：** branch `feat/phase3-extensibility-registry-20260927`，Phase 3 第二片 `fd75d28` 與其審查修正 `7719e03`（第一片 `d1cf266`）；Execution / Action Layer 已 hard-lock 於 `65959c7`（文件 `463e52e`）  
 **研究核心：** 「結合物理校準模擬與大型語言模型輔助多模態融合之管內液態狀態辨識」既有碩士論文實驗核心  
 **本版新增責任：** 將既有論文專用流程提升為可擴充的研究平台，同時保證既有碩論正式研究設定零漂移（zero scientific drift）。  
 
@@ -2739,7 +2739,7 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 # 51. 目前實作狀態與已知缺口
 
-本節是 v0.9.0 的**現況快照**，會隨實作前進而過期；
+本節是 v0.9.1 的**現況快照**，會隨實作前進而過期；
 §0.4 的裁決規則在它過期之後仍然適用。
 
 ## 51.1 Final E2 Gate：1 / 8
@@ -2788,19 +2788,18 @@ Linux 實測，round 8 的守衛下九種 dir_fd 相關寫法有八種直接改�
 
 ## 51.3 測試現況
 
-| 範圍 | 結果（Phase 3 第二片，程式碼 `fd75d28`，Windows、py 3.10.11） |
+| 範圍 | 結果（Phase 3 第二片的審查修正，程式碼 `7719e03`，Windows、py 3.10.11） |
 |---|---|
-| `tests/`（全量） | 4098 collected — 4047 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
-| `tests/console/` + `tests/platform/` + `tests/e2/` | 1265 collected；在上面那一輪全量中 **0 failed**（含 execution-layer 迴歸） |
-| `tests/platform/test_compatibility_matrix.py`（§53） | 55 passed |
+| `tests/`（全量） | 4119 collected — 4068 passed、**13 failed**、38 skipped；13 項與下列歷史清單逐項相同，0 新增 |
+| `tests/console/` + `tests/platform/` + `tests/e2/` | 1286 collected；在上面那一輪全量中 **0 failed**（含 execution-layer 迴歸） |
+| `tests/platform/test_compatibility_matrix.py`（§53） | 76 passed |
 | `tests/platform/test_extension_registry.py`（§52、§53.8） | 69 passed |
-| `tests/platform/`，Windows / Linux 容器（repo 唯讀掛載） | 350 passed / 350 passed |
+| `tests/platform/`，Windows / Linux 容器（repo 唯讀掛載） | 371 passed / 371 passed |
 | `pcmef regression verify`（拒絕一切寫入的環境） | **IDENTICAL** |
 
-4098 = 4022（Phase 3 第一片）+ 55（`test_compatibility_matrix.py`）+
-11（`test_extension_registry.py` v0.1.1）+ 10（`test_repo_integrity.py`
-對 2 個新檔各跑 5 項檔頭檢查）。第一片（`d1cf266`）為 4022 collected、
-3971 passed，失敗清單相同。
+4119 = 4098（`fd75d28`）+ 21（§53.10 的對抗測試）。`fd75d28` 為 4098
+collected、4047 passed；第一片（`d1cf266`）為 4022 collected、3971 passed；
+三者的失敗清單相同。
 round 11 的全量曾掛著只包住 `parse_record()` 的損壞稽核 plugin 跑過：
 `test_run_record_persistence.py` 以外沒有任何測試讀到損壞紀錄。
 
@@ -3011,13 +3010,30 @@ provenance（來源與內容 sha256）與「未評估相容性」。
    「已驗證」會 `TypeError`，因為那等於沒有驗證。結果以「身分 + 能力」
    為鍵並記下當時驗證的實作指向；同一個身分換了指向，舊結果不算數。
    不要求驗證，矩陣就不匯入任何程式碼。
-3. **驗證紀錄 `ValidationRecord`**：用途 × 情境 (id, version) × 感測器
-   (id, version) × 驗證時的觀測 schema (id, version) × evidence × source。
-   建矩陣時逐筆檢查，**壞紀錄是拋出，不是略過**：
+3. **驗證紀錄 `ValidationRecord`**（v0.9.1 起）：**綁定被驗證的那一份
+   定義本身**，而不只是作者寫的版本字串。
+
+   | 欄位 | 內容 |
+   |---|---|
+   | `purpose` | `simulation` / `measurement` |
+   | `scenario` + `scenario_sha256` | 情境的 (id, version) 與**定義的 provenance sha256** |
+   | `sensor` + `sensor_sha256` | 感測器的 (id, version) 與**定義的 provenance sha256** |
+   | `observation` + `observation_sha256` | 觀測 schema 的 (id, version) 與觀測定義的正規化 sha256（診斷用） |
+   | `evidence`、`source` | 出處 |
+
+   provenance sha256 是 §52 registry 為每一份定義算的正規化內容指紋：
+   鍵的順序、縮排、檔名、資料夾都不影響它，內容一改就變。
+   `ValidationRecord.of(purpose, scenario, sensor, ...)` 為**當下這兩份
+   定義**寫一筆紀錄。建矩陣時逐筆檢查，**壞紀錄是拋出，不是略過**：
    - 版本必須寫明 —— 沒寫就讓 registry 挑一個，等於紀錄自動跟著升版；
+   - 三個 sha256 必須是完整的 64 位小寫十六進位；
    - 參照不到的身分 → `UnknownComponent`；
-   - 觀測 schema 與該感測器現在產生的不同、感測器根本沒有該用途需要的
-     能力、同一個配對重複、未知用途 → `ContractViolation`。
+   - **registry 裡同 id、同版本的情境或感測器，定義的 sha256 與紀錄不同
+     → `ContractViolation`**：說出哪一個元件漂移、兩個 sha256，以及（感測器）
+     觀測定義是否也變了。這筆紀錄不會被當成現行驗證，整個矩陣 fail closed；
+   - 感測器定義相同、觀測指紋卻不同（紀錄自相矛盾）、觀測 schema 與該
+     感測器現在產生的不同、感測器根本沒有該用途需要的能力、同一個配對
+     重複、未知用途 → `ContractViolation`。
 
 碩論的 12 筆紀錄（§53.6）只是其中一份輸入，**不是預設**：呼叫端不傳，
 矩陣就不知道有它們。
@@ -3034,14 +3050,22 @@ ingest，讀真實資料）。同一個配對在兩種用途下可以不同 —�
 | `TEMPLATE_SUPPORTED` | 模擬用途：情境由既有模板表示、實作已驗，但這個配對沒有驗證紀錄 |
 | `NEEDS_VALIDATION` | 路走得通但缺驗證：沒有紀錄、沒做實作驗證、情境沒宣告這個家族，或觀測與已驗證的同家族參考不同 |
 | `PLUGIN_REQUIRED` | 缺一個 plugin：情境沒有 physics（模擬用途）；或情境宣告的家族沒有任何 adapter（`unserved_families`） |
-| `UNSUPPORTED` | 這條路不存在：感測器沒有這個用途需要的能力 |
 | `BLOCKED` | 宣告了但壞了：宣告的實作匯入失敗或不可呼叫 |
+| `UNSUPPORTED` | 這條路不存在：感測器沒有這個用途需要的能力 |
 
 每一條規則產生一條理由（`code`、`limit`、`detail`、`evidence`），`limit`
 是它允許這一格最多到達的狀態。**一格的狀態取所有理由中最嚴的那一個，
-全部理由都保留。** `BLOCKED` 排在 `UNSUPPORTED` 之前（壞掉的宣告要先修），
-`UNSUPPORTED` 排在 `PLUGIN_REQUIRED` 之前（不能模擬的感測器，補了情境的
-physics plugin 也還是不能模擬）。
+全部理由都保留。** 順序是 `UNSUPPORTED` > `BLOCKED` > `PLUGIN_REQUIRED` >
+`NEEDS_VALIDATION` > `TEMPLATE_SUPPORTED` > `READY`：
+
+- `UNSUPPORTED` 最嚴（v0.9.1 起）：一格是「某個用途的一條路」，感測器根本
+  沒有這個用途要的能力時，修好另一個壞掉的宣告也不會讓這條路可用。壞掉的
+  宣告仍記成理由，只是不蓋過 `UNSUPPORTED`。
+- `BLOCKED` 排在 `PLUGIN_REQUIRED` 之前：宣告了卻壞掉的，要先修。
+- `UNSUPPORTED` 也排在 `PLUGIN_REQUIRED` 之前：不能模擬的感測器，補了情境
+  的 physics plugin 也還是不能模擬。
+
+`STATUSES` 仍依 SAI §10 列出的順序，那不是嚴格順序。
 
 ## 53.4 判斷規則
 
@@ -3056,7 +3080,7 @@ physics plugin 也還是不能模擬）。
 | 5 | 驗證紀錄 | 有確切紀錄 → 不限；沒有：`template_backed` → `TEMPLATE_SUPPORTED`，其他 → `NEEDS_VALIDATION` | 有 → 不限；沒有 → `NEEDS_VALIDATION` |
 | 6 | 同家族參考（僅在沒有紀錄時） | 與同情境、同用途、同家族的已驗證 adapter 以 `compare_observations()` 比對：有差異 → `NEEDS_VALIDATION`，差異逐項列為證據；完全相同 → 記一條理由，但不升級 | 同左 |
 
-因此 **`READY` 只有一條路**：確切版本的驗證紀錄 + 本次實作驗證通過 +
+因此 **`READY` 只有一條路**：這兩份定義確切的驗證紀錄 + 本次實作驗證通過 +
 情境宣告了這個家族 + physics 可用（模擬）。第 4 列只能降級、不能升級：
 一個驗證過、但情境沒宣告家族的配對仍是 `NEEDS_VALIDATION`，要把宣告寫進
 情境的新版本。
@@ -3073,17 +3097,25 @@ physics plugin 也還是不能模擬）。
 | 身分不明一律失敗、不退回碩論預設 | `registry.get()` 的語意；紀錄必須寫版本 | `test_unknown_identities_never_fall_back_to_the_thesis`、`test_an_ambiguous_identity_must_name_its_version`、`test_a_bad_validation_record_is_refused_not_skipped` |
 | 實作驗證要明確 | 報告只能由兩個工廠產生；未驗證時沒有 `READY`；不要求就不匯入 | `test_without_implementation_verification_nothing_is_ready`、`test_a_hand_written_report_is_refused`、`test_the_matrix_imports_no_code_unless_asked`、`test_a_stale_report_does_not_verify_a_changed_reference` |
 | 驗證不隨升版繼承（Appendix A 第 7 條） | 紀錄綁確切版本 | `test_a_validation_does_not_carry_over_to_a_new_version` |
+| 驗證屬於被驗證的那一份定義，不隨同版本的內容改動沿用（v0.9.1） | 紀錄綁定義 sha256；漂移即 `ContractViolation` | `test_a_sensor_that_drifted_under_the_same_version_loses_its_validation`、`test_a_scenario_that_drifted_under_the_same_version_loses_its_validation`、`test_the_thesis_anchors_do_not_bless_a_changed_builtin`、`test_an_unchanged_definition_keeps_its_validation` |
+| 感測器沒有能力時，修好別的也沒用（v0.9.1） | `UNSUPPORTED` > `BLOCKED` | `test_a_missing_capability_outranks_a_broken_scenario`、`test_a_broken_sensor_outranks_missing_physics` |
 
-這些測試另以 24 個 mutation 檢查過（把規則逐條弄壞，以及嚴格順序中每一對
-相鄰的狀態對調），每一個都至少讓一條測試失敗。
+這些測試另以 30 個 mutation 檢查過（把規則逐條弄壞、嚴格順序中每一對相鄰的
+狀態對調、關掉每一項定義 sha256 檢查、把碩論錨點釘到別的定義），每一個都至少
+讓一條測試失敗。
 
 ## 53.6 碩論的迴歸錨點
 
 `thesis_validations()`：4 類 × {RGB 模擬、ToF 模擬、ToF 量測} = **12 筆**，
 身分全部是 `1.0.0`，情境 id 與 `thesis_scenarios()` 同樣由 `CLASS_ORDER`
-推導。沒有 RGB 量測的紀錄。紀錄只有身分與出處（E2 成對 benchmark；E1
-物理校準以真實 VL53L0X 為參考），**不含任何科學數值**。紀錄裡的觀測 schema
-id 若與內建 adapter 漂移，建矩陣時就會拋出，而不是默默失效。
+推導。沒有 RGB 量測的紀錄。紀錄只有身分、定義的 sha256 與出處（E2 成對
+benchmark；E1 物理校準以真實 VL53L0X 為參考），**不含任何科學數值**。
+
+**六份內建定義的 provenance sha256 與兩份觀測指紋是寫死的**
+（`_THESIS_DEFINITIONS` / `_THESIS_OBSERVATIONS`），不是在執行時從內建元件
+現算 —— 現算等於每一份新的內建定義都自動算「驗證過」。內建描述一改（通道、
+單位、模板、分類、宣告的家族……），錨點就對不上，建矩陣時說出哪一個漂移了；
+要重新驗證之後才能改這些值。Windows 與 Linux 容器算出的值相同。
 
 實作驗證通過並傳入這 12 筆時：
 
@@ -3146,6 +3178,43 @@ id 若與內建 adapter 漂移，建矩陣時就會拋出，而不是默默失�
    如何綁到實際的 run，屬於 §22 的 SQLite 登錄與 §28 governance 步驟 2~6。
 4. `artifacts/`。
 
+## 53.10 獨立審查的修正（v0.9.1，`7719e03`）
+
+**P1：過期的證據可以得到 `READY`。** `512c15f` 的 `ValidationRecord` 只以
+id / 版本綁定元件，以觀測 schema 的 id / 版本綁定觀測。這些都是作者寫的
+字串。一份 manifest 可以改通道的單位或順序、取樣、quality metadata、宣告的
+家族或情境的 physics，而兩個版本號都不動。registry 會給改過的定義一個新的
+provenance sha256，但 `_index()` 只看 id / 版本，所以照樣接受舊紀錄。實作
+驗證通過時，一份從未被驗證過的定義就拿到 `READY`。
+
+以暫存 manifest 在 `512c15f` 上重現：sigma 單位改了的 alt-ToF，以及宣告
+家族改了的 Sand（有 physics 實作），都拿著前一份定義的紀錄得到 `READY`。
+同樣的操作在 `7719e03` 上兩者都是 `ContractViolation`。
+
+**修正**：見 §53.2 第 3 項與 §53.6。**不變量**：一筆相容性驗證屬於被驗證的
+那一份情境定義與感測器定義，不只是它們的版本字串。對抗測試：
+
+- **感測器同版本漂移，共 6 種**：通道單位、通道順序、取樣間隔、quality
+  signal、參數範圍、device model。
+- **情境同版本漂移，共 5 種**：宣告的家族、physics 參數單位、physics
+  參數範圍、physics 實作、分類。
+- 每一種都先確認三件事：定義 A 帶著紀錄到得了 `READY`；定義 B 的 id、
+  版本、作者、觀測 schema 版本全部相同；B 的實作也驗證得過。然後舊紀錄
+  在兩種用途、以及 `evaluate_pair` 下都被拒絕。為 B 重新驗證之後，B 才是
+  `READY`。
+- 碩論錨點不替改過的內建 ToF 通道單位、改過的內建 Misty 分類背書。
+- 同一份定義換檔名、資料夾、縮排與鍵的順序，仍保有紀錄並到得了 `READY`。
+- 升版不繼承驗證的既有測試保留。
+
+**審查調整**：`UNSUPPORTED` 改排在 `BLOCKED` 之前（§53.3）。
+「感測器不能 simulate + 情境 physics 實作壞了」是 `UNSUPPORTED`，兩條理由
+都保留；能模擬但程式碼不存在的感測器 × `plugin_required` 的情境仍是
+`BLOCKED`。未宣告家族就到不了 `READY` 的規則不變。
+
+**檔頭**：P3-1 各檔「產生時間」原寫的 09:30~10:50 不是實際時間，改為首次
+提交 `d1cf266` 的 commit 時間（2026-09-27 01:38 +08:00）；P3-2 的兩個新檔
+同樣改為 `fd75d28` 的 commit 時間（02:34）。只改註解，不影響行為。
+
 ---
 
 # Appendix G — v0.6.0 → v0.7.0 變更對照
@@ -3195,6 +3264,7 @@ id 若與內建 adapter 漂移，建矩陣時就會拋出，而不是默默失�
 | r11 | 完整 schema、生命週期一致、formal mode 必須明寫；反序列化不補欄位 | §49.6 |
 | P3-1 | Scenario Plugin / Sensor Adapter 的 registry、契約 v1 與探索 | §52 |
 | P3-2 | Sensor × Scenario 相容矩陣；v1 觀測 schema 的維度一致與有限數值 | §53 |
+| P3-2 審查 | 驗證紀錄綁定定義 sha256（過期證據 fail closed）；`UNSUPPORTED` > `BLOCKED` | §53.2、§53.3、§53.10 |
 
 ## G.3 v0.6.0 原樣沿用、未改動的章節
 
