@@ -3,7 +3,7 @@
 #         指定的 manifest 資料夾（只讀 .json）。產出一份凍結的 registry 與
 #         被拒絕的清單。**不寫任何檔案，也不匯入任何 plugin 程式碼。**
 # 檔案路徑: pcmef/platform/catalog.py
-# 產生時間: 2026-09-27 10:25 +08:00
+# 產生時間: 2026-09-27 01:38 +08:00（首次提交 d1cf266 的 commit 時間）
 # 版本: v0.1.1
 # 功能說明: Scenario Plugin 與 Sensor Adapter 的探索：內建的碩論元件，加上
 #           明確指定的 manifest 資料夾；任何不合契約、身分衝突、標籤衝突的

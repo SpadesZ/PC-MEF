@@ -3,7 +3,7 @@
 #         sensors / catalog。manifest 範例在 tests/platform/fixtures/extensions，
 #         其餘一律寫在 tmp_path。不寫入任何 repo 路徑。
 # 檔案路徑: tests/platform/test_extension_registry.py
-# 產生時間: 2026-09-27 10:50 +08:00
+# 產生時間: 2026-09-27 01:38 +08:00（首次提交 d1cf266 的 commit 時間）
 # 版本: v0.1.1
 # 功能說明: SAI Phase 3 第一片的驗收：Scenario Plugin 與 Sensor Adapter 能
 #           註冊並被決定性地探索；重複與衝突一律拒絕；不合契約即失敗而不

@@ -3,7 +3,7 @@
 #         pcmef.core.constants 的 TOF_SCHEMA / TOF_RECORDING_SHAPE 描述碩論的
 #         ToF。**不寫任何東西，也不被任何 stable module 匯入。**
 # 檔案路徑: pcmef/platform/sensors.py
-# 產生時間: 2026-09-27 09:45 +08:00
+# 產生時間: 2026-09-27 01:38 +08:00（首次提交 d1cf266 的 commit 時間）
 # 版本: v0.1.1
 # 功能說明: Sensor Adapter 的契約（SAI §8.3、Appendix C）：身分、能力、實作
 #           指向、參數、版本化且單位明確的觀測 schema、quality signal；以及

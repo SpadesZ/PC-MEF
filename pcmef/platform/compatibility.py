@@ -3,8 +3,8 @@
 #         實作驗證結果與驗證紀錄；產出 Sensor × Scenario 的相容性判斷。
 #         不寫任何東西，不修改 registry，也不被任何 stable module 匯入。
 # 檔案路徑: pcmef/platform/compatibility.py
-# 產生時間: 2026-09-27 02:05 +08:00
-# 版本: v0.1.0
+# 產生時間: 2026-09-27 02:34 +08:00（首次提交 fd75d28 的 commit 時間）
+# 版本: v0.1.1
 # 功能說明: SAI §10 的 Sensor × Scenario Compatibility Matrix。每一格說出
 #           六種狀態之一，並保留涉及的元件身分與版本、以及一條一條可解釋
 #           的理由與證據，讓之後的 Profile Builder 與 Wizard 說得出「為什麼」。
@@ -12,24 +12,32 @@
 #           不複製碩論的科學常數，也不因為元件存在或家族相同就推論相容。
 # 主要責任:
 #   1. STATUSES / PURPOSES：六種狀態（SAI §10）與兩種用途（模擬 / 量測）
-#   2. ValidationRecord / thesis_validations()：驗證紀錄；碩論配對為迴歸錨點
+#   2. ValidationRecord / thesis_validations()：綁定定義 sha256 的驗證紀錄；
+#      碩論配對為迴歸錨點
 #   3. ImplementationReport：實作驗證**明確地**做或明確地不做
 #   4. evaluate_pair() / build_matrix()：逐條理由，取最嚴格的狀態
 #   5. Cell / UnservedFamily / CompatibilityMatrix：結構化、可 JSON 序列化
 # 維護提醒:
-#   - **READY 只有一條路：** 完全相同的 scenario@版本 × sensor@版本 × 用途
-#     有驗證紀錄，而且這次評估中實作驗證通過。不得再開第二條。
+#   - **READY 只有一條路：** 完全相同的情境定義 × 感測器定義 × 用途有驗證
+#     紀錄，而且這次評估中實作驗證通過。不得再開第二條。
+#   - **驗證紀錄綁定被驗證的那一份定義（provenance sha256），不得只比對
+#     id / 版本字串或觀測 schema 的 id / 版本。** 版本是作者寫的字串：內容
+#     改了卻沒升版的 manifest，id 與版本都對得上，卻不是被驗證過的那一個。
+#     對不上就 ContractViolation，說出哪一個元件漂移了，不得當成現行驗證。
 #   - 不得讓 declared_sensor_families 決定相容。它是作者的宣告 —— 有宣告
 #     只是不扣分，沒有宣告則降為 NEEDS_VALIDATION。
 #   - 不得讓 plugin_required 的情境在模擬用途上高於 PLUGIN_REQUIRED，不論
 #     有沒有驗證紀錄、有多少相容的感測器。
 #   - 不得把「同一家族」當成等價。未經驗證的 adapter 一律與同情境、同用途
 #     已驗證的參考 adapter 比對觀測，差異逐項列入理由。
-#   - 不得在實作驗證失敗時給出 BLOCKED 以外的狀態；未做驗證時不得給 READY。
-#     ImplementationReport 只能由 verify() 或 not_performed() 產生 —— 一份
-#     手寫的「已驗證」等於沒有驗證。
+#   - 實作驗證失敗時不得低於 BLOCKED（唯一更嚴的是 UNSUPPORTED：這條路本來
+#     就不存在）；未做驗證時不得給 READY。ImplementationReport 只能由
+#     verify() 或 not_performed() 產生 —— 一份手寫的「已驗證」等於沒有驗證。
 #   - 不得在查不到身分時退回碩論的預設元件 —— 一律 UnknownComponent /
-#     AmbiguousVersion。驗證紀錄必須寫明確切版本。
+#     AmbiguousVersion。驗證紀錄必須寫明確切版本與定義的 sha256。
+#   - v0.1.1 修正：ValidationRecord 綁定情境與感測器定義的 provenance
+#     sha256（另記觀測定義的指紋供診斷）；碩論錨點改為寫死的定義 sha256；
+#     UNSUPPORTED 改排在 BLOCKED 之前。對應 P3-2 獨立審查的 P1 與調整。
 #   - v0.1.0 新增：首版，對應 SAI Phase 3 第二片。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_compatibility_matrix.py -v
@@ -37,6 +45,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -50,6 +59,7 @@ from pcmef.platform.components import (
     ComponentRegistry,
     ContractViolation,
     UnknownComponent,
+    content_sha256,
     valid_version,
 )
 from pcmef.platform.scenarios import SUPPORT_PLUGIN, SUPPORT_REQUIRED, SUPPORT_TEMPLATE
@@ -91,13 +101,15 @@ STATUSES: tuple[str, ...] = (
 
 #: 一格的狀態取所有理由中**最嚴格**的那一個。數字越大越嚴格。
 #:
-#: BLOCKED（宣告的東西壞了）> UNSUPPORTED（這條路根本不存在）>
+#: UNSUPPORTED（這條路根本不存在）> BLOCKED（宣告的東西壞了）>
 #: PLUGIN_REQUIRED（缺一個 plugin 才走得通）> NEEDS_VALIDATION >
-#: TEMPLATE_SUPPORTED > READY。UNSUPPORTED 排在 PLUGIN_REQUIRED 之前：
-#: 一個不能模擬的感測器，補了情境的 physics plugin 也還是不能模擬。
+#: TEMPLATE_SUPPORTED > READY。一格是「某個用途的一條路」：感測器根本沒有
+#: 這個用途要的能力時，修好另一個壞掉的宣告也不會讓這條路可用 —— 壞掉的
+#: 宣告仍記成理由，但不蓋過 UNSUPPORTED。同理，一個不能模擬的感測器，補了
+#: 情境的 physics plugin 也還是不能模擬。
 _SEVERITY: dict[str, int] = {
     READY: 0, TEMPLATE_SUPPORTED: 1, NEEDS_VALIDATION: 2,
-    PLUGIN_REQUIRED: 3, UNSUPPORTED: 4, BLOCKED: 5,
+    PLUGIN_REQUIRED: 3, BLOCKED: 4, UNSUPPORTED: 5,
 }
 
 PURPOSE_SIMULATION = "simulation"    # 以模擬產生這個情境的觀測
@@ -131,20 +143,49 @@ class Reason:
         }
 
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _observation_sha256(sensor: Any) -> str:
+    """觀測定義的指紋。與 schema id / 版本無關：通道、單位、順序、形狀、
+    時間軸任何一項改了就變。"""
+    return content_sha256(sensor.observation.describe())
+
+
 @dataclass(frozen=True)
 class ValidationRecord:
-    """一次**已完成**的相容性驗證：哪個情境版本 × 哪個感測器版本 × 哪個用途。
+    """一次**已完成**的相容性驗證：哪一份情境定義 × 哪一份感測器定義 × 哪個用途。
 
-    綁定到確切的版本與觀測 schema：元件升版不會繼承舊版的驗證
-    （Appendix A 第 7 條）。
+    **綁定到被驗證的那一份定義本身**（provenance sha256），而不只是作者寫的
+    版本字串：同一個 id 與版本、內容卻改了的元件，不是被驗證過的那一個。
+    元件升版也不會繼承舊版的驗證（Appendix A 第 7 條）。id / 版本與觀測
+    schema 保留為可讀的身分；觀測定義的指紋用來說明漂移發生在哪裡。
     """
 
     purpose: str
     scenario: tuple[str, str]      # (id, version)
+    scenario_sha256: str           # 被驗證的情境定義的 provenance sha256
     sensor: tuple[str, str]        # (id, version)
+    sensor_sha256: str             # 被驗證的感測器定義的 provenance sha256
     observation: tuple[str, str]   # (schema_id, version) —— 驗證時的觀測
+    observation_sha256: str        # 驗證時觀測定義的指紋（診斷用）
     evidence: str
     source: str
+
+    @classmethod
+    def of(cls, purpose: str, scenario: Any, sensor: Any, *, evidence: str,
+           source: str) -> "ValidationRecord":
+        """為**這一份**情境定義與**這一份**感測器定義寫下一筆驗證。"""
+        return cls(
+            purpose=purpose,
+            scenario=(scenario.identity.component_id, scenario.identity.version),
+            scenario_sha256=scenario.provenance.sha256,
+            sensor=(sensor.identity.component_id, sensor.identity.version),
+            sensor_sha256=sensor.provenance.sha256,
+            observation=(sensor.observation.schema_id, sensor.observation.version),
+            observation_sha256=_observation_sha256(sensor),
+            evidence=evidence, source=source,
+        )
 
     def key(self) -> tuple[str, tuple[str, str, str], tuple[str, str, str]]:
         return (self.purpose, (KIND_SCENARIO, *self.scenario),
@@ -153,10 +194,13 @@ class ValidationRecord:
     def describe(self) -> dict[str, Any]:
         return {
             "purpose": self.purpose,
-            "scenario": {"id": self.scenario[0], "version": self.scenario[1]},
-            "sensor": {"id": self.sensor[0], "version": self.sensor[1]},
+            "scenario": {"id": self.scenario[0], "version": self.scenario[1],
+                         "sha256": self.scenario_sha256},
+            "sensor": {"id": self.sensor[0], "version": self.sensor[1],
+                       "sha256": self.sensor_sha256},
             "observation": {"schema_id": self.observation[0],
-                            "version": self.observation[1]},
+                            "version": self.observation[1],
+                            "sha256": self.observation_sha256},
             "evidence": self.evidence, "source": self.source,
         }
 
@@ -174,29 +218,64 @@ _THESIS_MEASUREMENT_EVIDENCE = (
 
 _THESIS_RGB = ("pcmef.sensor.rgb-camera", "1.0.0")
 _THESIS_TOF = ("pcmef.sensor.tof-vl53l0x", "1.0.0")
-_RGB_OBSERVATION = ("pcmef.rgb.image", "1.0.0")
-_TOF_OBSERVATION = ("pcmef.tof.recording", "1.0.0")
+
+#: 碩論內建元件**被驗證的那一份定義**：provenance sha256，以及感測器的觀測
+#: schema 與觀測定義指紋。由 scenarios.thesis_scenarios() /
+#: sensors.thesis_sensors() 的定義算出後**刻意寫死**：內建描述一改（通道、
+#: 單位、模板、宣告的家族……），這裡就對不上，建矩陣時說出哪一個漂移了，
+#: 而不是讓舊的錨點替新的定義背書。**不得在沒有重新驗證的情況下改這些值；**
+#: 也不得改成在執行時從內建元件現算 —— 那等於每一份新定義都自動算「驗證過」。
+_THESIS_DEFINITIONS: dict[tuple[str, str], str] = {
+    ("pcmef.scenario.empty", "1.0.0"):
+        "8dc14f612567b43c7beb3ac4496586ea5a45621f0dcd7652d6135367009f31de",
+    ("pcmef.scenario.water-filled", "1.0.0"):
+        "79c12e41f34f63029e846f8391d240aea269de4117a6e0125198bac8e813e2ca",
+    ("pcmef.scenario.bubbly", "1.0.0"):
+        "4d85bd13571e3841a4789e9a6f629a8e777fa880a7d9ffe29b4270352f5a4a04",
+    ("pcmef.scenario.misty", "1.0.0"):
+        "de9f015b915dd5b9c862171202f21cae208b4e77cc318d69ccc6c1e252c0b4e4",
+    _THESIS_RGB:
+        "e0f5a6b17312681cafa2979295a80b5e61d85b206a6c20684b90dddd3f43853d",
+    _THESIS_TOF:
+        "83171e533ccc06ddb2333b36d070cf0bc5a8b57d1ca9b5d1d6d5a5b290a46540",
+}
+_THESIS_OBSERVATIONS: dict[tuple[str, str], tuple[tuple[str, str], str]] = {
+    _THESIS_RGB: (("pcmef.rgb.image", "1.0.0"),
+                  "1874e519b008d09b96df206aeacc6ef7fab7605d183261fc3852f869f8a01a01"),
+    _THESIS_TOF: (("pcmef.tof.recording", "1.0.0"),
+                  "3d51ecabdf8962b9c5529fdf98df575bed7c51806fa3158c9090ebedc76984bf"),
+}
+
+
+def _thesis_record(purpose: str, scenario: tuple[str, str], sensor: tuple[str, str],
+                   evidence: str) -> ValidationRecord:
+    observation, observation_sha256 = _THESIS_OBSERVATIONS[sensor]
+    return ValidationRecord(
+        purpose=purpose,
+        scenario=scenario, scenario_sha256=_THESIS_DEFINITIONS[scenario],
+        sensor=sensor, sensor_sha256=_THESIS_DEFINITIONS[sensor],
+        observation=observation, observation_sha256=observation_sha256,
+        evidence=evidence, source="thesis",
+    )
 
 
 def thesis_validations() -> tuple[ValidationRecord, ...]:
     """碩論既有的組合：**迴歸錨點**，不是新的科學主張。
 
     四個類別 × {RGB 模擬、ToF 模擬、ToF 真實量測}。RGB 沒有真實量測路徑，
-    所以沒有 RGB 量測的紀錄。只列身分與版本，不複製任何科學數值；情境 id
-    的推導與 scenarios.thesis_scenarios() 相同，類別只有 CLASS_ORDER 一個來源。
+    所以沒有 RGB 量測的紀錄。只列身分、版本與定義的 sha256，不複製任何科學
+    數值；情境 id 的推導與 scenarios.thesis_scenarios() 相同，類別只有
+    CLASS_ORDER 一個來源（多一類就在這裡 KeyError，不會默默少一筆）。
     """
     records = []
     for label in CLASS_ORDER:
         scenario = (f"pcmef.scenario.{label.lower()}", "1.0.0")
-        records.append(ValidationRecord(
-            PURPOSE_SIMULATION, scenario, _THESIS_RGB, _RGB_OBSERVATION,
-            _THESIS_SIMULATION_EVIDENCE, "thesis"))
-        records.append(ValidationRecord(
-            PURPOSE_SIMULATION, scenario, _THESIS_TOF, _TOF_OBSERVATION,
-            _THESIS_SIMULATION_EVIDENCE, "thesis"))
-        records.append(ValidationRecord(
-            PURPOSE_MEASUREMENT, scenario, _THESIS_TOF, _TOF_OBSERVATION,
-            _THESIS_MEASUREMENT_EVIDENCE, "thesis"))
+        records.append(_thesis_record(PURPOSE_SIMULATION, scenario, _THESIS_RGB,
+                                      _THESIS_SIMULATION_EVIDENCE))
+        records.append(_thesis_record(PURPOSE_SIMULATION, scenario, _THESIS_TOF,
+                                      _THESIS_SIMULATION_EVIDENCE))
+        records.append(_thesis_record(PURPOSE_MEASUREMENT, scenario, _THESIS_TOF,
+                                      _THESIS_MEASUREMENT_EVIDENCE))
     return tuple(records)
 
 
@@ -324,9 +403,24 @@ class UnservedFamily:
                 "status": self.status, "detail": self.detail}
 
 
+def _drift(role: str, name: tuple[str, str], recorded: str, current: str,
+           note: str = "") -> str:
+    return (
+        f"{role} {name[0]} {name[1]} drifted since it was validated: the record "
+        f"names definition sha256 {recorded}, the registered definition is "
+        f"{current}{note}; the same id and version do not make it the validated "
+        "definition -- re-validate it, or give the changed definition a new version"
+    )
+
+
 def _index(registry: ComponentRegistry,
            validations: Iterable[ValidationRecord]) -> dict[tuple, ValidationRecord]:
-    """驗證紀錄 → 以確切身分為鍵。**參照不到、互相矛盾、重複的紀錄一律拋出。**"""
+    """驗證紀錄 → 以確切身分為鍵。**參照不到、互相矛盾、重複的紀錄一律拋出。**
+
+    紀錄驗證的是**一份定義**：registry 裡同 id、同版本的元件，定義的 sha256
+    若與紀錄不同，這筆紀錄就是過期的證據 —— 拋出並說出哪一個元件漂移了，
+    不得當成現行的驗證。
+    """
     index: dict[tuple, ValidationRecord] = {}
     for record in validations:
         problems = []
@@ -338,11 +432,34 @@ def _index(registry: ComponentRegistry,
                 # 沒寫版本就讓 registry 挑一個，等於紀錄會自動跟著升版。
                 problems.append(f"{role} {component_id!r} must name an exact version, "
                                 f"got {version!r}")
+        for role, digest in (("scenario_sha256", record.scenario_sha256),
+                             ("sensor_sha256", record.sensor_sha256),
+                             ("observation_sha256", record.observation_sha256)):
+            if not isinstance(digest, str) or not _SHA256.match(digest):
+                problems.append(f"{role} must be the sha256 (64 lowercase hex) of the "
+                                f"validated definition, got {digest!r}")
         if problems:
             raise ContractViolation("validation record", problems)
         # 參照不到就是 UnknownComponent —— 不得當成「這筆不適用」而略過。
-        registry.get(KIND_SCENARIO, *record.scenario)
+        scenario = registry.get(KIND_SCENARIO, *record.scenario)
         sensor = registry.get(KIND_SENSOR, *record.sensor)
+        if scenario.provenance.sha256 != record.scenario_sha256:
+            problems.append(_drift("scenario", record.scenario, record.scenario_sha256,
+                                   scenario.provenance.sha256))
+        observation_sha256 = _observation_sha256(sensor)
+        if sensor.provenance.sha256 != record.sensor_sha256:
+            changed = observation_sha256 != record.observation_sha256
+            problems.append(_drift(
+                "sensor", record.sensor, record.sensor_sha256, sensor.provenance.sha256,
+                "; its observation definition "
+                + ("changed too" if changed else "is unchanged, so something else in "
+                   "the adapter changed")))
+        elif observation_sha256 != record.observation_sha256:
+            # 感測器定義相同，觀測指紋卻不同：紀錄本身自相矛盾。
+            problems.append(
+                f"the record's observation_sha256 {record.observation_sha256} is not the "
+                f"observation of the validated {record.sensor[0]} {record.sensor[1]} "
+                f"({observation_sha256})")
         produced = (sensor.observation.schema_id, sensor.observation.version)
         if tuple(record.observation) != produced:
             problems.append(
@@ -441,7 +558,9 @@ def _evaluate(registry: ComponentRegistry, scenario: Any, sensor: Any, purpose: 
     if record is not None:
         reasons.append(Reason(
             "validated_pairing", READY, record.evidence,
-            (("source", record.source), ("observation", tuple(record.observation)))))
+            (("source", record.source), ("scenario_sha256", record.scenario_sha256),
+             ("sensor_sha256", record.sensor_sha256),
+             ("observation", tuple(record.observation)))))
         return Cell(purpose, scenario.identity, sensor.identity, _worst(reasons),
                     tuple(reasons))
 

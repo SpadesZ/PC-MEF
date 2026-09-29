@@ -3,7 +3,7 @@
 #         由 pcmef.platform.catalog 組出 registry。不被任何既有 stable module
 #         匯入 —— 它是新加的包裝層，不是 scientific core 的一部分。
 # 檔案路徑: pcmef/platform/components.py
-# 產生時間: 2026-09-27 09:30 +08:00
+# 產生時間: 2026-09-27 01:38 +08:00（首次提交 d1cf266 的 commit 時間）
 # 版本: v0.1.1
 # 功能說明: Scenario Plugin 與 Sensor Adapter 共用的地基：元件身分與版本、
 #           參數規格、嚴格讀取 manifest 欄位、錯誤型別，以及一個決定性、

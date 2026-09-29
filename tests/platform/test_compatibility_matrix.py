@@ -4,8 +4,8 @@
 #         tests/platform/fixtures/extensions，變體一律寫在 tmp_path。
 #         不寫入任何 repo 路徑。
 # 檔案路徑: tests/platform/test_compatibility_matrix.py
-# 產生時間: 2026-09-27 02:20 +08:00
-# 版本: v0.1.0
+# 產生時間: 2026-09-27 02:34 +08:00（首次提交 fd75d28 的 commit 時間）
+# 版本: v0.1.1
 # 功能說明: SAI Phase 3 第二片的驗收：Sensor × Scenario Compatibility Matrix
 #           的六種狀態、每一格的理由與證據、以及工作單列出的每一條邊界 ——
 #           註冊 ≠ 實作存在、實作存在 ≠ 科學相容、同家族 ≠ 可互換、宣告 ≠
@@ -17,12 +17,19 @@
 #   3. fixtures 的實作刻意不存在：宣告了也到不了 READY，一律 BLOCKED
 #   4. alt-ToF：家族相同不夠，差異看得見，狀態是待驗證而不是等價
 #   5. Sand 在 plugin_required 時不能模擬；身分不明或不明確一律拋出
+#   6. 驗證紀錄屬於被驗證的那一份定義：同 id、同版本而內容改了，舊紀錄
+#      一律拒絕，說出哪一個元件漂移，不可能因此到 READY
 # 維護提醒:
 #   - **不得把狀態斷言改成只檢查「不是 READY」。** 每一格都斷言確切狀態與
 #     造成它的理由代碼 —— 否則一格因為別的理由而降級，測試照樣通過，而它
 #     要守的那條邊界其實沒人在守。
 #   - 不得在這裡手寫 ImplementationReport；它只能由 verify() 或
 #     not_performed() 產生（手寫本身就是一條測試）。
+#   - 不得把漂移測試的「定義 A 到得了 READY」那一步拿掉：少了它，紀錄被拒
+#     也可能是別的原因，而漂移那條規則其實沒人在守。
+#   - v0.1.1 新增：過期證據（感測器與情境定義同版本漂移、碩論錨點漂移、
+#     格式不同但定義相同）與 UNSUPPORTED 高於 BLOCKED 的對抗測試。
+#     對應 P3-2 獨立審查。
 #   - v0.1.0 新增：首版，對應 SAI Phase 3 第二片。
 # 驗證方式:
 #   - py -3.10 -m pytest tests/platform/test_compatibility_matrix.py -v
@@ -30,13 +37,15 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from pcmef.core import constants
-from pcmef.platform import catalog, compatibility
+from pcmef.platform import catalog, compatibility, scenarios, sensors
 from pcmef.platform.compatibility import (
     BLOCKED,
     NEEDS_VALIDATION,
@@ -78,7 +87,7 @@ RESOLVABLE = "json:loads"
 #: 由寬到嚴。寫在這裡而不是讀模組的常數：嚴格順序是這一片的決策，
 #: 測試要自己說出來。
 PRECEDENCE = (READY, TEMPLATE_SUPPORTED, NEEDS_VALIDATION, PLUGIN_REQUIRED,
-              UNSUPPORTED, BLOCKED)
+              BLOCKED, UNSUPPORTED)
 
 
 def _fixture(name: str) -> dict:
@@ -105,13 +114,11 @@ def _registry(*directories: Path) -> ComponentRegistry:
 def _record(registry: ComponentRegistry, purpose: str, scenario: str, sensor: str,
             *, scenario_version: str | None = None,
             sensor_version: str | None = None) -> ValidationRecord:
-    s = registry.get(KIND_SCENARIO, scenario, scenario_version)
-    a = registry.get(KIND_SENSOR, sensor, sensor_version)
-    return ValidationRecord(
-        purpose, (s.identity.component_id, s.identity.version),
-        (a.identity.component_id, a.identity.version),
-        (a.observation.schema_id, a.observation.version),
-        "test fixture validation", "test")
+    """為 registry 裡**現在這一份**情境定義與感測器定義寫一筆驗證。"""
+    return ValidationRecord.of(
+        purpose, registry.get(KIND_SCENARIO, scenario, scenario_version),
+        registry.get(KIND_SENSOR, sensor, sensor_version),
+        evidence="test fixture validation", source="test")
 
 
 def _matrix(registry: ComponentRegistry, purpose: str, *, verify: bool = True,
@@ -149,7 +156,13 @@ def test_the_thesis_anchors_are_exact_identities_derived_from_class_order():
         (PURPOSE_MEASUREMENT, (TOF, "1.0.0")),
     }
     assert all(r.scenario[1] == "1.0.0" for r in records)
-    # 每一筆都參照得到、觀測 schema 一致 —— 否則 build_matrix 會拋出。
+    # 錨點寫死的是**現在這一份**內建定義：與每次重新建出的內建元件逐一相同。
+    for record in records:
+        scenario = registry.get(KIND_SCENARIO, *record.scenario)
+        sensor = registry.get(KIND_SENSOR, *record.sensor)
+        assert record == ValidationRecord.of(record.purpose, scenario, sensor,
+                                             evidence=record.evidence, source="thesis")
+    # 每一筆都參照得到、定義一致 —— 否則 build_matrix 會拋出。
     _matrix(registry, PURPOSE_SIMULATION)
     _matrix(registry, PURPOSE_MEASUREMENT)
 
@@ -408,19 +421,49 @@ def test_a_plugin_implemented_scenario_needs_verified_code_and_a_record(tmp_path
     assert _matrix(registry, PURPOSE_SIMULATION, verify=False, validations=records).cell(
         SAND, TOF).status == NEEDS_VALIDATION
 
-    _variant(tmp_path / "broken", "acme_ir_camera.json")
     broken = _registry(_variant(tmp_path / "broken", "acme_sand.json",
                                 _sand_physics("acme_sand.physics:simulate")))
     records = thesis_validations() + (_record(broken, PURPOSE_SIMULATION, SAND, TOF),)
-    matrix = _matrix(broken, PURPOSE_SIMULATION, validations=records)
-    cell = matrix.cell(SAND, TOF)
+    cell = _matrix(broken, PURPOSE_SIMULATION, validations=records).cell(SAND, TOF)
     assert cell.status == BLOCKED
     assert "scenario_implementation_unverifiable" in cell.codes()
-    # 壞掉的宣告比「這條路不存在」更嚴格：先修壞掉的東西。
-    both = matrix.cell(SAND, IR)
-    assert {"sensor_cannot_simulate", "scenario_implementation_unverifiable"} <= set(
-        both.codes())
-    assert both.status == BLOCKED
+
+
+@pytest.mark.parametrize("sensor", [IR, ALT_TOF])
+def test_a_missing_capability_outranks_a_broken_scenario(tmp_path, sensor):
+    """感測器不能 simulate + 情境的 physics 實作壞了：這條路本來就不存在。
+
+    修好情境的實作也不會讓一個不能模擬的感測器能模擬，所以最上層是
+    UNSUPPORTED；壞掉的實作仍然記成理由，沒有被吞掉。
+    """
+    directory = tmp_path / "p"
+    _variant(directory, "acme_ir_camera.json")
+    _variant(directory, "acme_tof_vl53l1x.json")
+    registry = _registry(_variant(directory, "acme_sand.json",
+                                  _sand_physics("acme_sand.physics:simulate")))
+    records = thesis_validations() + (_record(registry, PURPOSE_SIMULATION, SAND, TOF),)
+    matrix = _matrix(registry, PURPOSE_SIMULATION, validations=records)
+    cell = matrix.cell(SAND, sensor)
+    assert cell.reason("sensor_cannot_simulate").limit == UNSUPPORTED
+    assert cell.reason("scenario_implementation_unverifiable").limit == BLOCKED
+    assert cell.status == UNSUPPORTED, cell.describe()
+    # 同一個壞掉的情境，配上能模擬的感測器就是 BLOCKED。
+    assert matrix.cell(SAND, TOF).status == BLOCKED
+
+
+def test_a_broken_sensor_outranks_missing_physics(tmp_path):
+    """能模擬但程式碼不存在的感測器 × plugin_required 的情境：先修壞掉的。"""
+    def simulating(data):
+        data["capabilities"]["simulate"] = True
+        data["implementations"]["simulate"] = "acme_tof.simulator:simulate"
+
+    directory = tmp_path / "p"
+    _variant(directory, "acme_sand.json")
+    registry = _registry(_variant(directory, "acme_tof_vl53l1x.json", simulating))
+    cell = _matrix(registry, PURPOSE_SIMULATION).cell(SAND, ALT_TOF)
+    assert cell.reason("sensor_implementation_unverifiable").limit == BLOCKED
+    assert cell.reason("scenario_physics_missing").limit == PLUGIN_REQUIRED
+    assert cell.status == BLOCKED, cell.describe()
 
 
 # ---------------------------------------------------------------------------
@@ -486,39 +529,47 @@ def test_a_validation_does_not_carry_over_to_a_new_version(tmp_path):
 
 def _bad_records(registry):
     good = _record(registry, PURPOSE_MEASUREMENT, THESIS_SCENARIOS[0], TOF)
-    tof_observation = good.observation
+    replace = dataclasses.replace
     return {
-        "unknown_sensor_version": (
-            ValidationRecord(PURPOSE_MEASUREMENT, good.scenario, (TOF, "9.9.9"),
-                             tof_observation, "x", "test"),
-            UnknownComponent, "9.9.9"),
-        "unknown_scenario": (
-            ValidationRecord(PURPOSE_MEASUREMENT, ("acme.lava", "1.0.0"), good.sensor,
-                             tof_observation, "x", "test"),
-            UnknownComponent, "acme.lava"),
-        "no_version": (
-            ValidationRecord(PURPOSE_MEASUREMENT, good.scenario, (TOF, None),
-                             tof_observation, "x", "test"),
-            ContractViolation, "must name an exact version"),
-        "wrong_observation": (
-            ValidationRecord(PURPOSE_MEASUREMENT, good.scenario, good.sensor,
-                             ("acme.tof.recording", "1.0.0"), "x", "test"),
-            ContractViolation, "but the record claims"),
+        "unknown_sensor_version": (replace(good, sensor=(TOF, "9.9.9")),
+                                   UnknownComponent, "9.9.9"),
+        "unknown_scenario": (replace(good, scenario=("acme.lava", "1.0.0")),
+                             UnknownComponent, "acme.lava"),
+        "no_version": (replace(good, sensor=(TOF, None)),
+                       ContractViolation, "must name an exact version"),
+        "wrong_observation": (replace(good, observation=("acme.tof.recording", "1.0.0")),
+                              ContractViolation, "but the record claims"),
         "impossible_capability": (
             _record(registry, PURPOSE_MEASUREMENT, THESIS_SCENARIOS[0], RGB),
             ContractViolation, "cannot ingest"),
-        "unknown_purpose": (
-            ValidationRecord("training", good.scenario, good.sensor, tof_observation,
-                             "x", "test"),
-            ContractViolation, "unknown purpose"),
+        "unknown_purpose": (replace(good, purpose="training"),
+                            ContractViolation, "unknown purpose"),
         "duplicate": (good, ContractViolation, "duplicate record"),
+        "no_definition_hash": (replace(good, sensor_sha256=None),
+                               ContractViolation, "sensor_sha256 must be the sha256"),
+        "abbreviated_definition_hash": (
+            replace(good, scenario_sha256=good.scenario_sha256[:16]),
+            ContractViolation, "scenario_sha256 must be the sha256"),
+        "stale_scenario_definition": (
+            replace(good, scenario_sha256="0" * 64),
+            ContractViolation,
+            re.escape(f"scenario {THESIS_SCENARIOS[0]} 1.0.0 drifted")),
+        "stale_sensor_definition": (
+            replace(good, sensor_sha256="0" * 64),
+            ContractViolation, re.escape(f"sensor {TOF} 1.0.0 drifted")),
+        "observation_fingerprint_contradicts_the_sensor": (
+            replace(good, observation_sha256="0" * 64),
+            ContractViolation, "is not the observation of the validated"),
     }
 
 
 @pytest.mark.parametrize("name", ["unknown_sensor_version", "unknown_scenario",
                                   "no_version", "wrong_observation",
                                   "impossible_capability", "unknown_purpose",
-                                  "duplicate"])
+                                  "duplicate", "no_definition_hash",
+                                  "abbreviated_definition_hash",
+                                  "stale_scenario_definition", "stale_sensor_definition",
+                                  "observation_fingerprint_contradicts_the_sensor"])
 def test_a_bad_validation_record_is_refused_not_skipped(name):
     registry = _registry(FIXTURES)
     record, error, reason = _bad_records(registry)[name]
@@ -606,3 +657,178 @@ def test_building_a_matrix_changes_nothing():
     for item in before[KIND_SCENARIO] + before[KIND_SENSOR]:
         assert item["compatibility"]["assessed"] is False, (
             "the registry never claims compatibility; the matrix does")
+
+
+# ---------------------------------------------------------------------------
+# 8 過期的證據：同一個 id 與版本，定義卻變了
+# ---------------------------------------------------------------------------
+
+
+def _drifted(role: str, component_id: str, version: str) -> str:
+    return re.escape(f"{role} {component_id} {version} drifted")
+
+
+def _swap_first_two_channels(data):
+    channels = data["observation"]["channels"]
+    channels[0], channels[1] = channels[1], channels[0]
+
+
+#: 感測器定義的漂移：id、版本、觀測 schema 的 id 與版本全部不變。
+#: 值是（改法, 觀測定義是否也跟著變）。
+SENSOR_DRIFT = {
+    "channel_unit": (lambda d: d["observation"]["channels"][3].update(unit="um"), True),
+    "channel_order": (_swap_first_two_channels, True),
+    "sampling_interval": (lambda d: d["observation"].update(sampling_interval_s=0.05),
+                          True),
+    "quality_signal": (lambda d: d["quality_signals"][0].update(
+        unit="code", description="vendor status code, remapped"), False),
+    "parameter_bounds": (lambda d: d["parameters"]["fov_deg"].update(maximum=25), False),
+    "device_model": (lambda d: d.update(device_model="VL53L1CB"), False),
+}
+
+#: 情境定義的漂移：id 與版本不變。
+SCENARIO_DRIFT = {
+    "declared_families": lambda d: d["declared_sensor_families"].append(
+        "infrared_camera"),
+    "physics_parameter_unit": lambda d: d["physics"]["parameters"]["fill_level"].update(
+        unit="%", maximum=100),
+    "physics_parameter_bounds": lambda d: d["physics"]["parameters"][
+        "particle_size_mm"].update(maximum=5),
+    "physics_implementation": lambda d: d["physics"].update(implementation="json:dumps"),
+    "category": lambda d: d.update(category="custom"),
+}
+
+
+def _alt_tof_definition(directory: Path, change=None) -> ComponentRegistry:
+    def build(data):
+        _ingest(RESOLVABLE)(data)
+        if change is not None:
+            change(data)
+    return _registry(_variant(directory, "acme_tof_vl53l1x.json", build))
+
+
+def _sand_definition(directory: Path, change=None) -> ComponentRegistry:
+    def build(data):
+        _sand_physics(RESOLVABLE)(data)
+        if change is not None:
+            change(data)
+    return _registry(_variant(directory, "acme_sand.json", build))
+
+
+@pytest.mark.parametrize("drift", sorted(SENSOR_DRIFT))
+def test_a_sensor_that_drifted_under_the_same_version_loses_its_validation(
+        tmp_path, drift):
+    change, observation_changed = SENSOR_DRIFT[drift]
+    scenario = THESIS_SCENARIOS[0]
+    # 定義 A：實作找得到、紀錄成立、到得了 READY —— 下面被擋，擋的就是漂移。
+    registry_a = _alt_tof_definition(tmp_path / "A")
+    records = thesis_validations() + (
+        _record(registry_a, PURPOSE_MEASUREMENT, scenario, ALT_TOF),)
+    assert _matrix(registry_a, PURPOSE_MEASUREMENT, validations=records).cell(
+        scenario, ALT_TOF).status == READY
+
+    # 定義 B：同一個 id、版本、作者、觀測 schema id 與版本，內容改了。
+    registry_b = _alt_tof_definition(tmp_path / "B", change)
+    a = registry_a.get(KIND_SENSOR, ALT_TOF)
+    b = registry_b.get(KIND_SENSOR, ALT_TOF)
+    assert a.identity == b.identity
+    assert (a.observation.schema_id, a.observation.version) == (
+        b.observation.schema_id, b.observation.version)
+    assert a.provenance.sha256 != b.provenance.sha256
+    # B 的實作一樣驗證得過：能擋下 READY 的只剩這筆紀錄。
+    report = ImplementationReport.verify(registry_b)
+    assert report.state(b, "ingest", RESOLVABLE) == (compatibility.VERIFIED, "")
+
+    for purpose in (PURPOSE_MEASUREMENT, PURPOSE_SIMULATION):
+        with pytest.raises(ContractViolation,
+                           match=_drifted("sensor", ALT_TOF, "1.0.0")) as caught:
+            build_matrix(registry_b, purpose=purpose, implementations=report,
+                         validations=records)
+        message = str(caught.value)
+        assert a.provenance.sha256 in message and b.provenance.sha256 in message
+        assert ("changed too" if observation_changed else "is unchanged") in message
+    with pytest.raises(ContractViolation, match=_drifted("sensor", ALT_TOF, "1.0.0")):
+        evaluate_pair(registry_b, scenario, ALT_TOF, purpose=PURPOSE_MEASUREMENT,
+                      implementations=report, validations=records)
+
+    # B 本身不是不能用：為 B 重新驗證之後，才是 READY。
+    revalidated = thesis_validations() + (
+        _record(registry_b, PURPOSE_MEASUREMENT, scenario, ALT_TOF),)
+    assert _matrix(registry_b, PURPOSE_MEASUREMENT, validations=revalidated).cell(
+        scenario, ALT_TOF).status == READY
+
+
+@pytest.mark.parametrize("drift", sorted(SCENARIO_DRIFT))
+def test_a_scenario_that_drifted_under_the_same_version_loses_its_validation(
+        tmp_path, drift):
+    registry_a = _sand_definition(tmp_path / "A")
+    records = thesis_validations() + (_record(registry_a, PURPOSE_SIMULATION, SAND, TOF),)
+    assert _matrix(registry_a, PURPOSE_SIMULATION, validations=records).cell(
+        SAND, TOF).status == READY
+
+    registry_b = _sand_definition(tmp_path / "B", SCENARIO_DRIFT[drift])
+    a = registry_a.get(KIND_SCENARIO, SAND)
+    b = registry_b.get(KIND_SCENARIO, SAND)
+    assert a.identity == b.identity
+    assert a.provenance.sha256 != b.provenance.sha256
+    report = ImplementationReport.verify(registry_b)
+    assert report.state(b, "implementation", b.implementation)[0] == compatibility.VERIFIED
+
+    for purpose in (PURPOSE_SIMULATION, PURPOSE_MEASUREMENT):
+        with pytest.raises(ContractViolation,
+                           match=_drifted("scenario", SAND, "0.1.0")) as caught:
+            build_matrix(registry_b, purpose=purpose, implementations=report,
+                         validations=records)
+        assert a.provenance.sha256 in str(caught.value)
+        assert b.provenance.sha256 in str(caught.value)
+
+    revalidated = thesis_validations() + (
+        _record(registry_b, PURPOSE_SIMULATION, SAND, TOF),)
+    assert _matrix(registry_b, PURPOSE_SIMULATION, validations=revalidated).cell(
+        SAND, TOF).status == READY
+
+
+def test_the_thesis_anchors_do_not_bless_a_changed_builtin(monkeypatch):
+    """碩論錨點是寫死的定義 sha256：內建描述一改，錨點就不替它背書。"""
+    assert _matrix(catalog.builtin_registry(), PURPOSE_MEASUREMENT).cell(
+        THESIS_SCENARIOS[0], TOF).status == READY
+
+    monkeypatch.setitem(sensors._TOF_CHANNEL_UNITS, "sigma_like",
+                        ("um", "surrogate-built ranging uncertainty"))
+    with pytest.raises(ContractViolation, match=_drifted("sensor", TOF, "1.0.0")) as caught:
+        _matrix(catalog.builtin_registry(), PURPOSE_MEASUREMENT)
+    assert "changed too" in str(caught.value)
+
+    monkeypatch.undo()
+    monkeypatch.setitem(scenarios._CATEGORY_BY_CLASS, "Misty", "custom")
+    with pytest.raises(ContractViolation,
+                       match=_drifted("scenario", "pcmef.scenario.misty", "1.0.0")):
+        _matrix(catalog.builtin_registry(), PURPOSE_SIMULATION)
+
+
+def test_an_unchanged_definition_keeps_its_validation(tmp_path):
+    """同一份定義換個檔名、資料夾、縮排與鍵的順序：還是被驗證過的那一個。"""
+    registry_a = _alt_tof_definition(tmp_path / "A")
+    records = thesis_validations() + (
+        _record(registry_a, PURPOSE_MEASUREMENT, THESIS_SCENARIOS[0], ALT_TOF),)
+
+    data = _fixture("acme_tof_vl53l1x.json")
+    _ingest(RESOLVABLE)(data)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "renamed.json").write_text(
+        json.dumps(dict(reversed(list(data.items()))), indent=4, ensure_ascii=False),
+        encoding="utf-8")
+    registry_c = _registry(elsewhere)
+    a = registry_a.get(KIND_SENSOR, ALT_TOF)
+    c = registry_c.get(KIND_SENSOR, ALT_TOF)
+    assert a.provenance.location != c.provenance.location
+    assert a.provenance.sha256 == c.provenance.sha256
+
+    cell = _matrix(registry_c, PURPOSE_MEASUREMENT, validations=records).cell(
+        THESIS_SCENARIOS[0], ALT_TOF)
+    assert cell.status == READY, cell.describe()
+    evidence = dict(cell.reason("validated_pairing").evidence)
+    assert evidence["sensor_sha256"] == c.provenance.sha256
+    assert evidence["scenario_sha256"] == registry_c.get(
+        KIND_SCENARIO, THESIS_SCENARIOS[0]).provenance.sha256

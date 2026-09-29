@@ -3,7 +3,7 @@
 #         pcmef.core.constants.CLASS_ORDER 與 simulation.scenario.MediumPreset
 #         描述碩論的四個情境。**不寫任何東西，也不被任何 stable module 匯入。**
 # 檔案路徑: pcmef/platform/scenarios.py
-# 產生時間: 2026-09-27 10:05 +08:00
+# 產生時間: 2026-09-27 01:38 +08:00（首次提交 d1cf266 的 commit 時間）
 # 版本: v0.1.0
 # 功能說明: Scenario Plugin 的契約（SAI Appendix B、§7.3）：身分、分類、
 #           標籤角色、物理支援（template-backed / plugin-implemented /
