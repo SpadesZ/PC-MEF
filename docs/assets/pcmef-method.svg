@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="864pt" height="374.4pt" viewBox="0 0 864 374.4" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.11.2, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 374.4 
+L 864 374.4 
+L 864 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 25.2 171.36 
+L 252 171.36 
+L 252 86.4 
+L 25.2 86.4 
+z
+" clip-path="url(#p663601d5ef)" style="fill: #ffffff; stroke: #244e70; stroke-width: 1.6; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 298.8 171.36 
+L 561.6 171.36 
+L 561.6 86.4 
+L 298.8 86.4 
+z
+" clip-path="url(#p663601d5ef)" style="fill: #ffffff; stroke: #244e70; stroke-width: 1.6; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 622.8 171.36 
+L 838.8 171.36 
+L 838.8 86.4 
+L 622.8 86.4 
+z
+" clip-path="url(#p663601d5ef)" style="fill: #ffffff; stroke: #244e70; stroke-width: 1.6; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 298.8 315.36 
+L 561.6 315.36 
+L 561.6 234.72 
+L 298.8 234.72 
+z
+" clip-path="url(#p663601d5ef)" style="fill: #ffffff; stroke: #8a5a20; stroke-width: 1.6; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 25.2 315.36 
+L 252 315.36 
+L 252 234.72 
+L 25.2 234.72 
+z
+" clip-path="url(#p663601d5ef)" style="fill: #ffffff; stroke: #4d4d4d; stroke-width: 1.6; stroke-linejoin: miter"/>
+   </g>
+   <g id="line2d_1">
+    <path d="M 561.6 275.04 
+L 730.8 275.04 
+" clip-path="url(#p663601d5ef)" style="fill: none; stroke: #8a5a20; stroke-width: 1.7; stroke-linecap: square"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 17px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #244e70" x="25.2" y="23.04" transform="rotate(-0 25.2 23.04)">PC-MEF  |  From paired sensor evidence to a traceable decision</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #4d4d4d" x="25.2" y="51.84" transform="rotate(-0 25.2 51.84)">Method overview. Calibration is partial; final E2 evaluation is not complete.</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 700; font-size: 12.2px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #244e70" x="36" y="110.449617" transform="rotate(-0 36 110.449617)">Simulation &amp; paired inputs</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(36 136.577906)">Scene geometry, light and media</text>
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(36 153.227906)">RGB image + ToF sensor recording</text>
+   </g>
+   <g id="text_5">
+    <text style="font-weight: 700; font-size: 12.2px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #244e70" x="309.6" y="110.449617" transform="rotate(-0 309.6 110.449617)">Perception, reliability &amp; routing</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(309.6 137.653219)">Two class distributions</text>
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(309.6 153.227906)">Signal quality + sensor disagreement</text>
+   </g>
+   <g id="text_7">
+    <text style="font-weight: 700; font-size: 12.2px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #244e70" x="633.6" y="110.449617" transform="rotate(-0 633.6 110.449617)">Decision &amp; outputs</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(633.6 136.577906)">Class probabilities and label</text>
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(633.6 153.227906)">Decision trace + evaluation report</text>
+   </g>
+   <g id="text_9">
+    <text style="font-weight: 700; font-size: 12.2px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #8a5a20" x="309.6" y="258.769617" transform="rotate(-0 309.6 258.769617)">Evidence arbitration</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(309.6 280.577906)">Configured LLM roles</text>
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(309.6 297.227906)">Escalated cases only</text>
+   </g>
+   <g id="text_11">
+    <text style="font-weight: 700; font-size: 12.2px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #4d4d4d" x="36" y="258.769617" transform="rotate(-0 36 258.769617)">E1: simulation fidelity</text>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(36 281.653219)">Initial vs calibrated simulation</text>
+    <text style="font-size: 11.1px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(36 297.227906)">Separate calibration / held-out data</text>
+   </g>
+   <g id="patch_7">
+    <path d="M 254.002368 129.6 
+Q 275.401823 129.6 294.90062 129.6 
+" style="fill: none; stroke: #244e70; stroke-width: 1.7; stroke-linecap: round"/>
+    <path d="M 290.90062 127.6 
+L 294.90062 129.6 
+L 290.90062 131.6 
+" style="fill: none; stroke: #244e70; stroke-width: 1.7; stroke-linecap: round"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 563.598413 129.6 
+Q 592.200107 129.6 618.901144 129.6 
+" style="fill: none; stroke: #244e70; stroke-width: 1.7; stroke-linecap: round"/>
+    <path d="M 614.901144 127.6 
+L 618.901144 129.6 
+L 614.901144 131.6 
+" style="fill: none; stroke: #244e70; stroke-width: 1.7; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 430.2 173.359336 
+Q 430.2 203.037838 430.2 230.815683 
+" style="fill: none; stroke: #8a5a20; stroke-width: 1.7; stroke-linecap: round"/>
+    <path d="M 432.2 226.815683 
+L 430.2 230.815683 
+L 428.2 226.815683 
+" style="fill: none; stroke: #8a5a20; stroke-width: 1.7; stroke-linecap: round"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 138.6 173.359336 
+Q 138.6 203.037838 138.6 230.815683 
+" style="fill: none; stroke: #4d4d4d; stroke-width: 1.7; stroke-linecap: round"/>
+    <path d="M 140.6 226.815683 
+L 138.6 230.815683 
+L 136.6 226.815683 
+" style="fill: none; stroke: #4d4d4d; stroke-width: 1.7; stroke-linecap: round"/>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; fill: #244e70" transform="translate(567.954961 90.357129)">Standard</text>
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; fill: #244e70" transform="translate(579.904453 102.96)">path</text>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #8a5a20" x="440.64" y="205.2" transform="rotate(-0 440.64 205.2)">Escalate</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(149.76 192.597129)">Compare</text>
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; fill: #4d4d4d" transform="translate(149.76 205.2)">to real data</text>
+   </g>
+   <g id="patch_11">
+    <path d="M 730.8 273.037148 
+Q 730.8 223.199272 730.8 175.262054 
+" style="fill: none; stroke: #8a5a20; stroke-width: 1.7; stroke-linecap: round"/>
+    <path d="M 728.8 179.262054 
+L 730.8 175.262054 
+L 732.8 179.262054 
+" style="fill: none; stroke: #8a5a20; stroke-width: 1.7; stroke-linecap: round"/>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #8a5a20" x="621.36" y="259.92" transform="rotate(-0 621.36 259.92)">Arbitrated evidence</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 10.6px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #4d4d4d" x="25.2" y="352.08" transform="rotate(-0 25.2 352.08)">E2 compares fusion methods on paired synthetic stress cases. No experiment data or performance values are drawn here.</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p663601d5ef">
+   <rect x="0" y="0" width="864" height="374.4"/>
+  </clipPath>
+ </defs>
+</svg>

@@ -3,7 +3,17 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-09-05（第三輪）
+文件摘要更新：2026-10-01。下方研究執行紀錄最後更新：2026-09-05（第三輪）。
+
+---
+
+## Current overview (2026-10-01 documentation check)
+
+- 目前程式包含模擬、成對資料、感知、融合、console、報告與正式執行保護；README 原先的 Batch 1／146 tests／M0 缺資料摘要已過期。
+- 校準仍是 partial；正式 E2 尚未完成。下方 2026-09-05 紀錄明示：真實正式決策迴圈與 real-provider producer trace 尚未驗證。
+- 目前 CLI 建立指令表時會載入 admin 模組；乾淨環境的起步安裝需包含 `.[dev,admin]`。這不代表啟動伺服器。
+- perception 相依是 PyTorch，不是 TensorFlow／scikit-learn。相依以目前 `pyproject.toml` 為準。
+- 下方日期、test counts、工作站環境與阻塞保留為歷史證據，不代表本次文件修改重跑了完整研究驗收。本次只驗證文件所列的本機起步路徑，不開封 final families 36–43。
 
 ---
 
@@ -3708,7 +3718,9 @@ Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的�
 
 ---
 
-## 環境阻塞
+## 環境阻塞（歷史工作站紀錄）
+
+下表保留當時環境；不代表目前套件要求。目前 perception 使用 PyTorch；新環境請依 README 的虛擬環境與 `pyproject.toml` 安裝。
 
 | 項目 | 狀態 | 影響里程碑 |
 |---|---|---|
