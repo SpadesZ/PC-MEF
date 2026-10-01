@@ -9,7 +9,11 @@ python -m pip install -e ".[figures]"
 python docs/assets/draw_method.py
 ```
 
-The script loads no experiment data, model checkpoints, run locks, or provider credentials. Its built-in check rejects labels outside the canvas. Inspect the exported image before publishing a change.
+The script loads no experiment data, model checkpoints, run locks, or provider credentials. Its built-in check requires ASCII-only figure labels and rejects labels outside the canvas or overlapping labels. Inspect the exported image before publishing a change.
+
+## Visual reading guide
+
+The figure uses English throughout. Teal marks paired sensor inputs, blue marks perception and routing, violet marks decision records, and amber marks selective arbitration. Solid arrows show the standard route; dashed amber arrows show the conditional route. Input icons are schematic, not dataset samples or screenshots. The E1 comparison and separate real-data roles remain distinct from the E2 synthetic-stress comparison. No performance values are drawn.
 
 ## Source mapping
 
