@@ -8,7 +8,7 @@ Can physics-calibrated simulation reduce the gap to real sensor data? Can select
 
 [Explore the method](#method-and-experiments) · [Start locally](#quick-start) · [Technical details](#technical-details)
 
-![PC-MEF method: simulation produces paired camera images and ToF readings; models estimate class distributions, reliability checks choose a route, and only escalated cases use evidence arbitration before the decision and report. E1 compares simulation with separate real-data partitions.](docs/assets/pcmef-method.svg)
+<p align="center"><img src="docs/assets/pcmef-method.svg" width="560" alt="Paired RGB and ToF evidence produces two class distributions. Signal checks select standard fusion or escalated arbitration, then record the predicted state and trace."></p>
 
 Method overview, not a result figure. The [figure source and code references](docs/assets/README.md) explain each step.
 

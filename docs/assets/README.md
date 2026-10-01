@@ -13,7 +13,7 @@ The script loads no experiment data, model checkpoints, run locks, or provider c
 
 ## Visual reading guide
 
-The figure uses English throughout. Teal marks paired sensor inputs, blue marks perception and routing, violet marks decision records, and amber marks selective arbitration. Solid arrows show the standard route; dashed amber arrows show the conditional route. Input icons are schematic, not dataset samples or screenshots. The E1 comparison and separate real-data roles remain distinct from the E2 synthetic-stress comparison. No performance values are drawn.
+The figure uses English throughout, with labels of at least 18 points on a compact six-inch canvas. Blue and teal distinguish the paired sensor paths; amber and dashed arrows mark escalated-only arbitration. The main README describes E1, E2 and their separate data roles in text, where they remain readable on a phone. No dataset samples or performance values are drawn.
 
 ## Source mapping
 

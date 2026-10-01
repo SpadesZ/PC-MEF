@@ -1,131 +1,68 @@
 # PC-MEF Research System source maintenance contract
-# 上下游: README 使用本檔產生的 SVG；PNG 是預覽與替代版本。
-# 檔案路徑: docs/assets/draw_method.py
-# 產生時間: 2026-10-01 +08:00
-# 版本: v0.2.0
-# 功能說明: 畫出方法步驟、選擇性仲裁與 E1 資料角色；不讀研究資料。
-# 模組定位: 文件圖稿來源，不參與訓練、校準或正式研究執行。
-# 主要責任:
-#   1. main() 依方法排版步驟與路徑，匯出 SVG/PNG。
-#   2. 檢查文字語言、畫布邊界與重疊。
-# 維護提醒: 修改方法前核對 pipeline.py；不得加入未取得的成果或讀取 final families。
-# 驗證方式:
-#   - python docs/assets/draw_method.py
-# ------------------------------------------------------------
-
+# 檔案路徑：docs/assets/draw_method.py
+# 版本：v0.4；README 方法圖的可編輯來源。
+# 上下游：核對 console/pipeline.py 與 pcmef_orchestrator.py，再匯出 SVG/PNG。
+# 維護提醒：不讀研究資料、不畫成果數值；E1/E2 與資料分割在 README 說明。
+# 驗證方式：python docs/assets/draw_method.py；檢查字體、邊界與文字重疊。
 from pathlib import Path
-
+import re
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
 def main():
-    # ponytail: 固定方法圖，以直接座標排版；方法改變時重排，不建立通用圖表框架。
-    plt.rcParams.update({'font.family': ['DejaVu Sans', 'Arial', 'sans-serif'], 'svg.fonttype': 'none', 'svg.hashsalt': 'pcmef-method-v02'})
-    fig, ax = plt.subplots(figsize=(15, 8.4), dpi=150)
-    fig.patch.set_facecolor('white')
-    ax.set(xlim=(0, 15), ylim=(0, 8.4))
-    ax.axis('off')
+    # ponytail: 單張固定方法圖直接排版；方法變更時重排，不建立通用圖稿框架。
+    plt.rcParams.update({'font.family': ['DejaVu Sans', 'Arial', 'sans-serif'], 'svg.fonttype': 'none', 'svg.hashsalt': 'pcmef-method-v04'})
+    fig, ax = plt.subplots(figsize=(6, 7), dpi=150)
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    ink, muted = '#19334D', '#526475'
-    blue, teal, violet, amber = '#27649B', '#117D85', '#6B56A0', '#98601D'
-    pale_blue, pale_teal, pale_violet, pale_amber = '#EDF4FC', '#ECF8F5', '#F2EFF9', '#FFF4E4'
+    ax.set(xlim=(0, 6), ylim=(0, 7)); ax.axis('off')
+    ink, blue, teal, amber = '#18324B', '#225C96', '#087F83', '#995719'
 
-    def label(x, y, text, size=15, color=ink, weight='normal', ha='left', va='center'):
-        return ax.text(x, y, text, fontsize=size, color=color, weight=weight, ha=ha, va=va, linespacing=1.55)
+    def label(x, y, text, size=18, color=ink, weight='normal'):
+        return ax.text(x, y, text, fontsize=size, color=color, weight=weight, ha='center', va='center', linespacing=1.3)
 
-    def rounded(x, y, w, h, fill, edge, radius=.14, lw=1.6):
-        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f'round,pad=0,rounding_size={radius}', facecolor=fill, edgecolor=edge, linewidth=lw))
+    def box(x, y, w, h, text, fill='#F3F6FA', edge='#B3C5D5', color=ink):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0,rounding_size=.10', facecolor=fill, edgecolor=edge, linewidth=1.4))
+        label(x+w/2, y+h/2, text, color=color)
 
-    def arrow(start, end, color=blue, dashed=False):
-        ax.add_patch(FancyArrowPatch(start, end, arrowstyle='-|>', mutation_scale=15, linewidth=2.1, color=color, linestyle=(0, (4, 3)) if dashed else 'solid'))
+    def arrow(a, b, color=blue, dashed=False):
+        ax.add_patch(FancyArrowPatch(a, b, arrowstyle='-|>', mutation_scale=14, linewidth=1.7, color=color, linestyle='--' if dashed else '-'))
 
-    label(.55, 7.78, 'PC-MEF', 27, ink, 'bold')
-    label(.55, 7.22, 'Camera + depth evidence for liquid-state recognition', 19, muted)
-    rounded(11.48, 7.52, 2.95, .52, '#F3F6F9', '#D6E0E8', .26, 1)
-    label(12.955, 7.78, 'METHOD OVERVIEW', 12, muted, 'bold', ha='center')
-    ax.plot([.55, 14.45], [6.78, 6.78], color='#DAE3EB', lw=1.2)
+    label(3, 6.68, 'Paired sensor evidence', 22, weight='bold')
+    box(.4, 5.73, 5.2, .64, 'Physics-calibrated simulation')
+    arrow((1.55, 5.73), (1.55, 5.32), teal)
+    arrow((4.45, 5.73), (4.45, 5.32), teal)
+    box(.4, 4.43, 2.3, .87, 'RGB image\nRGB model', '#EAF3FC', blue)
+    box(3.3, 4.43, 2.3, .87, 'ToF readings\nToF model', '#E7F4F1', teal)
+    arrow((1.55, 4.43), (1.55, 4.12)); arrow((4.45, 4.43), (4.45, 4.12), teal)
+    box(.4, 3.46, 2.3, .64, 'Class distribution', 'white')
+    box(3.3, 3.46, 2.3, .64, 'Class distribution', 'white')
+    arrow((1.55, 3.46), (2.2, 3.07)); arrow((4.45, 3.46), (3.8, 3.07), teal)
+    box(.4, 2.42, 5.2, .64, 'Check signal quality + disagreement', '#F0F4F8')
+    arrow((1.55, 2.42), (1.55, 1.71))
+    arrow((4.45, 2.42), (4.45, 1.71), amber, True)
+    box(.4, .85, 2.3, .85, 'Standard\nfusion', '#EAF3FC', blue)
+    box(3.3, .85, 2.3, .85, 'Escalated only:\narbitration', '#FFF2DE', amber, amber)
+    arrow((1.55, .85), (2.0, .59)); arrow((4.45, .85), (4.0, .59), amber, True)
+    box(.4, .08, 5.2, .5, 'Predicted state + decision trace', '#E7F4F1', teal)
 
-    stages = [(.55, '01', 'Simulation & inputs', teal), (4.00, '02', 'Perception', blue), (7.55, '03', 'Check & route', blue), (11.25, '04', 'Decision & record', violet)]
-    for x, number, title, color in stages:
-        label(x, 6.25, number, 14, color, 'bold')
-        label(x+.42, 6.25, title, 17, ink, 'bold')
-
-    # 輸入圖示為概念示意，不是資料集圖片或實測曲線。
-    rounded(.65, 4.14, 2.50, 1.59, pale_teal, '#B1D7D3')
-    ax.add_patch(Rectangle((.88, 4.90), .87, .56, facecolor='white', edgecolor=teal, linewidth=1.5))
-    ax.add_patch(Polygon([[.96, 4.96], [1.23, 5.22], [1.43, 5.03], [1.66, 5.24], [1.66, 4.96]], closed=True, facecolor='#AED8D3', edgecolor='none'))
-    ax.add_patch(Circle((1.55, 5.32), .055, facecolor=teal, edgecolor='none'))
-    rounded(2.02, 4.90, .87, .56, 'white', teal, .05, 1.5)
-    for radius in (.10, .18, .25):
-        ax.add_patch(Circle((2.455, 5.18), radius, fill=False, edgecolor=teal, linewidth=1))
-    label(1.315, 4.55, 'RGB', 15, teal, 'bold', ha='center')
-    label(2.455, 4.55, 'ToF', 15, teal, 'bold', ha='center')
-    label(1.90, 3.79, 'Scene, light, media\nand calibration settings', 14, muted, ha='center')
-    arrow((3.15, 4.95), (3.88, 4.95), teal)
-
-    rounded(3.98, 4.93, 2.68, .79, pale_blue, '#A7C2DF')
-    rounded(3.98, 3.91, 2.68, .79, pale_teal, '#B1D7D3')
-    label(5.32, 5.325, 'RGB model', 16, blue, 'bold', ha='center')
-    label(5.32, 4.305, 'ToF model', 16, teal, 'bold', ha='center')
-    ax.plot([6.66, 7.03, 7.03], [5.325, 5.325, 4.95], color=blue, lw=1.8)
-    ax.plot([6.66, 7.03, 7.03], [4.305, 4.305, 4.95], color=teal, lw=1.8)
-    arrow((7.03, 4.95), (7.44, 4.95))
-    label(5.32, 3.46, 'Two class distributions', 14, muted, ha='center')
-
-    ax.add_patch(Polygon([[7.47, 4.95], [8.64, 5.73], [9.81, 4.95], [8.64, 4.17]], closed=True, facecolor=pale_blue, edgecolor=blue, linewidth=1.8))
-    label(8.64, 4.95, 'Route', 17, blue, 'bold', ha='center')
-    label(9.09, 3.78, 'Signal quality\nDisagreement', 14, muted)
-    arrow((9.81, 4.95), (11.04, 4.95))
-    label(10.43, 5.26, 'Standard path', 13, blue, ha='center')
-
-    # 紙張形狀表示輸出類型，不畫虛構機率或成果數值。
-    rounded(11.46, 4.00, 2.90, 1.75, 'white', '#D3CCE6', .08, 1.2)
-    rounded(11.26, 3.85, 2.90, 1.75, pale_violet, violet, .08, 1.7)
-    ax.plot([11.47, 13.91], [5.24, 5.24], color='#D3CCE6', lw=1.2)
-    label(11.49, 4.71, 'Class probabilities\nPredicted state\nDecision trace', 15, ink)
-
-    # 例外路徑用虛線與暖色；一般路徑與選擇性仲裁均保留。
-    arrow((8.64, 4.17), (8.64, 2.98), amber, True)
-    label(9.18, 3.03, 'Escalated cases only', 13, amber)
-    rounded(6.69, 1.64, 3.90, 1.22, pale_amber, amber, .18, 1.7)
-    label(8.64, 2.43, 'Evidence arbitration', 16, amber, 'bold', ha='center')
-    label(8.64, 1.99, 'Configured LLM roles', 14, muted, ha='center')
-    ax.plot([10.59, 12.71, 12.71], [2.25, 2.25, 3.18], color=amber, lw=2.1, linestyle=(0, (4, 3)))
-    arrow((12.71, 3.18), (12.71, 3.85), amber, True)
-    label(11.91, 1.89, 'Arbitrated evidence', 13, amber, ha='center')
-
-    # E1 是獨立比較用途；校準與 held-out 資料角色不合併。
-    ax.plot([1.90, 1.90], [3.30, 2.87], color='#8C9CAC', lw=1.6, linestyle=(0, (3, 3)))
-    rounded(.55, 1.64, 5.70, 1.22, '#F4F7FA', '#C6D2DD', .12, 1.2)
-    label(.77, 2.43, 'E1 / Simulation fidelity', 16, ink, 'bold')
-    label(.77, 1.99, 'Initial vs calibrated; compare with real data', 14, muted)
-    label(.77, 1.16, 'Separate calibration and held-out real recordings', 14, muted)
-
-    ax.plot([.55, 14.45], [.88, .88], color='#DAE3EB', lw=1)
-    label(.55, .62, 'E2: compare fusion methods on paired synthetic stress cases.', 13, muted)
-    label(.55, .27, 'Calibration is partial. Final E2 evaluation is incomplete. Icons are schematic; no measured values are shown.', 12, muted)
-
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    bounds = []
+    fig.canvas.draw(); renderer=fig.canvas.get_renderer(); bounds=[]
     for text in ax.texts:
-        assert text.get_text().isascii(), text.get_text()
-        extent = text.get_window_extent(renderer)
+        assert text.get_fontsize() >= 18
+        assert not re.search(r'[\u3400-\u9fff]', text.get_text())
+        extent=text.get_window_extent(renderer)
         assert fig.bbox.contains(extent.x0, extent.y0) and fig.bbox.contains(extent.x1, extent.y1), text.get_text()
-        for previous, other in bounds:
-            assert not extent.overlaps(other), (previous, text.get_text())
+        for previous, other in bounds: assert not extent.overlaps(other), (previous, text.get_text())
         bounds.append((text.get_text(), extent))
-    out = Path(__file__).resolve().parent
+    out=Path(__file__).resolve().parent
     fig.savefig(out/'pcmef-method.svg', facecolor='white', metadata={'Date': None})
-    svg_path = out/'pcmef-method.svg'
-    svg_path.write_text('\n'.join(line.rstrip() for line in svg_path.read_text(encoding='utf-8').splitlines()) + '\n', encoding='utf-8')
     fig.savefig(out/'pcmef-method.png', dpi=300, facecolor='white')
+    svg=out/'pcmef-method.svg'
+    svg.write_text('\n'.join(line.rstrip() for line in svg.read_text(encoding='utf-8').splitlines())+'\n',encoding='utf-8')
     plt.close(fig)
-    print('PASS: English-only method figure; no label overlap or clipping; SVG and PNG exported.')
+    print('PASS: source-linked method; English labels >=18pt; no clipping or label overlap; SVG/PNG exported.')
 
 
 if __name__ == '__main__':
