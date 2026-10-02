@@ -34,7 +34,7 @@ The four classes are **Bubbly, Empty, Misty, and Water-filled**. Private recordi
 On Windows with Python 3.10 installed:
 
 ```powershell
-git clone --branch integration/main-candidate https://github.com/SpadesZ/PC-MEF.git
+git clone https://github.com/SpadesZ/PC-MEF.git
 cd PC-MEF
 py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
