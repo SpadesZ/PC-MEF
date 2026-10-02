@@ -3,7 +3,34 @@
 本檔是進度與交接的唯一真相來源。聊天訊息裡的說明不算完成。
 刻意不另開 HANDOFF 檔：兩份文件必然漂移，屆時沒人知道該信哪一份。
 
-最後更新：2026-09-05（第三輪）
+文件摘要更新：2026-10-02（integration/main-candidate）。下方研究執行紀錄最後更新：2026-09-05（第三輪）。平台實作與邊界另見 `PC-MEF_SAI_Platformization.md` v0.9.1 §51–53。
+
+---
+
+## Current overview (2026-10-02 integration check)
+
+- 目前程式包含模擬、成對資料、感知、融合、console、報告與正式執行保護；README 原先的 Batch 1／146 tests／M0 缺資料摘要已過期。
+- 校準仍是 partial；正式 E2 尚未完成。下方 2026-09-05 紀錄明示：真實正式決策迴圈與 real-provider producer trace 尚未驗證。
+- 目前 CLI 建立指令表時會載入 admin 模組；乾淨環境的起步安裝需包含 `.[dev,admin]`。這不代表啟動伺服器。
+- perception 相依是 PyTorch，不是 TensorFlow／scikit-learn。相依以目前 `pyproject.toml` 為準。
+- Phase 3 已完成 versioned Scenario Plugin / Sensor Adapter registry 與 Sensor × Scenario 相容性判斷層；驗證紀錄綁定被驗證的確切定義。Wizard、相容性前端、IR／另一顆 ToF 的正式 adapter、`artifacts/` 與 Evidence Contract 尚未完成。註冊、實作存在與科學相容是三個不同判定。
+- 下方日期、test counts、工作站環境與阻塞保留為歷史證據，不能代替 fresh clone 的本次驗證；本次整合不補造未進版控的研究 locks，不開封 final families 36–43。
+
+## Main candidate integration（2026-10-02）
+
+`integration/main-candidate` 以 phase3 `5d08300` 為基底，使用 `--no-ff` 合併現行 presentation `6207cd5`。兩個基準已分別由 `pre-main-phase3-20261002` 與 `pre-main-current-default-20261002` 保留。沒有 merge conflict；程式、測試、科研設定與 freeze metadata 保持 phase3 內容，保留現行 README 第一屏與方法圖。default branch 尚未變更，舊分支保留。
+
+### 本次驗證邊界
+
+- 本機 Python 3.10 的 `--help`、`version`、`config check` 均 exit 0；設定檢查顯示 `All config values are resolved.`。這不代表研究 gate 通過。
+- Windows 全量測試無法跑完：既有 `pcmef/experiments/run_claim.py::_process_alive()` 使用 `os.kill(pid, 0)`，但 Windows 的 signal `0` 是 `CTRL_C_EVENT`，會送出中斷而非只查詢存活；測試以自身 pid 查存活時因此中斷。即使 exit code 為 0，沒有完整 JUnit 與結束摘要也不得算 PASS。本次未修改此實作。
+- fresh clone 沒有未進版控的 PFC-001 locks 與部分研究資料，因此校準、held-out、pipeline 與 formal preflight 相關測試會失敗或 error。沒有從其他工作站補入資料，也沒有修改測試或科研參數來取得綠燈。
+- Windows repo integrity 基準：1474 passed、2 failed。失效引用為 `pcmef/experiments/calibration_first_access.py` → 不存在的 `tests/unit/test_calibration_first_access.py`，以及 `tests/e1/test_metrics.py` → clone 沒有的輸出檔 `tests/e1_metrics.xml`。兩項保留並回報，不補造測試或輸出檔。
+- Linux 全量基準：4119 tests，4013 passed、60 failed、16 errors、31 skipped（exit 1）。使用既有 `pcmef-research:local` 映像的 Python 3.10.21，repo 唯讀掛載；僅在臨時容器補齊已宣告的 `figures` 相依，測試期間無外部網路。這是 clone 的程式驗證，不是 Final E2 或科研結果驗收。
+- 候選合併工作樹已在同一 Linux 環境重跑全量：4013 passed、60 failed、16 errors、31 skipped（exit 1）。JUnit 的 4119 個 testcase 與 phase3 基準逐項同狀態，failure/error/skip 集合無新增、無移除。Windows repo integrity 另行重跑：1474 passed、2 failed（exit 1），1476 個 testcase 同樣逐項與基準一致。這證明本次文件整合未新增測試退步，**不是全綠或完整研究驗收通過**。
+- README／方法圖來源頁的 31 個連結與圖片引用均指向存在的檔案；CLI 起步檢查成功。README 的 Quick Start 指向候選分支，舊 delta 文件連結改指向目前的 SAI。core、tests、科研設定、data／freeze metadata 仍與 phase3 一致，方法圖與圖源仍與現行 presentation 一致。
+
+本機原始 log、JUnit 與 exit code 位於 `.git/integration-audit-20261002/`，不進版控。SAI §51.3 的工作站歷史數量不作為本次 PASS 證據。
 
 ---
 
@@ -3708,7 +3735,9 @@ Perception 訓練不受影響：依 SRC-PLAN §3.1，`perception_train` 用的�
 
 ---
 
-## 環境阻塞
+## 環境阻塞（歷史工作站紀錄）
+
+下表保留當時環境；不代表目前套件要求。目前 perception 使用 PyTorch；新環境請依 README 的虛擬環境與 `pyproject.toml` 安裝。
 
 | 項目 | 狀態 | 影響里程碑 |
 |---|---|---|
